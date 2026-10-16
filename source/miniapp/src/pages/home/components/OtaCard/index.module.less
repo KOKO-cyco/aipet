@@ -1,0 +1,54 @@
+/* OTA firmware update card.
+   rpx units + --app-* vars, follows IDE theme. */
+
+.otaCard {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--app-M4, #ff7a45) 10%, var(--app-B1, #ffffff)) 0%,
+    var(--app-B1, #ffffff) 60%
+  );
+  border: 2rpx solid color-mix(in srgb, var(--app-M4, #ff7a45) 22%, transparent);
+  border-radius: 24rpx;
+  padding: 28rpx;
+  margin-top: 16rpx;
+  box-shadow: 0 4rpx 16rpx color-mix(in srgb, var(--app-T1, #1a1a1a) 4%, transparent);
+}
+.otaTitle {
+  font-size: 30rpx;
+  font-weight: 700;
+  color: var(--app-T1, #1a1a1a);
+  letter-spacing: 0.2rpx;
+}
+.otaMeta {
+  display: block;
+  font-size: 24rpx;
+  color: var(--app-T3, #999999);
+  margin-top: 8rpx;
+}
+.otaProgressBar {
+  height: 14rpx;
+  border-radius: 7rpx;
+  background: var(--app-B2, #f4f5f7);
+  overflow: hidden;
+  margin-top: 20rpx;
+}
+.otaProgressFill {
+  height: 100%;
+  border-radius: 7rpx;
+  background: linear-gradient(90deg, var(--app-M4, #ff7a45) 0%, #ff9f6e 100%);
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.otaBtn {
+  margin-top: 22rpx;
+  height: 88rpx;
+  line-height: 88rpx;
+  border-radius: 18rpx;
+  background: linear-gradient(135deg, var(--app-M4, #ff7a45) 0%, #ff9f6e 100%);
+  color: #ffffff !important;
+  font-size: 28rpx;
+  font-weight: 700;
+  box-shadow: 0 8rpx 20rpx color-mix(in srgb, var(--app-M4, #ff7a45) 32%, transparent);
+}
+.otaBtnDisabled {
+  opacity: 0.6;
+}

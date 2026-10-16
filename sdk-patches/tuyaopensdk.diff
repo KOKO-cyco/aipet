@@ -1,0 +1,3845 @@
+diff --git a/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_board.c b/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_board.c
+index 1da60cf..9d37603 100755
+--- a/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_board.c
++++ b/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_board.c
+@@ -74,7 +74,20 @@ static OPERATE_RET __board_register_button(void)
+ {
+     OPERATE_RET rt = OPRT_OK;
+ 
+-#if defined(BUTTON_NAME)
++    /* 本工程不让 SDK 注册这颗按键。
++     *
++     * 板载 P12 就是 BOARD_BUTTON_PIN(GPIO12)，而应用的 app_key.c 已经把它当
++     * "返回键"在轮询（INPUT + PULLUP）。再注册一份就变成**两个主人**：
++     *   - tdd_button 用的是 BUTTON_IRQ_MODE + 按 active level 反推的 PULLDOWN
++     *     （见 tdd_button_gpio.c:97），AI 页面进来时 tdl_button_create() 还会再
++     *     tkl_gpio_init() 一次 ⇒ 引脚被改成下拉，app_key 的长按判定偶发失效；
++     *   - 长按在 AI 栈里会走 ai_mode_switch_next()（切模式 + 写 KV + 放提示音），
++     *     和应用"长按退出页面"抢同一时刻 ⇒ 偶发卡死、退不出去。
++     *
++     * 现在 P12 只归应用：短按 = 打断 AI 播报，长按 = 退出角色页。
++     * 要恢复 SDK 自带按键（单击打断 / 长按切模式），把下面这行的 BOARD_ENABLE_SDK_BUTTON
++     * 定义出来即可（本工程任何地方都没有定义它）。 */
++#if defined(BUTTON_NAME) && defined(BOARD_ENABLE_SDK_BUTTON)
+     BUTTON_GPIO_CFG_T button_hw_cfg = {
+         .pin   = BOARD_BUTTON_PIN,
+         .level = BOARD_BUTTON_ACTIVE_LV,
+diff --git a/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_ex_module.c b/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_ex_module.c
+index b95880c..bcd39b8 100644
+--- a/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_ex_module.c
++++ b/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_ex_module.c
+@@ -253,11 +253,36 @@ static OPERATE_RET __board_register_printer(void)
+ #endif
+ 
+ 
++/* ============================================================================
++ * aipet 临时开关（2026-10-16）—— **排查摄像头用，验证完改回 0**
++ * ============================================================================
++ *
++ * 为什么需要它：aipet 的摄像头（GC2145，SCCB 走 P13/P15）在真机上一直不应答，
++ * 而 **P51** 在板级是 `BOARD_CAMERA_RST_PIN`（DVP_RST），在平台的默认 GPIO 表
++ * （`middleware/soc/bk7258_ap/soc/gpio_map.h`）里却是 `GPIO_DEV_LCD_G1`。
++ * 要验证"是不是 LCD 把它抢了"，就必须让 LCD 彻底不初始化。
++ *
++ * 为什么不能在 app_default.config 里关：`ENABLE_LIBLVGL` 会 `select ENABLE_DISPLAY`
++ * （见 src/liblvgl/Kconfig:3），而 aipet 整个 UI 都是 LVGL —— 关不掉。
++ * 所以只能在这儿把注册跳过去。
++ *
++ * 影响：没有屏、没有触摸。aipet 那边摄像头测试跑完会停住不再往下启动
++ * （见 source/embedded/src/tests/app_cam_test.c 和 tuya_app_main.c）。
++ */
++#define AIPET_SKIP_DISPLAY      0
++
+ OPERATE_RET board_register_ex_module(void)
+ {
+     OPERATE_RET rt = OPRT_OK;
+ 
++#if !AIPET_SKIP_DISPLAY
+     TUYA_CALL_ERR_RETURN(__board_register_display());
++#else
++    PR_WARN("[board] aipet: 跳过 LCD/触摸注册（AIPET_SKIP_DISPLAY=1，摄像头排查用）");
++    /* 取个地址当"用过" —— 否则 -Werror=unused-function 直接编不过。
++     * 改回 0 之后这一行就没用了，跟着那段 #if 一起删。 */
++    (void)__board_register_display;
++#endif
+ 
+     TUYA_CALL_ERR_RETURN(__board_register_camera());
+ 
+diff --git a/src/ai_components/ai_agent/src/ai_agent.c b/src/ai_components/ai_agent/src/ai_agent.c
+index 529ebec..f444b75 100755
+--- a/src/ai_components/ai_agent/src/ai_agent.c
++++ b/src/ai_components/ai_agent/src/ai_agent.c
+@@ -62,6 +62,24 @@ OPERATE_RET __ai_agent_event_cb(AI_EVENT_TYPE type, AI_PACKET_PT ptype, AI_EVENT
+ {
+     PR_DEBUG("ai agent -> recv event type: %d packet_tp:%d", type, ptype);
+ 
++    /* [probe] 这四个事件决定 TTS 播放的生命周期，用 NOTICE 打出来。
++     * CHAT_BREAK 是运行期唯一会清 __s_tts_play_flag 的路径（经
++     * ai_audio_player_stop(FG) -> player STOPPED），一旦云端误判打断，
++     * 之后到达的音频会被静默丢弃，听感就是"播到一半突然没声，等很久才继续"。
++     * SERVER_VAD 一起打出来，便于区分是云端 VAD 误触发还是真插话。 */
++#ifndef AI_VOICE_TRACE
++#define AI_VOICE_TRACE 0
++#endif
++#if AI_VOICE_TRACE
++    if (AI_EVENT_CHAT_BREAK == type || AI_EVENT_SERVER_VAD == type) {
++        PR_NOTICE("[probe] ai agent evt %s  packet_tp=%d",
++                  (AI_EVENT_CHAT_BREAK == type) ? "CHAT_BREAK" : "SERVER_VAD", (int)ptype);
++    } else if ((AI_EVENT_START == type || AI_EVENT_END == type) && (AI_PT_AUDIO == ptype)) {
++        PR_NOTICE("[probe] ai agent evt %s AUDIO  codec=%d",
++                  (AI_EVENT_START == type) ? "START" : "END", (int)__s_audio_codec_type);
++    }
++#endif
++
+     if (AI_EVENT_START == type) {
+         if (AI_PT_AUDIO == ptype) {
+ #if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
+diff --git a/src/ai_components/ai_audio/src/ai_audio_input.c b/src/ai_components/ai_audio/src/ai_audio_input.c
+index d80da7b..5ac409c 100755
+--- a/src/ai_components/ai_audio/src/ai_audio_input.c
++++ b/src/ai_components/ai_audio/src/ai_audio_input.c
+@@ -100,6 +100,19 @@ static OPERATE_RET __audio_slice_check_and_send(bool *more_data)
+ */
+ static void __audio_frame_put(TDL_AUDIO_FRAME_FORMAT_E type, TDL_AUDIO_STATUS_E status, uint8_t *data, uint32_t data_len)
+ {
++    /* [probe] mic 帧到达 AI 录音层的计数（每 100 帧 = 2s 一条）。
++     * rec=NULL 或 en=0 还在打 = 帧在流但被丢弃，就是 enable/生命周期问题。 */
++#ifndef AI_VOICE_TRACE
++#define AI_VOICE_TRACE 0
++#endif
++#if AI_VOICE_TRACE
++    static uint32_t s_put_cnt = 0;
++    if ((++s_put_cnt % 100) == 0) {
++        PR_NOTICE("[probe] frame_put=%u rec=%p en=%d", (unsigned)s_put_cnt,
++                  sg_recorder, (sg_recorder ? (int)sg_recorder->enable : -1));
++    }
++#endif
++
+     /* Microphone disabled? */
+     if (sg_recorder == NULL || !sg_recorder->enable)
+         return;
+@@ -143,9 +156,11 @@ static void __audio_frame_put(TDL_AUDIO_FRAME_FORMAT_E type, TDL_AUDIO_STATUS_E
+ static void __update_vad_flag(AI_AUDIO_VAD_STATE_E flag)
+ {
+     PR_DEBUG("audio input -> vad stat change to flag %d", flag);
+-    if (sg_recorder->wakeup_flag) {
+-        tal_event_publish(EVENT_AUDIO_VAD, (void*)flag);
+-    }
++    /* Publish unconditionally: in free (voice-trigger) mode the session is
++     * woken by speech while not yet "wakeup", so IDLE-state VAD events must
++     * reach the mode handler. The only subscriber is the AI chat stack
++     * itself (subscribed in ai_chat_init, unsubscribed in ai_chat_deinit). */
++    tal_event_publish(EVENT_AUDIO_VAD, (void*)flag);
+ }
+ 
+ /**
+@@ -158,14 +173,12 @@ static void __record_task(void *arg)
+     bool more_data = false;
+ 
+     while(sg_recorder->vad_task && tal_thread_get_state(sg_recorder->vad_task) == THREAD_STATE_RUNNING) {
+-        /* Microphone disabled or not wake-up, don't need to send VAD stat change */
+-        if (!sg_recorder->enable || !sg_recorder->wakeup_flag) {
++        /* Microphone disabled? */
++        if (!sg_recorder->enable) {
+            tal_system_sleep(10);
+ 		   continue;
+         }
+ 
+-        __audio_slice_check_and_send(&more_data);
+-
+         /* Manual mode don't need send VAD stat change */
+         if (sg_recorder->vad_mode == AI_AUDIO_VAD_AUTO) {
+             AI_AUDIO_VAD_STATE_E stat = (tkl_vad_get_status() == TKL_VAD_STATUS_SPEECH) ?\
+@@ -177,6 +190,15 @@ static void __record_task(void *arg)
+                 __update_vad_flag(sg_recorder->vad_flag);
+             }
+         }
++
++        /* Not woken yet: keep polling VAD above (so speech itself can wake
++         * the session in free mode), but do not forward audio slices. */
++        if (!sg_recorder->wakeup_flag) {
++           tal_system_sleep(10);
++		   continue;
++        }
++
++        __audio_slice_check_and_send(&more_data);
+     }
+ }
+ 
+@@ -416,15 +438,21 @@ OPERATE_RET ai_audio_input_reset(void)
+     //sg_recorder->vad_flag = AI_AUDIO_VAD_STOP;
+ 
+     if (AI_AUDIO_VAD_AUTO == sg_recorder->vad_mode) {
+-        PR_NOTICE("audio input -> vad stop!");
+-        tkl_vad_stop();
+-        tkl_vad_start();
+-        PR_NOTICE("audio input -> vad start!");
++        /* 用 tkl_vad_restart()（由 AEC 线程在帧边界执行）而不是裸的
++         * stop()+start()：后者会和正在跑的 rnn_vad_process() 并发操作同一份
++         * VAD 内部状态，跑几次之后 VAD 会卡成"永远无语音"，只能重启音频管线
++         * 才恢复 —— 表现就是"聊着聊着停一会儿再说话就没反应了"。 */
++        PR_NOTICE("audio input -> vad restart!");
++        tkl_vad_restart();
+     }
+ 
+     return OPRT_OK;
+ }
+ 
++/* 自愈阶梯（idle 期间定时重挂采集/VAD 链路）先摘掉：它是"兜底"，而每次唤醒都会
++ * 走上面那条 tkl_vad_restart() 才是一线修复。等一线修复在板上验证过再决定要不要
++ * 把兜底放回来 —— 备档在 .workbuddy/parked/问题1-采集链路自愈-sdk.patch。 */
++
+ /**
+ @brief Set wake-up state
+ @param is_wakeup Wake-up flag
+diff --git a/src/ai_components/ai_audio/src/ai_audio_player.c b/src/ai_components/ai_audio/src/ai_audio_player.c
+index 01e6a0e..56959f8 100755
+--- a/src/ai_components/ai_audio/src/ai_audio_player.c
++++ b/src/ai_components/ai_audio/src/ai_audio_player.c
+@@ -49,6 +49,30 @@ static AI_PLAYLIST_HANDLE __s_tone_playlist = NULL;
+ static AI_PLAYER_HANDLE __s_music_player = NULL;
+ static AI_PLAYLIST_HANDLE __s_music_playlist = NULL;
+ static AI_PLAYER_ALERT_CUSTOM_CB __s_alert_custom_cb = NULL;
++
++/* [probe] 下行 TTS 音频流探针（此前所有探针都在上行，无法定位"播到一半静默"）。
++ * rx_pkt/rx_bytes 增长  = 云端仍在供数 -> 问题在设备侧（门控/播放器）
++ * rx GAP 报警           = 云端断供     -> 问题在网络/云侧
++ * DROPPED 报警          = 数据到了但 __s_tts_play_flag=false，被静默丢弃（关键嫌疑）
++ * play_flag=false       = 播放器已 STOPPED（只有 tuya_ai_player_stop 会置 STOPPED） */
++static uint32_t __s_probe_rx_pkt     = 0;
++static uint32_t __s_probe_rx_bytes   = 0;
++static uint32_t __s_probe_rx_last_ms = 0;
++static uint32_t __s_probe_rx_maxgap  = 0;
++static uint32_t __s_probe_drop_pkt   = 0;
++static uint32_t __s_probe_start_cnt  = 0;
++static uint32_t __s_probe_stop_cnt   = 0;
++
++/* 探针总开关（默认关）：0 = 不打印任何 [probe]，1 = 打开。
++ * 本文件所有下行 TTS 探针都走 AI_PROBE_LOG，改这一处即可整体开关。 */
++#ifndef AI_VOICE_TRACE
++#define AI_VOICE_TRACE 0
++#endif
++#if AI_VOICE_TRACE
++#define AI_PROBE_LOG(...)   PR_NOTICE(__VA_ARGS__)
++#else
++#define AI_PROBE_LOG(...)   ((void)0)
++#endif
+ /***********************************************************
+ ***********************function define**********************
+ ***********************************************************/
+@@ -174,6 +198,8 @@ static OPERATE_RET __player_event(void *data)
+         /* If TTS play stop, reset play flag */
+         if(event->handle == __s_tone_player && __s_tts_play_flag) {
+             __s_tts_play_flag = FALSE;
++            AI_PROBE_LOG("[probe] tts play_flag -> FALSE (tone player STOPPED)  rx_pkt=%u bytes=%u",
++                      __s_probe_rx_pkt, __s_probe_rx_bytes);
+         }
+     }
+     else if (event->state == AI_PLAYER_PLAYING) {
+@@ -380,7 +406,14 @@ OPERATE_RET ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_STATE_E state, AI_AUDIO
+     
+     switch(state) {
+     case AI_AUDIO_PLAYER_TTS_START:
+-        PR_DEBUG("audio player -> tts stream start");
++        __s_probe_start_cnt++;
++        AI_PROBE_LOG("[probe] tts stream START #%u  prev_play_flag=%d",
++                  __s_probe_start_cnt, __s_tts_play_flag);
++        __s_probe_rx_pkt     = 0;
++        __s_probe_rx_bytes   = 0;
++        __s_probe_rx_last_ms = 0;
++        __s_probe_rx_maxgap  = 0;
++        __s_probe_drop_pkt   = 0;
+         __s_tts_play_flag = TRUE;
+         ai_user_event_notify(AI_USER_EVT_TTS_PRE, NULL);
+         TUYA_CALL_ERR_LOG(tuya_ai_playlist_clear(__s_tone_playlist));
+@@ -388,19 +421,55 @@ OPERATE_RET ai_audio_play_tts_stream(AI_AUDIO_PLAYER_TTS_STATE_E state, AI_AUDIO
+         ai_user_event_notify(AI_USER_EVT_TTS_START, NULL);
+         break;
+     case AI_AUDIO_PLAYER_TTS_DATA:
+-        // PR_DEBUG("audio player -> tts stream data %d", len);        
+-        if (data && len > 0 && __s_tts_play_flag) {
+-            TUYA_CALL_ERR_LOG(tuya_ai_player_feed(__s_tone_player, (uint8_t *)data, len));
++        {
++            uint32_t now = tal_system_get_millisecond();
++
++            if (__s_probe_rx_last_ms != 0) {
++                uint32_t gap = now - __s_probe_rx_last_ms;
++                if (gap > __s_probe_rx_maxgap) {
++                    __s_probe_rx_maxgap = gap;
++                }
++                /* 断供报警：静默就是从"云端不再送包"开始的 */
++                if (gap > 1000) {
++                    AI_PROBE_LOG("[probe] tts rx GAP %ums  pkt=%u bytes=%u play_flag=%d",
++                              gap, __s_probe_rx_pkt, __s_probe_rx_bytes, __s_tts_play_flag);
++                }
++            }
++            __s_probe_rx_last_ms = now;
++            __s_probe_rx_pkt++;
++            if (len > 0) {
++                __s_probe_rx_bytes += (uint32_t)len;
++            }
++
++            if ((__s_probe_rx_pkt % 100) == 0) {
++                AI_PROBE_LOG("[probe] tts rx pkt=%u bytes=%u maxgap=%ums play_flag=%d drop=%u",
++                          __s_probe_rx_pkt, __s_probe_rx_bytes, __s_probe_rx_maxgap,
++                          __s_tts_play_flag, __s_probe_drop_pkt);
++            }
++
++            if (data && len > 0 && __s_tts_play_flag) {
++                TUYA_CALL_ERR_LOG(tuya_ai_player_feed(__s_tone_player, (uint8_t *)data, len));
++            } else if (data && len > 0 && false == __s_tts_play_flag) {
++                /* 流还没结束（没收到 TTS_STOP/ABORT），门控却被播放器 STOPPED 关掉了
++                 * -> 这一段数据被静默丢弃，听感就是"播到一半没声了" */
++                __s_probe_drop_pkt++;
++                AI_PROBE_LOG("[probe] tts rx DROPPED len=%d  play_flag=false total_drop=%u",
++                          len, __s_probe_drop_pkt);
++            }
+         }
+         ai_user_event_notify(AI_USER_EVT_TTS_DATA, NULL);
+         break;
+     case AI_AUDIO_PLAYER_TTS_STOP:
+-        PR_DEBUG("audio player -> tts stream stop");
++        __s_probe_stop_cnt++;
++        AI_PROBE_LOG("[probe] tts stream STOP  pkt=%u bytes=%u maxgap=%ums drop=%u",
++                  __s_probe_rx_pkt, __s_probe_rx_bytes, __s_probe_rx_maxgap, __s_probe_drop_pkt);
+         TUYA_CALL_ERR_LOG(tuya_ai_player_feed(__s_tone_player, NULL, 0));
+         ai_user_event_notify(AI_USER_EVT_TTS_STOP, NULL);
+         break;
+     case AI_AUDIO_PLAYER_TTS_ABORT:
+-        PR_DEBUG("audio player -> tts stream abort");
++        AI_PROBE_LOG("[probe] tts stream ABORT  pkt=%u bytes=%u maxgap=%ums drop=%u play_flag=%d",
++                  __s_probe_rx_pkt, __s_probe_rx_bytes, __s_probe_rx_maxgap,
++                  __s_probe_drop_pkt, __s_tts_play_flag);
+         TUYA_CALL_ERR_LOG(tuya_ai_player_feed(__s_tone_player, NULL, 0));
+         ai_user_event_notify(AI_USER_EVT_TTS_ABORT, NULL);
+         break;
+@@ -441,7 +510,9 @@ OPERATE_RET ai_audio_player_stop(AI_AUDIO_PLAYER_TYPE_E type)
+ {
+     OPERATE_RET rt = OPRT_OK;
+ 
+-    PR_DEBUG("audio player -> stop all player");
++    /* [probe] 谁在主动停播放器？type: FG=0 BG=1 ALL=2 */
++    AI_PROBE_LOG("[probe] ai_audio_player_stop type=%d  tts_play_flag=%d rx_pkt=%u",
++              (int)type, __s_tts_play_flag, __s_probe_rx_pkt);
+ 
+     switch (type)
+     {
+diff --git a/src/ai_components/ai_main/include/ai_chat_main.h b/src/ai_components/ai_main/include/ai_chat_main.h
+index 96a9e53..e25608b 100755
+--- a/src/ai_components/ai_main/include/ai_chat_main.h
++++ b/src/ai_components/ai_main/include/ai_chat_main.h
+@@ -87,6 +87,12 @@ typedef struct {
+ */
+ OPERATE_RET ai_chat_init(AI_CHAT_MODE_CFG_T *cfg);
+ 
++/**
++@brief Deinitialize AI chat module
++@return OPERATE_RET Operation result
++*/
++OPERATE_RET ai_chat_deinit(void);
++
+ /**
+ @brief Set chat volume
+ @param volume Volume value (0-100)
+diff --git a/src/ai_components/ai_main/src/ai_chat_main.c b/src/ai_components/ai_main/src/ai_chat_main.c
+index fd759e0..70d5704 100755
+--- a/src/ai_components/ai_main/src/ai_chat_main.c
++++ b/src/ai_components/ai_main/src/ai_chat_main.c
+@@ -31,6 +31,7 @@
+ #include "ai_agent.h"
+ #include "ai_manage_mode.h"
+ #include "ai_chat_main.h"
++#include "tuya_iot.h"
+ /***********************************************************
+ ************************macro define************************
+ ***********************************************************/
+@@ -39,8 +40,9 @@
+ #define TUYA_AI_CHAT_PAR       "ty_ai_chat_par"
+ 
+ #define AI_AUDIO_SLICE_TIME         80     
+-#define AI_AUDIO_VAD_ACTIVE_TIME    200 
+-#define AI_AUDIO_VAD_OFF_TIME       1000
++#define AI_AUDIO_VAD_ACTIVE_TIME    200
++/* VirtuaMate port: end a turn after 2s of silence (was 1s). */
++#define AI_AUDIO_VAD_OFF_TIME       2000
+ /***********************************************************
+ ***********************typedef define***********************
+ ***********************************************************/
+@@ -53,6 +55,29 @@ static THREAD_HANDLE          sg_ai_chat_mode_task = NULL;
+ static AI_CHAT_MODE_E         sg_ai_default_mode = AI_CHAT_MODE_HOLD;
+ static int                    sg_ai_default_vol = 70;
+ static bool                   sg_ai_agent_inited = false;
++static bool                   sg_ai_chat_inited = false;
++
++/* Has EVENT_MQTT_CONNECTED fired at least once since boot? That event is a
++ * one-shot, so an application that only brings the voice stack up later (the
++ * app calls ai_chat_init() when the user opens the AI page, and tears it down
++ * again on the way out) will never see it: the agent / chat-mode bring-up that
++ * normally rides on it would be skipped, leaving sg_ai_agent_inited false (no
++ * audio ever reaches the cloud) and the recorder stuck on the
++ * AI_AUDIO_VAD_MANUAL default (voice can never wake it).
++ *
++ * Unlike sg_ai_agent_inited this flag is NOT cleared by ai_chat_deinit(): once
++ * the cloud connection has come up it stays up for the rest of the boot, so a
++ * later ai_chat_init() has to replay the missing bring-up itself. */
++static bool                   sg_ai_mqtt_seen = false;
++
++/* cycle-safety flags (mirrors the upstream SDK snapshot): mode handlers and the
++ * EVENT_MQTT_CONNECTED subscription are registered exactly once and survive a
++ * deinit/init cycle. Without these, a second ai_chat_init() re-runs
++ * __ai_chat_mode_register() and ai_mode_register() rejects the already-registered
++ * mode with "chat mode N has been registered", killing the whole chat pipeline
++ * (wake word stops working). */
++static bool                   sg_ai_mode_registered = false;
++static bool                   sg_mqtt_subscribed = false;
+ 
+ #if defined(ENABLE_BUTTON) && (ENABLE_BUTTON == 1)
+ static TDL_BUTTON_HANDLE sg_button_hdl = NULL;
+@@ -192,6 +217,39 @@ static void __ai_chat_mode_task(void *args)
+ }
+ 
+ #if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
++/**
++@brief Push one mic frame to the AI session, without log flooding
++@param data Pointer to audio data
++@param datalen Audio data length
++@return None
++
++The mic frame rate is 50/s (20ms frames), so this is called 50 times a second
++for as long as the recorder runs. While no AI session is up the SDK drops the
++frame and answers OPRT_COM_ERROR -- a normal transient (AI client not RUNNING
++yet, or no session started), not a failure. Logging it per frame put 50 lines/s
++on the console: that buries every other log and costs real time inside the
++record task (a line is ~5ms at 115200). Report it only when the code changes or
++every 5s, which is enough to see it in a log without drowning in it.
++*/
++static void __ai_mic_upload(uint8_t *data, uint16_t datalen)
++{
++    OPERATE_RET rt  = OPRT_OK;
++    uint64_t    ts  = tal_system_get_millisecond();
++
++    rt = tuya_ai_audio_input(ts, ts, data, datalen, datalen);
++    if (OPRT_OK != rt) {
++        static uint32_t    s_last_ms = 0;
++        static OPERATE_RET s_last_rt = OPRT_OK;
++        uint32_t now = (uint32_t)tal_system_get_millisecond();
++
++        if ((rt != s_last_rt) || ((now - s_last_ms) >= 5000U)) {
++            s_last_ms = now;
++            s_last_rt = rt;
++            PR_ERR("mic upload dropped, ret:%d (no ai session up?)", rt);
++        }
++    }
++}
++
+ /**
+ @brief Audio output callback function
+ @param data Pointer to audio data
+@@ -200,25 +258,19 @@ static void __ai_chat_mode_task(void *args)
+ */
+ static int __ai_audio_output(uint8_t *data, uint16_t datalen)
+ {
+-    OPERATE_RET rt = OPRT_OK;
+-    uint64_t   pts = 0;
+-    uint64_t   timestamp = 0;
+-
+     if(false == sg_ai_agent_inited) {
+         return OPRT_OK;
+     }
+ 
+ #if defined(ENABLE_AUDIO_AEC) && (ENABLE_AUDIO_AEC == 1)
+-    timestamp = pts = tal_system_get_millisecond();
+-    TUYA_CALL_ERR_LOG(tuya_ai_audio_input(timestamp, pts, data, datalen, datalen));
++    __ai_mic_upload(data, datalen);
+ #else 
+     if(false == ai_audio_player_is_playing()) {
+-        timestamp = pts = tal_system_get_millisecond();
+-        TUYA_CALL_ERR_LOG(tuya_ai_audio_input(timestamp, pts, data, datalen, datalen));
++        __ai_mic_upload(data, datalen);
+     }
+ #endif
+ 
+-    return rt;
++    return OPRT_OK;
+ }
+ 
+ /**
+@@ -297,7 +349,18 @@ static OPERATE_RET __ai_chat_mode_open_button(void)
+                                    .button_debounce_time = 50,
+                                    .button_repeat_valid_count = 2,
+                                    .button_repeat_valid_time = 300};
+-    TUYA_CALL_ERR_RETURN(tdl_button_create(AI_CHAT_BUTTON_NAME, &button_cfg, &sg_button_hdl));
++
++    /* 板级没注册这个按键就跳过 —— **不能返回错误**：上层 ai_chat_init() 会因为
++     * 缺一颗按钮把整条语音栈拉不起来。本工程把 P12(GPIO12) 交给 app_key.c 独占
++     * （见 app_default.config：CONFIG_BUTTON_NAME 已摘掉），所以这里必然拿不到
++     * 设备。AI 原来靠这颗按键做的"单击打断 / 长按切模式"改由 app 侧接管：
++     * 单击打断 = app_key 短按 -> app_ai_chat_interrupt()，说话打断 = VAD barge-in
++     * （ai_mode_free.c 的 __ai_mode_free_vad_change）。 */
++    if (OPRT_OK != tdl_button_create(AI_CHAT_BUTTON_NAME, &button_cfg, &sg_button_hdl)) {
++        PR_WARN("button \"%s\" not registered, AI chat continues without it",
++                AI_CHAT_BUTTON_NAME);
++        return OPRT_OK;
++    }
+ 
+     tdl_button_event_register(sg_button_hdl, TDL_BUTTON_PRESS_DOWN, __ai_button_function_cb);
+     tdl_button_event_register(sg_button_hdl, TDL_BUTTON_PRESS_UP, __ai_button_function_cb);
+@@ -327,6 +390,7 @@ static int __ai_mqtt_connected_evt(void *data)
+     ai_mode_init(mode);
+ 
+     sg_ai_agent_inited = true;
++    sg_ai_mqtt_seen    = true;   /* latch: drives the replay in ai_chat_init() */
+ 
+     return rt;
+ }
+@@ -371,7 +435,18 @@ OPERATE_RET ai_chat_init(AI_CHAT_MODE_CFG_T *cfg)
+         return OPRT_INVALID_PARM;
+     }
+ 
+-    TUYA_CALL_ERR_RETURN(__ai_chat_mode_register());
++    /* already up (without a deinit in between) -> nothing to do. deinit resets
++     * this flag, so the normal deinit->init cycle still re-runs. */
++    if (true == sg_ai_chat_inited) {
++        return OPRT_OK;
++    }
++
++    /* mode handlers registered only once; they persist across a deinit/init
++     * cycle so a second ai_chat_init() does not hit "already registered". */
++    if (false == sg_ai_mode_registered) {
++        TUYA_CALL_ERR_RETURN(__ai_chat_mode_register());
++        sg_ai_mode_registered = true;
++    }
+ 
+     sg_ai_default_mode = cfg->default_mode;
+     sg_ai_default_vol  = cfg->default_vol;
+@@ -380,12 +455,13 @@ OPERATE_RET ai_chat_init(AI_CHAT_MODE_CFG_T *cfg)
+     TUYA_CALL_ERR_RETURN(ai_chat_ui_init());
+ #endif
+ 
+-    rt = __ai_chat_load_config(&mode, &vol);
+-    if (OPRT_OK != rt) {
+-        mode = sg_ai_default_mode;
+-        vol  = sg_ai_default_vol;
+-        is_need_save = true;
+-    }
++    /* The app owns both the trigger mode (voice-triggered FREE) and the
++     * volume (its own KV / DP / menu slider). Nothing is restored from the
++     * legacy ai_toy config KV, whose stale chat_mode/volume would override
++     * the app's choices. */
++    mode = sg_ai_default_mode;
++    vol  = sg_ai_default_vol;
++    is_need_save = true;
+ 
+     if(false ==ai_mode_is_in_register_list(mode)) {
+         TUYA_CALL_ERR_RETURN(ai_get_first_mode(&sg_ai_default_mode));
+@@ -401,9 +477,47 @@ OPERATE_RET ai_chat_init(AI_CHAT_MODE_CFG_T *cfg)
+ 
+     ai_user_event_notify_register(__ai_handle_event);
+ 
+-    TUYA_CALL_ERR_RETURN(tal_event_subscribe(EVENT_MQTT_CONNECTED, "ai_agent_init", __ai_mqtt_connected_evt, SUBSCRIBE_TYPE_EMERGENCY));
++    /* EVENT_MQTT_CONNECTED is intentionally never unsubscribed on deinit, so it
++     * must be subscribed at most once to avoid a double callback on reconnect. */
++    if (false == sg_mqtt_subscribed) {
++        TUYA_CALL_ERR_RETURN(tal_event_subscribe(EVENT_MQTT_CONNECTED, "ai_agent_init", __ai_mqtt_connected_evt, SUBSCRIBE_TYPE_EMERGENCY));
++        sg_mqtt_subscribed = true;
++    }
+     TUYA_CALL_ERR_RETURN(tal_event_subscribe(EVENT_AI_CLIENT_RUN, "client_run", ai_mode_client_run, SUBSCRIBE_TYPE_NORMAL));
+ 
++    /* tal_event has NO replay: a subscriber installed after the publish never
++     * gets the event. This app brings the voice stack up on AI-page entry, i.e.
++     * long after MQTT came up at boot, so __ai_mqtt_connected_evt() -- the only
++     * place sg_ai_mqtt_seen gets latched -- never ran and BOTH replays below were
++     * silently skipped: the agent stayed down and, worse, ai_mode_init() never
++     * ran, so the recorder kept the AI_AUDIO_VAD_MANUAL default from
++     * ai_audio_input_init(). In MANUAL the record task never polls
++     * tkl_vad_get_status() nor publishes EVENT_AUDIO_VAD, so the FREE mode's
++     * vad_change hook is never called: voice can never wake the session.
++     * Query the live MQTT state instead of trusting the latch. */
++    if (false == sg_ai_mqtt_seen) {
++        if (true == tuya_iot_is_connected()) {
++            sg_ai_mqtt_seen = true;
++            PR_NOTICE("ai chat: cloud already up before subscribe, latch MQTT-seen and replay bring-up");
++        } else {
++            PR_WARN("ai chat: cloud not connected yet, voice stack will come up when EVENT_MQTT_CONNECTED fires");
++        }
++    }
++
++    /* Replay of __ai_mqtt_connected_evt(), part 1: the agent.
++     * The app drives the voice stack per page, so MQTT may have connected long
++     * before this call -- and ai_chat_deinit() clears sg_ai_agent_inited. Both
++     * together mean the agent would otherwise stay down for every page visit
++     * after the first, and __ai_audio_output() drops all mic audio on the floor
++     * ("false == sg_ai_agent_inited" early return) so the cloud never hears
++     * anything. Order matters and mirrors a normal boot: agent first, recorder
++     * afterwards. */
++    if ((true == sg_ai_mqtt_seen) && (false == sg_ai_agent_inited)) {
++        TUYA_CALL_ERR_RETURN(ai_agent_init());
++        sg_ai_agent_inited = true;
++        PR_NOTICE("ai agent re-inited on page-level ai_chat_init");
++    }
++
+ #if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
+     AI_AUDIO_INPUT_CFG_T input_cfg= {
+         .vad_mode      = AI_AUDIO_VAD_MANUAL,
+@@ -421,6 +535,25 @@ OPERATE_RET ai_chat_init(AI_CHAT_MODE_CFG_T *cfg)
+     TUYA_CALL_ERR_LOG(ai_audio_player_set_vol(vol));
+ 
+     TUYA_CALL_ERR_RETURN(tal_event_subscribe(EVENT_AUDIO_VAD, "vad_change", __ai_vad_change_evt, SUBSCRIBE_TYPE_NORMAL));
++
++    /* Replay of __ai_mqtt_connected_evt(), part 2: the chat mode.
++     * ai_audio_input_init() above installed AI_AUDIO_VAD_MANUAL (the default
++     * the SDK ships with); it is the *mode* that decides the real trigger
++     * policy -- ai_mode_free_init() calls
++     * ai_audio_input_wakeup_mode_set(AI_AUDIO_VAD_AUTO) for voice-triggered
++     * FREE mode. Since the one-shot MQTT event already fired (or the mode was
++     * deinited), that call would never happen and the recorder would sit in
++     * MANUAL forever: no voice wake, ever. Must run AFTER the recorder exists,
++     * exactly like on a normal boot. */
++    if (true == sg_ai_mqtt_seen) {
++        OPERATE_RET mode_rt = ai_mode_init(mode);
++
++        /* PR_NOTICE so the bring-up is visible at the default log level: a
++         * following "audio input -> wakeup mode set from 0 to 1!" is the proof
++         * that the recorder left AI_AUDIO_VAD_MANUAL and voice wake is armed. */
++        PR_NOTICE("ai chat: mode %d init rt=%d (FREE: recorder should switch to VAD AUTO)", (int)mode, mode_rt);
++        TUYA_CALL_ERR_LOG(mode_rt);
++    }
+ #endif
+ 
+     THREAD_CFG_T thrd_cfg = {
+@@ -438,6 +571,8 @@ OPERATE_RET ai_chat_init(AI_CHAT_MODE_CFG_T *cfg)
+ #endif
+     PR_DEBUG("ai chat mode init mode %d success", mode);
+ 
++    sg_ai_chat_inited = true;
++
+     return OPRT_OK;
+ }
+ 
+@@ -480,3 +615,70 @@ int ai_chat_get_volume(void)
+     return volume;
+ }
+ 
++/**
++@brief Deinitialize AI chat module
++@return OPERATE_RET Operation result
++
++NOTE: adapted for THIS SDK snapshot. The upstream (other-machine) version keys off
++a dedicated sg_ai_chat_inited flag and calls tkl_kws_deinit(); this snapshot tracks
++readiness with sg_ai_agent_inited and has no tkl_kws_deinit() implementation, so it
++is intentionally omitted here.
++*/
++OPERATE_RET ai_chat_deinit(void)
++{
++    if (false == sg_ai_chat_inited) {
++        return OPRT_OK;
++    }
++    sg_ai_chat_inited = false;
++    sg_ai_agent_inited = false;
++
++#if defined(ENABLE_BUTTON) && (ENABLE_BUTTON == 1)
++    if (sg_button_hdl) {
++        /* without_hardware keeps the TDL node the tdd device registered at
++         * boot, so the NEXT ai_chat_init() does not fail with
++         * "button no existence". */
++        tdl_button_delete_without_hardware(sg_button_hdl);
++        sg_button_hdl = NULL;
++    }
++#endif
++
++    /* stop the mode task: its loop exits once the thread state leaves
++     * THREAD_STATE_RUNNING. */
++    if (sg_ai_chat_mode_task) {
++        tal_thread_delete(sg_ai_chat_mode_task);
++        sg_ai_chat_mode_task = NULL;
++    }
++
++#if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
++    tal_event_unsubscribe(EVENT_AUDIO_VAD, "vad_change", __ai_vad_change_evt);
++    tal_event_unsubscribe(EVENT_AI_CLIENT_RUN, "client_run", ai_mode_client_run);
++
++    /* **拆音频栈之前必须先把 AI 出口管线停干净**。
++     * ai_agent_output 线程的 media_data_cb -> __ai_agent_media_data_cb ->
++     * ai_audio_play_tts_stream() 会一直往播放器里喂 TTS，而它直到最后
++     * ai_agent_deinit() 才被要求退出（且是异步的）。中途退出对话时，
++     * ai_audio_player_deinit() 投递的 PLAYER_CMD_EXIT 会被 ai_player 任务
++     * 先执行 —— datasink 与 player 被 Free（内存填 0xDC），出口线程下一脚
++     * tal_mutex_lock(ctx->mutex) 就踩上去：
++     *   BusFault 精确数据访问违例 BFAR=0xdcdcdce4，thread=ai_agent_output，
++     *   pc=xQueueTakeMutexRecursive(ldr r6,[r4,#8], r4=0xdcdcdcdc)，rr:0x13。
++     * 现场日志：log/AI回复中途退出会崩溃.txt。
++     * stop_sync() 会强制停管线并等在途回调返回，之后拆播放器才是安全的。 */
++    tuya_ai_output_stop_sync();
++
++    ai_audio_player_deinit();
++    ai_audio_input_deinit();
++    /* tkl_kws_deinit() is not implemented in this SDK snapshot -- omitted on
++     * purpose. Re-add the call once the kws adapter gains a deinit. */
++#endif
++
++    ai_mode_deinit();
++    ai_agent_deinit();
++
++    /* EVENT_MQTT_CONNECTED stays subscribed on purpose */
++
++    PR_DEBUG("ai chat deinit");
++
++    return OPRT_OK;
++}
++
+diff --git a/src/ai_components/ai_mode/src/ai_mode_free.c b/src/ai_components/ai_mode/src/ai_mode_free.c
+index 2671284..5d7002e 100755
+--- a/src/ai_components/ai_mode/src/ai_mode_free.c
++++ b/src/ai_components/ai_mode/src/ai_mode_free.c
+@@ -86,7 +86,24 @@ static void __ai_mode_enter_idle(void)
+ 
+     sg_is_wakeup = false;
+ 
+-    tkl_vad_set_threshold(TKL_AUDIO_VAD_LOW);
++    /* 待机态的人声检测门限 —— **比上游钝两档**。
++     *
++     * 上游是 TKL_AUDIO_VAD_LOW（-80dB，最敏感）：待机时环境噪声、隔壁说话、
++     * 电视声都可能被当成"有人在跟它说话"，于是它自顾自地进入 LISTEN 并开始
++     * 上传音频 —— 用户看到的就是"没叫它它自己动了"。
++     *
++     * 试过 MID（-60dB，也是 tkl_vad_init() 自己的默认档）：在有人说话的房间里
++     * 仍然会被持续人声带起来。所以落到 HIGH（-40dB）。
++     *
++     * ⚠️ **代价**：坐得远一点、说话轻一点可能就叫不动它了。真出现"叫不动"，
++     * 往回退一档到 MID 即可（下面一行改一个枚举名）。三档到 dB 的映射在
++     * tuyaos/tuyaos_adapter/src/driver/tkl_vad.c 的 tkl_vad_set_threshold()：
++     * HIGH=-40 / MID=-60 / LOW=-80，越小越敏感。
++     *
++     * 另一个正交的旋钮是"最短语音长度"（ai_chat_main.c 的 AI_AUDIO_VAD_ACTIVE_TIME，
++     * 200ms）：那个管的是**突发响声**（键盘、关门、咳嗽）误触发。本次没动它 ——
++     * 现场是持续人声，不是瞬态噪声。 */
++    tkl_vad_set_threshold(TKL_AUDIO_VAD_HIGH);
+ }
+ 
+ static void __ai_mode_enter_listen(void)
+@@ -171,11 +188,18 @@ static OPERATE_RET __ai_mode_free_init(void)
+     //set vad mode
+     ai_audio_input_wakeup_mode_set(AI_AUDIO_VAD_AUTO);
+ 
++    /* VirtuaMate voice-trigger port: the wake word (KWS) is NOT used.
++     * VAD speech detection alone drives the wakeup (see vad_change), so the
++     * KWS engine stays disabled here to save its CPU/memory cost. */
+     tkl_kws_reg_wakeup_cb(__ai_mode_kws_wakeup);
+-    tkl_kws_enable();
+ 
+     //create idle timer
+-    TUYA_CALL_ERR_RETURN(tal_sw_timer_create(__ai_mode_enter_idle_time_cb, NULL, &sg_enter_idle_timer));
++    if (sg_enter_idle_timer == NULL) {
++        TUYA_CALL_ERR_RETURN(tal_sw_timer_create(__ai_mode_enter_idle_time_cb, NULL, &sg_enter_idle_timer));
++    }
++    /* 自愈兜底定时器（idle 期间定时重挂采集链路）已摘掉，备档见
++     * .workbuddy/parked/问题1-采集链路自愈-sdk.patch；一线修复是 ai_audio_input_reset()
++     * 改走 tkl_vad_restart()（VAD 操作挪到 AEC 线程的帧边界上执行）。 */
+ 
+     MODE_STATE_CHANGE(sg_mode_set_state, AI_MODE_STATE_IDLE);
+     sg_is_wakeup = false;
+@@ -185,10 +209,30 @@ static OPERATE_RET __ai_mode_free_init(void)
+ 
+ static OPERATE_RET __ai_mode_free_deinit(void)
+ {
++#if defined(ENABLE_LED) && (ENABLE_LED == 1)
++    /* 退出时把指示灯灭掉并停掉闪烁：本栈是页面级的，进页 __ai_mode_free_init()
++     * 里 tdl_led_open() 会让 LED 闪；若最后停在 LISTEN（闪 500ms）或 THINK
++     * （闪 2000ms），不显式 set_status(OFF) 的话，LED 的软件定时器会一直挂在后台
++     * —— 表现就是"退回主页了，灯还在闪"。
++     * tdl_led_set_status() 内部会 __led_stop_blink()，所以 OFF 同时完成"停闪 + 灭灯"；
++     * 再 close 释放句柄，避免每次进页 open 却不 close。 */
++    if (sg_led_hdl != NULL) {
++        tdl_led_set_status(sg_led_hdl, TDL_LED_OFF);
++        tdl_led_close(sg_led_hdl);
++        sg_led_hdl = NULL;
++    }
++#endif
++
+     tkl_kws_disable();
+ 
+     tuya_ai_input_stop();
+ 
++    if (sg_enter_idle_timer != NULL) {
++        tal_sw_timer_stop(sg_enter_idle_timer);
++        tal_sw_timer_delete(sg_enter_idle_timer);
++        sg_enter_idle_timer = NULL;
++    }
++
+     sg_mode_cur_state = AI_MODE_STATE_INVALID;
+ 
+     return OPRT_OK;
+@@ -287,16 +331,48 @@ static OPERATE_RET __ai_mode_free_client_run(void *data)
+ 
+ static OPERATE_RET __ai_mode_free_vad_change(AI_AUDIO_VAD_STATE_E vad_flag)
+ {
+-    if(false == sg_is_wakeup) {
+-        return OPRT_OK;
++    /* VirtuaMate voice-trigger port: no wake word. Speech detected while
++     * IDLE wakes the session directly (same tear-down the KWS callback
++     * does); the VAD cache keeps the utterance onset so nothing is lost
++     * while the listen gate is still being armed by the task loop. */
++    if (false == sg_is_wakeup) {
++        if (AI_AUDIO_VAD_START != vad_flag) {
++            return OPRT_OK;
++        }
++
++        ai_audio_player_stop(AI_AUDIO_PLAYER_ALL);
++        ai_audio_input_reset();
++        tuya_ai_agent_event(AI_EVENT_CHAT_BREAK, 0);
++
++        MODE_STATE_CHANGE(sg_mode_set_state, AI_MODE_STATE_LISTEN);
++        sg_is_wakeup = true;
++    }
++
++    /* barge-in（回声打断）：已唤醒且 AI 正在播报时，用户一开口就掐掉播报。
++     *
++     * 原来只有上面那条"未唤醒 -> VAD 唤醒"的分支会停播放。sg_is_wakeup 一旦变成
++     * true（AI 正在说），VAD 起音就只是把麦克风数据继续传上去，播放器照放 ——
++     * 表现就是"我说话的时候它还在说话"。这里补上 SPEAK 期间的打断。
++     *
++     * 刻意**不**调用 ai_audio_input_reset()：紧接着下面就要用这段刚采集到的话去
++     * 做 ASR，重置采集会把话音起点丢掉。 */
++    if (AI_AUDIO_VAD_START == vad_flag && true == sg_is_wakeup &&
++        ai_audio_player_is_playing()) {
++        PR_NOTICE("[====ai_free] barge-in: 用户开口，掐掉播报");
++
++        ai_audio_player_stop(AI_AUDIO_PLAYER_ALL);
++        tuya_ai_agent_event(AI_EVENT_CHAT_BREAK, 0);
++
++        MODE_STATE_CHANGE(sg_mode_set_state, AI_MODE_STATE_LISTEN);
+     }
+ 
+-    PR_DEBUG("[====ai_free] vad: [%d]", vad_flag); 
++    PR_DEBUG("[====ai_free] vad: [%d]", vad_flag);
+ 
+     if (AI_AUDIO_VAD_START == vad_flag) {
+         tuya_ai_agent_set_scode(AI_AGENT_SCODE_DEFAULT);
+         tuya_ai_input_start(false);
+     } else {
++        /* speech ended (vad_off silence window elapsed): end this turn */
+         tuya_ai_input_stop();
+     }
+ 
+diff --git a/src/audio_player/src/svc_ai_player.c b/src/audio_player/src/svc_ai_player.c
+index ab9ee72..bf806a2 100755
+--- a/src/audio_player/src/svc_ai_player.c
++++ b/src/audio_player/src/svc_ai_player.c
+@@ -560,7 +560,10 @@ OPERATE_RET tuya_ai_player_service_init(AI_PLAYER_CFG_T *cfg)
+ {
+     OPERATE_RET rt = OPRT_OK;
+ 
+-    TUYA_CALL_ERR_RETURN(tal_queue_create_init(&s_ai_player_ctx.queue, SIZEOF(AI_PLAYER_MSG_T), 2));
++    /* 原来只有 2 格：玩家任务正忙时 post 会直接失败，START/STOP/EXIT/DEINIT
++     * 这些命令会被静默丢掉（现场就是丢 DEINIT，见下面的重试窗口）。
++     * AI_PLAYER_MSG_T 才 12 字节，放大到 8 格几乎零成本。 */
++    TUYA_CALL_ERR_RETURN(tal_queue_create_init(&s_ai_player_ctx.queue, SIZEOF(AI_PLAYER_MSG_T), 8));
+ 
+     THREAD_CFG_T thread_cfg = {0};
+     thread_cfg.stackDepth = AI_PLAYER_STACK_SIZE;
+@@ -593,12 +596,43 @@ OPERATE_RET tuya_ai_player_service_init(AI_PLAYER_CFG_T *cfg)
+ OPERATE_RET tuya_ai_player_service_deinit(void)
+ {
+     OPERATE_RET rt = OPRT_OK;
++    uint32_t waited = 0;
++
++    /* 已经拆过/从没起过：直接返回，别去碰 free 过的队列 */
++    if (NULL == s_ai_player_ctx.queue) {
++        return OPRT_OK;
++    }
+ 
+     AI_PLAYER_MSG_T msg = {0};
+     msg.mode = AI_PLAYER_MODE_FOREGROUND;
+     msg.cmd  = PLAYER_CMD_SERVICE_DEINIT;
+-    TUYA_CALL_ERR_RETURN(tal_queue_post(s_ai_player_ctx.queue, &msg, 0));
+-    return OPRT_OK;
++
++    /* 队列只有 2 格，玩家任务一旦正忙，tal_queue_post(...,0) 就会直接失败：
++     * 现场 log/AI回复中途退出会崩溃.txt 里那两条 ret:-26369 就是它（队列满，
++     * 拆机命令被丢掉 -> ai_player 任务与 consumer 一直挂着，下次进角色页
++     * 再 init 就冲突）。这里给一个很小的重试窗口，把"丢命令"变成"最多多等"。 */
++    while (OPRT_OK != tal_queue_post(s_ai_player_ctx.queue, &msg, 0)) {
++        if (waited >= 100) {
++            PR_ERR("ai player deinit cmd lost, queue busy %ums", waited);
++            return OPRT_OS_ADAPTER_QUEUE_SEND_FAIL;
++        }
++        tal_system_sleep(10);
++        waited += 10;
++    }
++
++    /* 再等它真的拆完。__cmd_player_service_deinit() 末尾会 memset 整个
++     * s_ai_player_ctx（queue 变成 NULL）。不等就返回的话，调用方紧接着
++     * 就会去重开 codec / 重新 init，跟 consumer.close() 与 ctx 清零撞车。 */
++    while ((NULL != s_ai_player_ctx.queue) && (waited < 500)) {
++        tal_system_sleep(10);
++        waited += 10;
++    }
++    if (NULL != s_ai_player_ctx.queue) {
++        PR_ERR("ai player service not deinit in %ums", waited);
++        rt = OPRT_TIMEOUT;
++    }
++
++    return rt;
+ }
+ 
+ /**
+@@ -659,16 +693,44 @@ OPERATE_RET tuya_ai_player_destroy(AI_PLAYER_HANDLE handle)
+ {
+     OPERATE_RET rt = OPRT_OK;
+     AI_PLAYER_T *player = (AI_PLAYER_T *)handle;
++    uint32_t waited = 0;
+ 
+     if (!__is_player_valid(player)) {
+         return OPRT_INVALID_PARM;
+     }
+ 
++    /* 先把 mode 存成局部量：下面等释放的过程中 player 这块内存就不存在了 */
++    AI_PLAYER_MODE_E mode = (AI_PLAYER_MODE_E)player->mode;
++
+     AI_PLAYER_MSG_T msg = {0};
+-    msg.mode = player->mode;
++    msg.mode = mode;
+     msg.cmd  = PLAYER_CMD_EXIT;
+-    TUYA_CALL_ERR_RETURN(tal_queue_post(s_ai_player_ctx.queue, &msg, 0));
+-    return OPRT_OK;
++
++    /* 队列满时 post 会直接失败 = 这条 EXIT 被丢掉 -> player 永不释放，下一次
++     * tuya_ai_player_create() 因为 player[mode] 还占着而返回 INVALID_PARM
++     * （表现：退出角色页再进去就"没办法继续对话"）。给一个短重试窗口。 */
++    while (OPRT_OK != tal_queue_post(s_ai_player_ctx.queue, &msg, 0)) {
++        if (waited >= 100) {
++            PR_ERR("ai player exit cmd lost, queue busy %ums", waited);
++            return OPRT_OS_ADAPTER_QUEUE_SEND_FAIL;
++        }
++        tal_system_sleep(10);
++        waited += 10;
++    }
++
++    /* 再等它真的被释放（__cmd_player_exit 会把 player[mode] 置 NULL）。
++     * destroy 语义上就该是"返回即已销毁"：不等的话调用方回头就重建/重开
++     * codec，会和 consumer.close() 撞在一起。 */
++    while ((NULL != s_ai_player_ctx.player[mode]) && (waited < 500)) {
++        tal_system_sleep(10);
++        waited += 10;
++    }
++    if (NULL != s_ai_player_ctx.player[mode]) {
++        PR_ERR("ai player not destroyed in %ums", waited);
++        return OPRT_TIMEOUT;
++    }
++
++    return rt;
+ }
+ 
+ /**
+diff --git a/src/liblvgl/v9/conf/lv_conf.h b/src/liblvgl/v9/conf/lv_conf.h
+index c9bb4af..7cf9af4 100755
+--- a/src/liblvgl/v9/conf/lv_conf.h
++++ b/src/liblvgl/v9/conf/lv_conf.h
+@@ -85,9 +85,9 @@
+  *====================*/
+ 
+ /*Default display refresh, input device read and animation step period.*/
+-#define LV_DEF_REFR_PERIOD  10      /*[ms]*/
++#define LV_DEF_REFR_PERIOD  20      /*[ms]*/
+ 
+-#define LV_INDEV_REFR_PERIOD  30    /*[ms]*/
++#define LV_INDEV_REFR_PERIOD  20    /*[ms]*/
+ 
+ /*Default Dot Per Inch. Used to initialize default sizes such as widgets sized, style paddings.
+  *(Not so important, you can adjust it to modify default sizes and spaces)*/
+@@ -427,11 +427,11 @@
+ #endif
+ 
+ #ifndef LV_FONT_MONTSERRAT_14
+-#define LV_FONT_MONTSERRAT_14 1
++#define LV_FONT_MONTSERRAT_14 0
+ #endif
+ 
+ #ifndef LV_FONT_MONTSERRAT_16
+-#define LV_FONT_MONTSERRAT_16 0
++#define LV_FONT_MONTSERRAT_16 1
+ #endif
+ 
+ #ifndef LV_FONT_MONTSERRAT_18
+@@ -527,7 +527,7 @@
+ #define LV_FONT_CUSTOM_DECLARE
+ 
+ /*Always set a default font*/
+-#define LV_FONT_DEFAULT &lv_font_montserrat_14
++#define LV_FONT_DEFAULT &lv_font_montserrat_16
+ 
+ /*Enable handling large font and/or fonts with a lot of characters.
+  *The limit depends on the font size, font face and bpp.
+@@ -888,7 +888,7 @@
+     /*1: Show CPU usage and FPS count
+      * Requires `LV_USE_SYSMON = 1`*/
+     #ifndef LV_USE_PERF_MONITOR
+-        #define LV_USE_PERF_MONITOR 0
++        #define LV_USE_PERF_MONITOR 1
+     #endif
+     #if LV_USE_PERF_MONITOR
+         #define LV_USE_PERF_MONITOR_POS LV_ALIGN_BOTTOM_RIGHT
+@@ -900,7 +900,7 @@
+     /*1: Show the used memory and the memory fragmentation
+      * Requires `LV_USE_STDLIB_MALLOC = LV_STDLIB_BUILTIN`
+      * Requires `LV_USE_SYSMON = 1`*/
+-    #define LV_USE_MEM_MONITOR 0
++    #define LV_USE_MEM_MONITOR 1
+     #if LV_USE_MEM_MONITOR
+         #define LV_USE_MEM_MONITOR_POS LV_ALIGN_BOTTOM_LEFT
+     #endif
+diff --git a/src/liblvgl/v9/port/lv_port_disp_full_frame.c b/src/liblvgl/v9/port/lv_port_disp_full_frame.c
+index 50248ce..073f9a5 100644
+--- a/src/liblvgl/v9/port/lv_port_disp_full_frame.c
++++ b/src/liblvgl/v9/port/lv_port_disp_full_frame.c
+@@ -246,6 +246,19 @@ void lv_port_flush_init(LV_DISP_NODE_T *node)
+ #endif
+ }
+ 
++/**
++ * @brief 上屏前合成钩子（见 lv_port_disp_internal.h 的说明）。
++ *
++ * 未注册时是空指针，整条路径与改动前完全一致 —— 这个改动对不使用浮层的
++ * 工程是零影响。
++ */
++static LV_PORT_PRE_FLUSH_CB sg_pre_flush_cb = NULL;
++
++void lv_port_set_pre_flush_cb(LV_PORT_PRE_FLUSH_CB cb)
++{
++    sg_pre_flush_cb = cb;
++}
++
+ void lv_port_flush_execute(LV_DISP_NODE_T *node, lv_display_t *disp,
+                            const lv_area_t *area, uint8_t *color_ptr)
+ {
+@@ -254,6 +267,11 @@ void lv_port_flush_execute(LV_DISP_NODE_T *node, lv_display_t *disp,
+     __disp_fill_display_framebuffer(area, color_ptr, cf, node->disp_fb, node->dev_info.is_swap);
+ 
+     if (lv_display_flush_is_last(disp)) {
++        /* 合成必须发生在交给显示驱动**之前** —— 这一块马上就要被扫描。 */
++        if (NULL != sg_pre_flush_cb) {
++            sg_pre_flush_cb(node->disp_fb);
++        }
++
+         tdl_disp_dev_flush(node->dev_hdl, node->disp_fb);
+ 
+         TDL_DISP_FRAME_BUFF_T *next_fb = tdl_disp_get_free_fb(node->fb_mag);
+diff --git a/src/liblvgl/v9/port/lv_port_disp_internal.h b/src/liblvgl/v9/port/lv_port_disp_internal.h
+index b88269d..97b3960 100644
+--- a/src/liblvgl/v9/port/lv_port_disp_internal.h
++++ b/src/liblvgl/v9/port/lv_port_disp_internal.h
+@@ -90,6 +90,28 @@ void lv_port_flush_on_enable(LV_DISP_NODE_T *node);
+  */
+ void lv_port_flush_release(LV_DISP_NODE_T *node);
+ 
++/**********************
++ * PRE-FLUSH COMPOSITE HOOK
++ **********************
++ *
++ * 应用可以注册一个回调，在 framebuffer 交给显示驱动**之前**把额外的图层
++ * （比如浮在 UI 之上的 2D 精灵）合成进去。未注册时行为与改动前完全一致。
++ *
++ * 为什么必须在这个位置
++ * --------------------
++ *  - 面板无 GRAM（has_vram=false），显示控制器持续扫描这块内存，所以任何叠加
++ *    都只能在"上屏前"这一刻做，没有硬件 overlay 层可用。
++ *  - LVGL 只在脏区变化时 flush，而精灵会自己动，所以**调用方要负责每帧把精灵
++ *    覆盖的区域标脏**（lv_obj_invalidate_area），让 LVGL 重画干净底图 ——
++ *    否则上一帧的精灵会残留在 framebuffer 里被反复叠加。
++ *
++ * 只有 full-frame 路径（ENABLE_LVGL_PARTIAL_FLUSH 未启用）实现了本钩子。
++ */
++typedef void (*LV_PORT_PRE_FLUSH_CB)(TDL_DISP_FRAME_BUFF_T *fb);
++
++/** @brief 注册上屏前合成回调；传 NULL 注销。 */
++void lv_port_set_pre_flush_cb(LV_PORT_PRE_FLUSH_CB cb);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/libu8g2/u8g2/tools/font/bdf/emoticons21.bdf b/src/libu8g2/u8g2/tools/font/bdf/emoticons21.bdf
+index cf642a2..202b716 100755
+--- a/src/libu8g2/u8g2/tools/font/bdf/emoticons21.bdf
++++ b/src/libu8g2/u8g2/tools/font/bdf/emoticons21.bdf
+@@ -1,618 +1,618 @@
+-STARTFONT 2.1
+-COMMENT Exported by Fony v1.4.7
+-FONT Emoticons21
+-SIZE 22 96 96
+-FONTBOUNDINGBOX 22 21 0 -1
+-STARTPROPERTIES 6
++STARTFONT 2.1
++COMMENT Exported by Fony v1.4.7
++FONT Emoticons21
++SIZE 22 96 96
++FONTBOUNDINGBOX 22 21 0 -1
++STARTPROPERTIES 6
+ COPYRIGHT "public domain,
+-created by olikraus@gmail.com"
+-RESOLUTION_X 96
+-RESOLUTION_Y 96
+-FONT_ASCENT 21
+-FONT_DESCENT 1
+-DEFAULT_CHAR 0
+-ENDPROPERTIES
+-CHARS 32
+-STARTCHAR 032
+-ENCODING 32
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-8FFF88
+-880088
+-840108
+-430610
+-40F810
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 033
+-ENCODING 33
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-880088
+-880088
+-840108
+-430610
+-40F810
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 034
+-ENCODING 34
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-880088
+-840108
+-830608
+-40F810
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 035
+-ENCODING 35
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-800008
+-880088
+-87FF08
+-400010
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 036
+-ENCODING 36
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-800008
+-800008
+-87FF08
+-400010
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 037
+-ENCODING 37
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-800008
+-800008
+-87FF08
+-480090
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 038
+-ENCODING 38
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-80F808
+-830608
+-840108
+-480090
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 039
+-ENCODING 39
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-400010
+-478F10
+-878F08
+-800008
+-800008
+-800008
+-80F808
+-830608
+-840108
+-480090
+-480090
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 040
+-ENCODING 40
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-220220
+-430610
+-418C10
+-878F08
+-800008
+-800008
+-800008
+-81FC08
+-870708
+-8F0788
+-410410
+-410410
+-208820
+-107040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 041
+-ENCODING 41
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-245120
+-428A10
+-410410
+-828A08
+-845108
+-800008
+-800008
+-81FC08
+-861308
+-9810C8
+-401090
+-401090
+-200F20
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 042
+-ENCODING 42
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 043
+-ENCODING 43
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 044
+-ENCODING 44
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 045
+-ENCODING 45
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 046
+-ENCODING 46
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 047
+-ENCODING 47
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 048
+-ENCODING 48
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-400C10
+-418C10
+-83CC08
+-800C08
+-800008
+-800008
+-880088
+-840108
+-830608
+-40FA10
+-402210
+-202220
+-101C40
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 049
+-ENCODING 49
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-400C10
+-418C10
+-818C08
+-818C08
+-818008
+-800008
+-880088
+-840108
+-830708
+-40FA10
+-402110
+-201120
+-100E40
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 050
+-ENCODING 50
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-400C10
+-418C10
+-83CC08
+-800C08
+-800008
+-880008
+-880008
+-840108
+-830608
+-40F810
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 051
+-ENCODING 51
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-238E20
+-45D710
+-45D710
+-845108
+-838E08
+-800008
+-800008
+-880088
+-840108
+-830608
+-40F810
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 052
+-ENCODING 52
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-238E20
+-45D710
+-45D710
+-845108
+-838E08
+-800008
+-800008
+-800008
+-800008
+-87FF08
+-400010
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 053
+-ENCODING 53
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-807008
+-808808
+-808808
+-408810
+-408810
+-207020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 054
+-ENCODING 54
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-7FDFF0
+-7FFFF0
+-7FFFF0
+-9FDFC8
+-9FDFC8
+-8F8F88
+-800008
+-800008
+-880088
+-840108
+-430610
+-40F810
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 055
+-ENCODING 55
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-218C20
+-43DE10
+-400010
+-800008
+-9FFFC8
+-922248
+-922248
+-922248
+-8A2288
+-862308
+-432610
+-40F810
+-200020
+-100140
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 056
+-ENCODING 56
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 057
+-ENCODING 57
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 058
+-ENCODING 58
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 059
+-ENCODING 59
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 060
+-ENCODING 60
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 061
+-ENCODING 61
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 062
+-ENCODING 62
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 063
+-ENCODING 63
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-ENDFONT
++created by olikraus@gmail.com"
++RESOLUTION_X 96
++RESOLUTION_Y 96
++FONT_ASCENT 21
++FONT_DESCENT 1
++DEFAULT_CHAR 0
++ENDPROPERTIES
++CHARS 32
++STARTCHAR 032
++ENCODING 32
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++8FFF88
++880088
++840108
++430610
++40F810
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 033
++ENCODING 33
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++880088
++880088
++840108
++430610
++40F810
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 034
++ENCODING 34
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++880088
++840108
++830608
++40F810
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 035
++ENCODING 35
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++800008
++880088
++87FF08
++400010
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 036
++ENCODING 36
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++800008
++800008
++87FF08
++400010
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 037
++ENCODING 37
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++800008
++800008
++87FF08
++480090
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 038
++ENCODING 38
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++80F808
++830608
++840108
++480090
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 039
++ENCODING 39
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++400010
++478F10
++878F08
++800008
++800008
++800008
++80F808
++830608
++840108
++480090
++480090
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 040
++ENCODING 40
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++220220
++430610
++418C10
++878F08
++800008
++800008
++800008
++81FC08
++870708
++8F0788
++410410
++410410
++208820
++107040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 041
++ENCODING 41
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++245120
++428A10
++410410
++828A08
++845108
++800008
++800008
++81FC08
++861308
++9810C8
++401090
++401090
++200F20
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 042
++ENCODING 42
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 043
++ENCODING 43
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 044
++ENCODING 44
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 045
++ENCODING 45
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 046
++ENCODING 46
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 047
++ENCODING 47
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 048
++ENCODING 48
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++400C10
++418C10
++83CC08
++800C08
++800008
++800008
++880088
++840108
++830608
++40FA10
++402210
++202220
++101C40
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 049
++ENCODING 49
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++400C10
++418C10
++818C08
++818C08
++818008
++800008
++880088
++840108
++830708
++40FA10
++402110
++201120
++100E40
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 050
++ENCODING 50
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++400C10
++418C10
++83CC08
++800C08
++800008
++880008
++880008
++840108
++830608
++40F810
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 051
++ENCODING 51
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++238E20
++45D710
++45D710
++845108
++838E08
++800008
++800008
++880088
++840108
++830608
++40F810
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 052
++ENCODING 52
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++238E20
++45D710
++45D710
++845108
++838E08
++800008
++800008
++800008
++800008
++87FF08
++400010
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 053
++ENCODING 53
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++807008
++808808
++808808
++408810
++408810
++207020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 054
++ENCODING 54
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++7FDFF0
++7FFFF0
++7FFFF0
++9FDFC8
++9FDFC8
++8F8F88
++800008
++800008
++880088
++840108
++430610
++40F810
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 055
++ENCODING 55
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++218C20
++43DE10
++400010
++800008
++9FFFC8
++922248
++922248
++922248
++8A2288
++862308
++432610
++40F810
++200020
++100140
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 056
++ENCODING 56
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 057
++ENCODING 57
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 058
++ENCODING 58
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 059
++ENCODING 59
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 060
++ENCODING 60
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 061
++ENCODING 61
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 062
++ENCODING 62
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 063
++ENCODING 63
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++ENDFONT
+diff --git a/src/libu8g2/u8g2/tools/font/emoticons/emoticons21.bdf b/src/libu8g2/u8g2/tools/font/emoticons/emoticons21.bdf
+index cf642a2..202b716 100755
+--- a/src/libu8g2/u8g2/tools/font/emoticons/emoticons21.bdf
++++ b/src/libu8g2/u8g2/tools/font/emoticons/emoticons21.bdf
+@@ -1,618 +1,618 @@
+-STARTFONT 2.1
+-COMMENT Exported by Fony v1.4.7
+-FONT Emoticons21
+-SIZE 22 96 96
+-FONTBOUNDINGBOX 22 21 0 -1
+-STARTPROPERTIES 6
++STARTFONT 2.1
++COMMENT Exported by Fony v1.4.7
++FONT Emoticons21
++SIZE 22 96 96
++FONTBOUNDINGBOX 22 21 0 -1
++STARTPROPERTIES 6
+ COPYRIGHT "public domain,
+-created by olikraus@gmail.com"
+-RESOLUTION_X 96
+-RESOLUTION_Y 96
+-FONT_ASCENT 21
+-FONT_DESCENT 1
+-DEFAULT_CHAR 0
+-ENDPROPERTIES
+-CHARS 32
+-STARTCHAR 032
+-ENCODING 32
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-8FFF88
+-880088
+-840108
+-430610
+-40F810
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 033
+-ENCODING 33
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-880088
+-880088
+-840108
+-430610
+-40F810
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 034
+-ENCODING 34
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-880088
+-840108
+-830608
+-40F810
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 035
+-ENCODING 35
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-800008
+-880088
+-87FF08
+-400010
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 036
+-ENCODING 36
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-800008
+-800008
+-87FF08
+-400010
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 037
+-ENCODING 37
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-800008
+-800008
+-87FF08
+-480090
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 038
+-ENCODING 38
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-80F808
+-830608
+-840108
+-480090
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 039
+-ENCODING 39
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-400010
+-478F10
+-878F08
+-800008
+-800008
+-800008
+-80F808
+-830608
+-840108
+-480090
+-480090
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 040
+-ENCODING 40
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-220220
+-430610
+-418C10
+-878F08
+-800008
+-800008
+-800008
+-81FC08
+-870708
+-8F0788
+-410410
+-410410
+-208820
+-107040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 041
+-ENCODING 41
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-245120
+-428A10
+-410410
+-828A08
+-845108
+-800008
+-800008
+-81FC08
+-861308
+-9810C8
+-401090
+-401090
+-200F20
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 042
+-ENCODING 42
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 043
+-ENCODING 43
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 044
+-ENCODING 44
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 045
+-ENCODING 45
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 046
+-ENCODING 46
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 047
+-ENCODING 47
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 048
+-ENCODING 48
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-400C10
+-418C10
+-83CC08
+-800C08
+-800008
+-800008
+-880088
+-840108
+-830608
+-40FA10
+-402210
+-202220
+-101C40
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 049
+-ENCODING 49
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-400C10
+-418C10
+-818C08
+-818C08
+-818008
+-800008
+-880088
+-840108
+-830708
+-40FA10
+-402110
+-201120
+-100E40
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 050
+-ENCODING 50
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-400C10
+-418C10
+-83CC08
+-800C08
+-800008
+-880008
+-880008
+-840108
+-830608
+-40F810
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 051
+-ENCODING 51
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-238E20
+-45D710
+-45D710
+-845108
+-838E08
+-800008
+-800008
+-880088
+-840108
+-830608
+-40F810
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 052
+-ENCODING 52
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-238E20
+-45D710
+-45D710
+-845108
+-838E08
+-800008
+-800008
+-800008
+-800008
+-87FF08
+-400010
+-400010
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 053
+-ENCODING 53
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-200020
+-418C10
+-418C10
+-818C08
+-818C08
+-800008
+-800008
+-807008
+-808808
+-808808
+-408810
+-408810
+-207020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 054
+-ENCODING 54
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-7FDFF0
+-7FFFF0
+-7FFFF0
+-9FDFC8
+-9FDFC8
+-8F8F88
+-800008
+-800008
+-880088
+-840108
+-430610
+-40F810
+-200020
+-100040
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 055
+-ENCODING 55
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 21 21 0 0
+-BITMAP
+-01FC00
+-060300
+-080080
+-100040
+-218C20
+-43DE10
+-400010
+-800008
+-9FFFC8
+-922248
+-922248
+-922248
+-8A2288
+-862308
+-432610
+-40F810
+-200020
+-100140
+-080080
+-060300
+-01FC00
+-ENDCHAR
+-STARTCHAR 056
+-ENCODING 56
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 057
+-ENCODING 57
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 058
+-ENCODING 58
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 059
+-ENCODING 59
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 060
+-ENCODING 60
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 061
+-ENCODING 61
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 062
+-ENCODING 62
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-STARTCHAR 063
+-ENCODING 63
+-SWIDTH 1584 0
+-DWIDTH 22 0
+-BBX 0 0 0 0
+-BITMAP
+-ENDCHAR
+-ENDFONT
++created by olikraus@gmail.com"
++RESOLUTION_X 96
++RESOLUTION_Y 96
++FONT_ASCENT 21
++FONT_DESCENT 1
++DEFAULT_CHAR 0
++ENDPROPERTIES
++CHARS 32
++STARTCHAR 032
++ENCODING 32
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++8FFF88
++880088
++840108
++430610
++40F810
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 033
++ENCODING 33
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++880088
++880088
++840108
++430610
++40F810
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 034
++ENCODING 34
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++880088
++840108
++830608
++40F810
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 035
++ENCODING 35
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++800008
++880088
++87FF08
++400010
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 036
++ENCODING 36
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++800008
++800008
++87FF08
++400010
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 037
++ENCODING 37
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++800008
++800008
++87FF08
++480090
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 038
++ENCODING 38
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++80F808
++830608
++840108
++480090
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 039
++ENCODING 39
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++400010
++478F10
++878F08
++800008
++800008
++800008
++80F808
++830608
++840108
++480090
++480090
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 040
++ENCODING 40
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++220220
++430610
++418C10
++878F08
++800008
++800008
++800008
++81FC08
++870708
++8F0788
++410410
++410410
++208820
++107040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 041
++ENCODING 41
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++245120
++428A10
++410410
++828A08
++845108
++800008
++800008
++81FC08
++861308
++9810C8
++401090
++401090
++200F20
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 042
++ENCODING 42
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 043
++ENCODING 43
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 044
++ENCODING 44
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 045
++ENCODING 45
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 046
++ENCODING 46
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 047
++ENCODING 47
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 048
++ENCODING 48
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++400C10
++418C10
++83CC08
++800C08
++800008
++800008
++880088
++840108
++830608
++40FA10
++402210
++202220
++101C40
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 049
++ENCODING 49
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++400C10
++418C10
++818C08
++818C08
++818008
++800008
++880088
++840108
++830708
++40FA10
++402110
++201120
++100E40
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 050
++ENCODING 50
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++400C10
++418C10
++83CC08
++800C08
++800008
++880008
++880008
++840108
++830608
++40F810
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 051
++ENCODING 51
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++238E20
++45D710
++45D710
++845108
++838E08
++800008
++800008
++880088
++840108
++830608
++40F810
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 052
++ENCODING 52
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++238E20
++45D710
++45D710
++845108
++838E08
++800008
++800008
++800008
++800008
++87FF08
++400010
++400010
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 053
++ENCODING 53
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++200020
++418C10
++418C10
++818C08
++818C08
++800008
++800008
++807008
++808808
++808808
++408810
++408810
++207020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 054
++ENCODING 54
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++7FDFF0
++7FFFF0
++7FFFF0
++9FDFC8
++9FDFC8
++8F8F88
++800008
++800008
++880088
++840108
++430610
++40F810
++200020
++100040
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 055
++ENCODING 55
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 21 21 0 0
++BITMAP
++01FC00
++060300
++080080
++100040
++218C20
++43DE10
++400010
++800008
++9FFFC8
++922248
++922248
++922248
++8A2288
++862308
++432610
++40F810
++200020
++100140
++080080
++060300
++01FC00
++ENDCHAR
++STARTCHAR 056
++ENCODING 56
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 057
++ENCODING 57
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 058
++ENCODING 58
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 059
++ENCODING 59
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 060
++ENCODING 60
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 061
++ENCODING 61
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 062
++ENCODING 62
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++STARTCHAR 063
++ENCODING 63
++SWIDTH 1584 0
++DWIDTH 22 0
++BBX 0 0 0 0
++BITMAP
++ENDCHAR
++ENDFONT
+diff --git a/src/peripherals/audio_codecs/tdd_audio/src/tdd_audio.c b/src/peripherals/audio_codecs/tdd_audio/src/tdd_audio.c
+index 5d3b961..5581a66 100755
+--- a/src/peripherals/audio_codecs/tdd_audio/src/tdd_audio.c
++++ b/src/peripherals/audio_codecs/tdd_audio/src/tdd_audio.c
+@@ -61,6 +61,20 @@ static TDD_AUDIO_DATA_HANDLE_T *g_tdd_audio_hdl = NULL;
+ 
+ static int __tkl_audio_frame_put(TKL_AUDIO_FRAME_INFO_T *pframe)
+ {
++    /* [probe] mic 帧到达 tdd 层的计数（每 100 帧 = 2s 打一条）。
++     * 有数 = BK 管线 -> tkl -> tdd 链路通；无数 = 管线没出帧。 */
++#ifndef AI_VOICE_TRACE
++#define AI_VOICE_TRACE 0
++#endif
++#if AI_VOICE_TRACE
++    static uint32_t s_probe_cnt = 0;
++    if ((++s_probe_cnt % 100) == 0) {
++        PR_NOTICE("[probe] tdd frame_put=%u hdl=%p cb=%p",
++                  (unsigned)s_probe_cnt, g_tdd_audio_hdl,
++                  (g_tdd_audio_hdl ? (void *)g_tdd_audio_hdl->mic_cb : NULL));
++    }
++#endif
++
+     if (NULL == g_tdd_audio_hdl) {
+         return 0;
+     }
+diff --git a/src/peripherals/display/tdd_display/src/rgb/tdd_disp_rgb_ili9488.c b/src/peripherals/display/tdd_display/src/rgb/tdd_disp_rgb_ili9488.c
+index 140b185..194833a 100644
+--- a/src/peripherals/display/tdd_display/src/rgb/tdd_disp_rgb_ili9488.c
++++ b/src/peripherals/display/tdd_display/src/rgb/tdd_disp_rgb_ili9488.c
+@@ -46,7 +46,38 @@ const uint8_t cILI9488_INIT_SEQ[] = {
+ static TDD_DISP_RGB_CFG_T sg_disp_rgb = {
+     .cfg =
+         {
+-            .clk = 15000000,
++            /* RGB pixel clock. Frame size incl. blanking is
++             *   (320 + hbp 80 + hfp 80 + hpw 20) * (480 + vbp 8 + vfp 8 + vpw 4)
++             * = 500 * 500 = 250000 clocks, so refresh = clk / 250000:
++             *   8MHz -> 32Hz, 10MHz -> 40Hz, 15MHz -> 60Hz, 20MHz -> 80Hz.
++             * (Only the discrete values in tkl_rgb.c's
++             *  __rgb_ty_clk_to_bk_clk() switch are accepted; anything else
++             *  silently falls through to 30MHz.)
++             *
++             * 20MHz / 80Hz. The panel MUST refresh noticeably faster than the
++             * emulator produces frames, for three separate reasons:
++             *
++             *  1. tdd_display_rgb's __rgb_display_frame() hands the next buffer
++             *     over and then blocks on flush_sem until a panel frame ends, so
++             *     the rgb_task drains at most ONE flush per panel frame. If the
++             *     panel is slower than the producer, the flush queue backs up and
++             *     __tdd_display_rgb_flush()'s tal_queue_post(SEM_WAIT_FOREVER)
++             *     stalls the producer's frame loop. That is what capped the NES
++             *     emulator at ~57fps and, because audio production is tied 1:1 to
++             *     emulated frames, drained the speaker ring buffer until the
++             *     music stuttered continuously.
++             *  2. With double buffering, the ping-pong swap must complete before
++             *     the producer starts writing the other buffer, otherwise it
++             *     tears into the buffer still being scanned. A panel period
++             *     shorter than the emulator's frame period guarantees that.
++             *  3. A 40Hz panel simply cannot show 60 frames per second.
++             *
++             * At 80Hz against a 60.099Hz emulator there is 33% headroom. Cost is
++             * PSRAM read bandwidth (320*480*2 * 80/s = 24.6MB/s); the NES core
++             * idles at ~85%, so that is free.
++             * NOTE: this is a shared SDK driver, so it affects every board
++             * using the ILI9488 RGB path. */
++            .clk = 20000000,
+             .out_data_clk_edge = TUYA_RGB_DATA_IN_RISING_EDGE,
+             .pixel_fmt = TUYA_PIXEL_FMT_RGB565,
+             .hsync_back_porch = 80,
+diff --git a/src/peripherals/tp/tdd_tp/include/tdd_tp_gt1151.h b/src/peripherals/tp/tdd_tp/include/tdd_tp_gt1151.h
+index f4411f9..dc2c493 100644
+--- a/src/peripherals/tp/tdd_tp/include/tdd_tp_gt1151.h
++++ b/src/peripherals/tp/tdd_tp/include/tdd_tp_gt1151.h
+@@ -32,8 +32,16 @@ extern "C" {
+ #define GT1151_REG_LEN       (2)
+ #define GT1151_MAX_TP_NUM (5)
+ 
++/* Point count the driver reads per transaction.
++ *
++ * The #ifndef fallback used to be (1), which silently capped EVERY caller to a
++ * single point: read_num = MIN(max_num, GT1151_POINT_INFO_NUM) = 1, even when
++ * the app asked for more and the GT1151 reports up to 5 (status & 0x0f). The
++ * virtual gamepad in the heikesong project needs >= 2 (hold a direction + tap
++ * an action button), so the fallback now follows the controller's real
++ * capability. Defining TP_SUPPORT_MAX_NUM globally still wins if set. */
+ #ifndef TP_SUPPORT_MAX_NUM
+-#define GT1151_POINT_INFO_NUM (1)
++#define GT1151_POINT_INFO_NUM (GT1151_MAX_TP_NUM)
+ #else
+ #define GT1151_POINT_INFO_NUM (TP_SUPPORT_MAX_NUM)
+ #endif
+diff --git a/src/tuya_ai_service/svc_ai_agent/include/tuya_ai_output.h b/src/tuya_ai_service/svc_ai_agent/include/tuya_ai_output.h
+index 461ba35..e00789c 100755
+--- a/src/tuya_ai_service/svc_ai_agent/include/tuya_ai_output.h
++++ b/src/tuya_ai_service/svc_ai_agent/include/tuya_ai_output.h
+@@ -112,6 +112,17 @@ OPERATE_RET tuya_ai_output_start(VOID);
+  */
+ OPERATE_RET tuya_ai_output_stop(BOOL_T force);
+ 
++/**
++ * @brief 停 AI 出口管线，并同步等到"在途的那次 media 回调"返回
++ *
++ * 与 tuya_ai_output_stop() 的区别：stop() 只是改状态/清 ring，此刻出口线程
++ * 可能正深在播放器的 datasink 里喂数据，调用方紧接着拆播放器就是 use-after-free。
++ * 拆播放器/音频栈之前务必先调这个。线程本体仍由 tuya_ai_output_deinit() 收。
++ *
++ * @return OPRT_OK 已静默；OPRT_TIMEOUT 回调迟迟不返回
++ */
++OPERATE_RET tuya_ai_output_stop_sync(VOID);
++
+ /**
+  * @brief ai output write
+  *
+diff --git a/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_agent.c b/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_agent.c
+index ca73baf..2f54272 100755
+--- a/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_agent.c
++++ b/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_agent.c
+@@ -157,7 +157,14 @@ STATIC OPERATE_RET __ai_event_cb(AI_EVENT_ATTR_T *event, AI_EVENT_HEAD_T *head,
+             CHAR_T      intr_time[INTTERUPT_TIME_MAX] = {0};
+             OPERATE_RET rt                            = __parse_attr_time(event->user_data, event->user_len, intr_time);
+             if (OPRT_OK == rt) {
+-                if ((ai_agent_ctx.last_intr_time[0] != '\0') && (strcmp(intr_time, ai_agent_ctx.last_intr_time) <= 0)) {
++                /* 只把"比上一条更旧"的当重复丢。原来用的是 <= 0，于是**时间戳
++                 * 相同**（同一毫秒内的两次打断，字段是毫秒字符串）也会被当成重复
++                 * 丢掉 —— 真机日志里就是这个：
++                 *   Interrupt event ignored, last:1791020529983, cur:1791020529983
++                 * 云端这条 CHAT_BREAK 正是让本地播放器闭嘴的信号，一丢就"打不断"。
++                 * 相等的允许通过（下面立刻把它记成 last，同毫秒的第三条才会被拦）。 */
++                if ((ai_agent_ctx.last_intr_time[0] != '\0') &&
++                    (strcmp(intr_time, ai_agent_ctx.last_intr_time) < 0)) {
+                     TAL_PR_DEBUG("Interrupt event ignored, last:%s, cur:%s", ai_agent_ctx.last_intr_time, intr_time);
+                     return OPRT_OK;
+                 }
+diff --git a/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_output.c b/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_output.c
+index 544645f..1ceaf9f 100755
+--- a/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_output.c
++++ b/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_output.c
+@@ -62,9 +62,69 @@ typedef struct {
+ } AUDIO_PLAYER_CTX_T;
+ STATIC AUDIO_PLAYER_CTX_T ai_output_ctx;
+ 
++/* 出口线程的生命周期标记。deinit 必须"同步"等线程收尾，否则调用方紧接着
++ * Free 掉的播放器/datasink 会被这个线程踩到（见下面 deinit 的注释）。 */
++STATIC volatile BOOL_T   s_out_started = FALSE;   /* 线程是否起过 */
++STATIC volatile BOOL_T   s_out_gone    = FALSE;   /* 线程是否已收尾完毕 */
++STATIC volatile UINT32_T s_out_cb_busy = 0;       /* >0：正卡在回调里（计数，可重入）*/
++
+ VOID tuya_ai_output_deinit(VOID)
+ {
++    UINT32_T waited = 0;
++
+     ai_output_ctx.terminate = TRUE;
++
++    if (FALSE == s_out_started) {
++        return;
++    }
++
++    /* **必须等线程真的收尾**。出口线程此刻可能正卡在
++     * tuya_ai_output_media() -> __ai_agent_media_data_cb() -> 播放器里；
++     * 而调用方（ai_chat_deinit -> ai_audio_player_deinit）回来就把
++     * player / datasink 全部 Free 掉。只置标志不等 = use-after-free：
++     * 现场见 log/AI回复中途退出会崩溃.txt ——
++     *   BusFault 精确数据访问违例, BFAR=0xdcdcdce4, thread=ai_agent_output,
++     *   pc=xQueueTakeMutexRecursive (ldr r6,[r4,#8], r4=0xdcdcdcdc)。
++     * 0xDC 是释放后填充值，锁的就是已经被 Free 的 datasink 互斥量。 */
++    while (waited < 1000) {
++        if (s_out_gone && (0 == s_out_cb_busy)) {
++            break;
++        }
++        tal_system_sleep(5);
++        waited += 5;
++    }
++    s_out_started = FALSE;
++    if (waited >= 1000) {
++        PR_ERR("ai output thread not stopped in %ums", waited);
++    }
++}
++
++/**
++ * @brief 停 AI 出口管线并**等到在途回调返回**（同步版 stop）
++ *
++ * 用途：在拆除播放器/音频栈之前调用。只做两件事，不碰线程本体：
++ *   1. tuya_ai_output_stop(TRUE) —— 状态回 IDLE、清 ring、发 END，
++ *      出口线程下一圈就不会再回调播放器，网络侧新数据也被 write() 丢弃；
++ *   2. 等在途的那一次回调返回（它可能正深在播放器的 datasink 喂数据）。
++ * 线程本体仍由 tuya_ai_output_deinit() 收，两者职责分开。
++ *
++ * @return OPRT_OK 已静默；OPRT_TIMEOUT 回调迟迟不返回（记日志，调用方自行决定）
++ */
++OPERATE_RET tuya_ai_output_stop_sync(VOID)
++{
++    UINT32_T waited = 0;
++
++    tuya_ai_output_stop(TRUE);
++
++    while ((s_out_cb_busy > 0) && (waited < 300)) {
++        tal_system_sleep(2);
++        waited += 2;
++    }
++    if (waited >= 300) {
++        PR_ERR("ai output media cb still busy %ums", waited);
++        return OPRT_TIMEOUT;
++    }
++    return OPRT_OK;
+ }
+ 
+ #if (AI_OUTPUT_RINGBUF_SIZE > 0)
+@@ -87,6 +147,10 @@ STATIC VOID __ai_output_free(VOID)
+         ai_output_ctx.ringbuf = NULL;
+     }
+     memset(&ai_output_ctx, 0, SIZEOF(ai_output_ctx));
++    /* 收尾完毕的最后一步才置位：deinit 靠它判断"线程真的不会再动了"。
++     * 不能只看 ai_output_ctx.thread == NULL —— 那个是本函数**开头**就置的，
++     * 后面还有释放 mutex / ringbuf 的动作。 */
++    s_out_gone = TRUE;
+     PR_DEBUG("ai output deinit");
+ }
+ 
+@@ -131,7 +195,11 @@ STATIC VOID __ai_output_thread(void* arg)
+                 last_offset = 0;
+             }
+             ai_output_ctx.offset += rt;
++            /* 回调期间置忙：tuya_ai_output_stop_sync() 靠这个计数等"在途回调"
++             * 返回，调用方才能安全地把播放器拆掉。 */
++            s_out_cb_busy++;
+             rt = tuya_ai_output_media(AI_PT_AUDIO, ai_output_ctx.output_buf, ai_output_ctx.offset, ai_output_ctx.offset);
++            s_out_cb_busy--;
+             if (rt > 0) { // buf is not completely consumed
+                 if ((AI_OUTPUT_STOPPING == cur_state) && (rt == ai_output_ctx.offset)) {
+                     ai_output_ctx.status = AI_OUTPUT_STOPPED;
+@@ -191,6 +259,8 @@ OPERATE_RET tuya_ai_output_init(AI_OUTPUT_CBS_T *cbs)
+         return OPRT_OK;
+     }
+     memset(&ai_output_ctx, 0, SIZEOF(ai_output_ctx));
++    s_out_started = FALSE;      /* 线程还没起：deinit 在这之前调用不该干等 */
++    s_out_gone    = FALSE;
+     TUYA_CALL_ERR_RETURN(tal_mutex_create_init(&ai_output_ctx.mutex));
+     memcpy(&ai_output_ctx.cbs, cbs, SIZEOF(ai_output_ctx.cbs));
+ 
+@@ -219,6 +289,7 @@ OPERATE_RET tuya_ai_output_init(AI_OUTPUT_CBS_T *cbs)
+         PR_ERR("ai output thread create err, rt:%d", rt);
+         goto EXIT;
+     }
++    s_out_started = TRUE;       /* 从这里开始，deinit 必须等它收尾 */
+ 
+     PR_DEBUG("ai output init success");
+     return rt;
+@@ -329,7 +400,9 @@ OPERATE_RET tuya_ai_output_stop(BOOL_T force)
+ 
+ OPERATE_RET tuya_ai_output_write(AI_PACKET_PT type, UINT8_T *data, UINT_T len)
+ {
+-    if (ai_output_ctx.status != AI_OUTPUT_PLAYING) {
++    /* terminate 一并判断：拆栈期间云端可能还有 TTS 包进来，这里必须直接丢，
++     * 否则 writer 会一边等 ring 一边持着（很快就被释放的）ctx 互斥量。 */
++    if (ai_output_ctx.terminate || (ai_output_ctx.status != AI_OUTPUT_PLAYING)) {
+         return OPRT_OK;
+     }
+ 
+@@ -341,6 +414,9 @@ OPERATE_RET tuya_ai_output_write(AI_PACKET_PT type, UINT8_T *data, UINT_T len)
+     tal_mutex_unlock(ai_output_ctx.mutex);
+ 
+     while (rt != len) {
++        if (ai_output_ctx.terminate) {
++            break;      /* 正在拆栈，别再往里塞 */
++        }
+         tal_system_sleep(10);
+ 
+         data += rt;
+diff --git a/src/tuya_cloud_service/cloud/tuya_iot.c b/src/tuya_cloud_service/cloud/tuya_iot.c
+index 816451b..655efbc 100644
+--- a/src/tuya_cloud_service/cloud/tuya_iot.c
++++ b/src/tuya_cloud_service/cloud/tuya_iot.c
+@@ -413,10 +413,29 @@ static void mqtt_client_connected_on(void *context, void *user_data)
+     matop_serice_init(&client->matop,
+                       &(const matop_config_t){.mqctx = &client->mqctx, .devid = client->activate.devid});
+ 
+-    /* Auto check upgrade timer start */
+-    if (tal_sw_timer_is_running(client->check_upgrade_timer) == false) {
+-        tal_sw_timer_start(client->check_upgrade_timer, 1000 * 1, TAL_TIMER_ONCE);
+-    }
++    /* Auto check upgrade timer start.
++     *
++     * Re-arm on EVERY connect instead of only the very first one. This timer
++     * drives the only periodic atop round-trip (tuya.device.upgrade.silent.get)
++     * whose response carries the cloud UTC, and tal_time_set_posix(t, 1) inside
++     * matop_upgrade_info_on() is the ONLY thing that ever sets the cloud-sync
++     * flag that tal_time_check_time_sync() tests (the other caller is the
++     * one-shot activation request, which never runs again on a bound device).
++     *
++     * The old guard left the timer armed for AUTO_UPGRADE_CHECK_INTERVAL
++     * (24 hours) after a single attempt. So one link flap inside that 1s window
++     * -- or any failed request -- kept the clock unsynced for a whole day, and
++     * the AI voice stack is hard-gated on it: tuya_ai_client's __ai_idle()
++     * answers OPRT_COM_ERROR until the flag is set, so the client never reaches
++     * AI_STATE_RUNNING, EVENT_AI_CLIENT_RUN is never published, no input session
++     * context is ever created, and every mic frame is rejected with
++     * OPRT_COM_ERROR (the "ai_chat_main.c ret:-1" flood at 50 lines/s).
++     *
++     * Stopping before starting makes a reconnect retry the check immediately
++     * even while the 24h cycle is still pending. Cadence while the link stays
++     * up is unchanged (check_auto_upgrade_timeout_on re-arms itself). */
++    tal_sw_timer_stop(client->check_upgrade_timer);
++    tal_sw_timer_start(client->check_upgrade_timer, 1000 * 1, TAL_TIMER_ONCE);
+ 
+     /* Send connected event*/
+     client->event.id = TUYA_EVENT_MQTT_CONNECTED;

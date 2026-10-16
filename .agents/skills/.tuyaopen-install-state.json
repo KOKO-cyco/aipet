@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "skills": {
+    "tuyaopen-build": {
+      "version": "1.0.1",
+      "contentHash": "5bd4cc69715d5152f577bc5c895ba3643eca0615033a327c4ddbcf48486e83e0",
+      "mirrorContentHash": "21e3dd97bb2d8c2e751bf4cc842dbf7633a1dcfb9200c4f7d055066ee9c95efa",
+      "installedAt": "2026-09-16T04:33:19.436Z"
+    },
+    "tuyaopen-project-config": {
+      "version": "1.0.0",
+      "contentHash": "7c4e9e54f845091678dafb2243c913e4ad7aa05f16464bad7179bb8e1d91f99f",
+      "mirrorContentHash": "236d53b572acd9e4e7188ef09c32eafdb7ef38d55b139414e2b156fe727e8c71",
+      "installedAt": "2026-09-16T04:33:19.460Z"
+    },
+    "ecosystem-wire-cmake": {
+      "version": "1.0.0",
+      "contentHash": "6a2b812ba70ee98da09e48254e1cc9edaef6fd2f8a909b6371dd3e2d4c42ab14",
+      "mirrorContentHash": "6a2b812ba70ee98da09e48254e1cc9edaef6fd2f8a909b6371dd3e2d4c42ab14",
+      "installedAt": "2026-09-16T04:33:19.471Z"
+    },
+    "tuya-iot-platform": {
+      "version": "1.0.0",
+      "contentHash": "a5499f261e99fdb2d9051d1b91d0862a3e904d01716bc9b02c07959e0e16846b",
+      "mirrorContentHash": "a5499f261e99fdb2d9051d1b91d0862a3e904d01716bc9b02c07959e0e16846b",
+      "installedAt": "2026-09-16T04:33:19.497Z"
+    },
+    "smart-product-dev": {
+      "version": "1.0.0",
+      "contentHash": "9049be96bc1f6d5e439ede4bad8cc73a49b4371af3baaf6443ec5da570abcefb",
+      "mirrorContentHash": "9049be96bc1f6d5e439ede4bad8cc73a49b4371af3baaf6443ec5da570abcefb",
+      "installedAt": "2026-09-16T04:33:19.509Z"
+    },
+    "hardware-vibe-coding": {
+      "version": "1.0.0",
+      "contentHash": "908522563421448f5f36b484a45ca76214493aeb2045c8e8099d74095c14c783",
+      "mirrorContentHash": "908522563421448f5f36b484a45ca76214493aeb2045c8e8099d74095c14c783",
+      "installedAt": "2026-09-16T04:33:19.666Z"
+    },
+    "tyutool-cli": {
+      "version": "1.0.0",
+      "contentHash": "79250bdecb457e7964a8c0c4386dc22a9d9e3dc5a4e35f0f9d99593a99430988",
+      "mirrorContentHash": "79250bdecb457e7964a8c0c4386dc22a9d9e3dc5a4e35f0f9d99593a99430988",
+      "installedAt": "2026-09-16T04:33:19.684Z"
+    },
+    "tuyaopen-debug-helper": {
+      "version": "1.0.0",
+      "contentHash": "a4cd4d88b9ffec1bb5ca7f09b7936f42fec5db0f065e2af1108c5851b759fa64",
+      "mirrorContentHash": "a7a2beb820cbe132c2325000ab04909301b0a4260d73bc61d25ed381ae4b0052",
+      "installedAt": "2026-09-16T04:33:19.706Z"
+    },
+    "tuyaopen-dev-loop": {
+      "version": "1.0.0",
+      "contentHash": "694cefe9a0923ec0159fef7ffec3b9995aace99ddc862434e5455f76c0e7a103",
+      "mirrorContentHash": "0603c34ed003c60bc2aeabe5ee7dc8447f7d9f692afdb40c095fdeaf94dd49a7",
+      "installedAt": "2026-09-16T04:33:19.734Z"
+    },
+    "tuyaopen-device-auth": {
+      "version": "1.0.0",
+      "contentHash": "61da99d841d9c543caa13b0999bc7d714f10a3c4389fca8f1b32263a71b4c83a",
+      "mirrorContentHash": "ad390071ac8ef2761a62db44612ff04ee79de9d5458074a7f7a65185ad432e5f",
+      "installedAt": "2026-09-16T04:33:19.761Z"
+    },
+    "tuyaopen-env-setup": {
+      "version": "1.0.0",
+      "contentHash": "23515df989ffd0a4412f1eedb4f852893bd5bdb0ca63a2d58ae44af71aae6c2e",
+      "mirrorContentHash": "01cdaf2df2f1a3ddb84a7dd09de90e5b05659934573473ef3ee907e39efcdc40",
+      "installedAt": "2026-09-16T04:33:19.793Z"
+    },
+    "smart-panel-dev": {
+      "version": "1.0.0",
+      "contentHash": "eb4e83e000b4a7320208f232fa9efc91718f3dea4fe2bf15a070f285b8d879af",
+      "mirrorContentHash": "eb4e83e000b4a7320208f232fa9efc91718f3dea4fe2bf15a070f285b8d879af",
+      "installedAt": "2026-09-16T04:33:19.853Z"
+    },
+    "miniapp-ray-common": {
+      "version": "1.0.0",
+      "contentHash": "74a15b52b4d4f8ee7c2f9c7fa0464f0e99a2aba676b5d739050d7514acc2e9e3",
+      "mirrorContentHash": "74a15b52b4d4f8ee7c2f9c7fa0464f0e99a2aba676b5d739050d7514acc2e9e3",
+      "installedAt": "2026-09-16T04:33:20.475Z"
+    }
+  }
+}

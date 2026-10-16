@@ -1,0 +1,12 @@
+menu "configure app (heikesong) "
+
+config APP_CONFIG
+    bool
+    default y
+    select ENABLE_AI_COMPONENTS
+
+config TUYA_PRODUCT_ID
+    string "product ID of project"
+    default "sayojo04prxu4kts"
+
+endmenu

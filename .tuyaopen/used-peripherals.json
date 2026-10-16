@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-10-16T00:00:00Z",
+  "source": "vibe",
+  "peripherals": [
+    "display-rgb-main",
+    "camera",
+    "sd-card-1",
+    { "id": "onchip:gpio8", "pins": [{ "role": "sd-card-detect", "gpio": 8 }] }
+  ]
+}

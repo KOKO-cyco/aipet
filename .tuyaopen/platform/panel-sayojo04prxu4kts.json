@@ -1,0 +1,180 @@
+{
+  "schemaVersion": 2,
+  "pid": "ha89ld9djelrng6x",
+  "fetchedAt": "2026-09-24T06:30:02.229Z",
+  "source": "tuya-devplat-cli",
+  "boundPanel": {
+    "data": {
+      "uiId": "000002fmj3",
+      "name": "Agent Rapid Creation",
+      "url": "smart/ui_design_pkg_icon/non-session-user/1765420844c4739d13ef2.png",
+      "uiType": 1,
+      "productId": "ha89ld9djelrng6x",
+      "miniappId": "tyhz4siteryamjnyvd"
+    }
+  },
+  "panelList": {
+    "data": {
+      "dataList": [
+        {
+          "uiId": "000002ra20",
+          "panelName": "AI Toys",
+          "panelIcon": "smart/product_ui/bay1735639589835M0sG/17738011557d118507f27.png",
+          "uiType": 1,
+          "panelType": 8,
+          "panelEnabled": 1,
+          "productId": "ha89ld9djelrng6x",
+          "productName": "",
+          "miniappId": "tynsm3gpi94i6lukuw"
+        },
+        {
+          "uiId": "000002fmj3",
+          "panelName": "Agent Rapid Creation",
+          "panelIcon": "smart/ui_design_pkg_icon/non-session-user/1765420844c4739d13ef2.png",
+          "uiType": 1,
+          "panelType": 8,
+          "panelEnabled": 1,
+          "productId": "ha89ld9djelrng6x",
+          "productName": "",
+          "miniappId": "tyhz4siteryamjnyvd"
+        }
+      ]
+    }
+  },
+  "productPanelList": {
+    "ok": true,
+    "data": [
+      {
+        "code": "PUBLIC",
+        "count": 2,
+        "name": "公版面板",
+        "order": 1
+      },
+      {
+        "code": "PRIVATE",
+        "count": 0,
+        "name": "自定义面板",
+        "order": 2
+      },
+      {
+        "code": "AI_PANEL",
+        "count": 0,
+        "name": "AI面板",
+        "order": 3
+      },
+      {
+        "code": "CUSTOM",
+        "count": 0,
+        "name": "定制面板",
+        "order": 4
+      },
+      {
+        "code": "STUDIO",
+        "count": 0,
+        "name": "studio面板",
+        "order": 5
+      }
+    ],
+    "meta": {
+      "region": "AY",
+      "gateway": "/micro-app/pmg",
+      "url": "/api/product/ui/menu/list",
+      "method": "POST",
+      "elapsed_ms": 467,
+      "dry_run": false,
+      "mutating": false,
+      "request_preview": {
+        "method": "POST",
+        "gateway": "/micro-app/pmg",
+        "url": "/api/product/ui/menu/list",
+        "body": {
+          "productId": "ha89ld9djelrng6x"
+        }
+      }
+    }
+  },
+  "panelDpList": {
+    "ok": true,
+    "data": [
+      {
+        "code": "switch",
+        "defaultValue": "",
+        "dpId": 1,
+        "name": "Switch",
+        "property": {
+          "type": "bool"
+        },
+        "subtype": "bool"
+      },
+      {
+        "code": "battery_percentage",
+        "defaultValue": "",
+        "dpId": 2,
+        "name": "Battery",
+        "property": {
+          "max": 100,
+          "min": 0,
+          "scale": 0,
+          "step": 1,
+          "type": "value"
+        },
+        "subtype": "value"
+      },
+      {
+        "code": "volume_set",
+        "defaultValue": "",
+        "dpId": 3,
+        "name": "Volume",
+        "property": {
+          "max": 100,
+          "min": 0,
+          "scale": 0,
+          "step": 1,
+          "type": "value"
+        },
+        "subtype": "value"
+      },
+      {
+        "code": "charge_status",
+        "defaultValue": "",
+        "dpId": 5,
+        "name": "Charge Status",
+        "property": {
+          "range": [
+            "none",
+            "charging",
+            "charge_done"
+          ],
+          "type": "enum"
+        },
+        "subtype": "enum"
+      }
+    ],
+    "meta": {
+      "region": "AY",
+      "gateway": "/micro-app/exp",
+      "url": "/api/product/device/page/dp/list",
+      "method": "POST",
+      "elapsed_ms": 305,
+      "dry_run": false,
+      "mutating": false,
+      "request_preview": {
+        "method": "POST",
+        "gateway": "/micro-app/exp",
+        "url": "/api/product/device/page/dp/list",
+        "body": {
+          "productId": "ha89ld9djelrng6x"
+        }
+      }
+    }
+  },
+  "deviceId": "",
+  "batopPanelList": [
+    {
+      "miniProgramId": "tynhxkbkzf2v4k9dar",
+      "name": "智能管家",
+      "productId": "",
+      "type": "app"
+    }
+  ]
+}

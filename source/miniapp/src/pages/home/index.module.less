@@ -1,0 +1,553 @@
+/* ─────────────────────────────────────────────────────────────
+   IoT Device Panel - polished dark-tech aesthetic
+   - rpx units, --app-* vars, follows IDE light/dark theme
+   - Deep-tech visual: high-contrast cards, green status glow,
+     M4 accent gradients, subtle layered shadows
+   - All colors via var(--app-*) with fallbacks - no hardcoded
+     hex in layout, only inside gradient decorations
+   ──────────────────────────────────────────────────────────── */
+
+.container {
+  display: flex;
+  flex-direction: column;
+  padding: 24rpx 32rpx 96rpx;
+  min-height: 100vh;
+  background-color: var(--app-B2, #f4f5f7);
+  box-sizing: border-box;
+}
+
+/* ─── Device header (shown when there's no primary switch) ─── */
+.deviceCard {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  background: var(--app-B1, #ffffff);
+  border-radius: 28rpx;
+  padding: 28rpx;
+  margin-bottom: 20rpx;
+  box-shadow: 0 4rpx 20rpx color-mix(in srgb, var(--app-T1, #1a1a1a) 5%, transparent);
+}
+.deviceIcon {
+  flex-shrink: 0;
+  width: 88rpx;
+  height: 88rpx;
+  border-radius: 26rpx;
+  background: linear-gradient(135deg, var(--app-M4, #ff7a45) 0%, #ff9f6e 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 24rpx;
+  box-shadow: 0 6rpx 16rpx color-mix(in srgb, var(--app-M4, #ff7a45) 32%, transparent);
+}
+.deviceInfo {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.deviceName {
+  font-size: 34rpx;
+  font-weight: 700;
+  color: var(--app-T1, #1a1a1a);
+  line-height: 1.2;
+}
+.deviceStatus {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin-top: 8rpx;
+}
+.statusDot {
+  width: 14rpx;
+  height: 14rpx;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 8rpx rgba(34, 197, 94, 0.6), 0 0 0 6rpx rgba(34, 197, 94, 0.15);
+  margin-right: 10rpx;
+}
+.statusDotPreview {
+  background: #ffd166;
+  box-shadow: 0 0 8rpx rgba(255, 209, 102, 0.6), 0 0 0 6rpx rgba(255, 209, 102, 0.18);
+}
+.statusDotOffline {
+  background: #94a3b8;
+  box-shadow: none;
+}
+.deviceStatusText {
+  font-size: 22rpx;
+  font-weight: 600;
+  color: var(--app-T3, #999999);
+  text-transform: uppercase;
+  letter-spacing: 1rpx;
+}
+
+/* ─── Hero panel: device illustration + status ─── */
+.hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: 32rpx;
+  padding: 40rpx 32rpx 36rpx;
+  margin-bottom: 24rpx;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-height: 280rpx;
+  box-shadow: 0 8rpx 32rpx rgba(0, 0, 0, 0.06);
+  transition: background 0.4s ease;
+}
+.heroOn {
+  background:
+    radial-gradient(120% 80% at 18% 0%, rgba(255,255,255,0.22), transparent 60%),
+    var(--app-M4, #6366f1);
+}
+.heroOff {
+  background:
+    radial-gradient(120% 80% at 18% 0%, rgba(255,255,255,0.06), transparent 60%),
+    linear-gradient(135deg, #475569 0%, #1e293b 100%);
+}
+.heroHalo {
+  position: absolute;
+  top: -120rpx;
+  right: -120rpx;
+  width: 380rpx;
+  height: 380rpx;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(255, 255, 255, 0.32), transparent);
+  pointer-events: none;
+}
+.heroHeader {
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 28rpx;
+  z-index: 1;
+}
+.heroBrand {
+  display: flex;
+  flex-direction: column;
+}
+.title {
+  font-size: 36rpx;
+  font-weight: 700;
+  color: #ffffff;
+  letter-spacing: 0.4rpx;
+  line-height: 1.2;
+}
+.heroIcon {
+  width: 96rpx;
+  height: 96rpx;
+  border-radius: 28rpx;
+  background: rgba(255, 255, 255, 0.22);
+  border: 2rpx solid rgba(255, 255, 255, 0.32);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+.heroIconGlyph {
+  font-size: 48rpx;
+  color: #ffffff;
+  line-height: 1;
+}
+.heroName {
+  font-size: 26rpx;
+  color: rgba(255, 255, 255, 0.82);
+  margin-bottom: 8rpx;
+  z-index: 1;
+}
+.heroState {
+  font-size: 64rpx;
+  font-weight: 800;
+  letter-spacing: 4rpx;
+  color: #ffffff;
+  z-index: 1;
+  text-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.14);
+}
+.heroToggle {
+  position: absolute;
+  right: 32rpx;
+  bottom: 36rpx;
+  z-index: 2;
+  transform: scale(1.2);
+  transform-origin: center;
+}
+
+/* Status pill - sits in the hero header */
+.statusPill {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.22);
+  border: 1rpx solid rgba(255, 255, 255, 0.28);
+  padding: 8rpx 20rpx;
+  border-radius: 999rpx;
+}
+.dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background: #6dffaa;
+  box-shadow: 0 0 0 6rpx rgba(109, 255, 170, 0.24);
+  margin-right: 10rpx;
+}
+.statusText {
+  font-size: 22rpx;
+  font-weight: 600;
+  color: #ffffff;
+  letter-spacing: 0.6rpx;
+}
+.statusPillPreview .dot {
+  background: #ffd166;
+  box-shadow: 0 0 0 6rpx rgba(255, 209, 102, 0.24);
+}
+.dotOffline {
+  background: #94a3b8;
+  box-shadow: none;
+}
+
+/* ─── Section ─── */
+.section {
+  margin-top: 8rpx;
+}
+.sectionTitle {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin: 24rpx 8rpx 16rpx;
+}
+.sectionAccent {
+  width: 8rpx;
+  height: 28rpx;
+  border-radius: 4rpx;
+  background: linear-gradient(180deg, var(--app-M4, #ff7a45), color-mix(in srgb, var(--app-M4, #ff7a45) 60%, #ffffff));
+  margin-right: 14rpx;
+  box-shadow: 0 0 8rpx color-mix(in srgb, var(--app-M4, #ff7a45) 40%, transparent);
+}
+.sectionTitleText {
+  font-size: 28rpx;
+  font-weight: 700;
+  color: var(--app-T1, #1a1a1a);
+  letter-spacing: 0.6rpx;
+  text-transform: uppercase;
+}
+
+/* ─── Generic card ─── */
+.card {
+  background: var(--app-B1, #ffffff);
+  border-radius: 24rpx;
+  padding: 28rpx;
+  margin-bottom: 16rpx;
+  box-shadow: 0 4rpx 16rpx color-mix(in srgb, var(--app-T1, #1a1a1a) 4%, transparent);
+}
+.cardRow {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+.cardIcon {
+  position: relative;
+  flex-shrink: 0;
+  width: 76rpx;
+  height: 76rpx;
+  border-radius: 22rpx;
+  background: color-mix(in srgb, var(--app-M4, #ff7a45) 12%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 22rpx;
+  overflow: hidden;
+}
+.cardIcon::before {
+  content: '';
+  position: absolute;
+  top: 10rpx;
+  right: 10rpx;
+  width: 10rpx;
+  height: 10rpx;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 6rpx rgba(255, 255, 255, 0.7);
+  z-index: 1;
+}
+.cardIconActive {
+  background: linear-gradient(135deg, var(--app-M4, #ff7a45) 0%, #ff9f6e 100%);
+  box-shadow: 0 4rpx 12rpx color-mix(in srgb, var(--app-M4, #ff7a45) 34%, transparent);
+}
+.cardBody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.cardName {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--app-T1, #1a1a1a);
+}
+.cardMeta {
+  font-size: 22rpx;
+  color: var(--app-T3, #999999);
+  margin-top: 6rpx;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+
+/* ─── Bool toggle - flat wide pill (reference: ~3:1, round white thumb, grey off / M4 on) ─── */
+.boolSwitch {
+  position: relative;
+  flex-shrink: 0;
+  width: 120rpx;
+  height: 44rpx;
+  border-radius: 999rpx;
+  background: color-mix(in srgb, var(--app-T3, #999999) 28%, var(--app-B2, #f4f5f7));
+  transition: background 0.28s ease;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.boolSwitchOn {
+  background: var(--app-M4, #ff7a45);
+}
+.boolSwitchDisabled {
+  opacity: 0.45;
+}
+.boolSwitchThumb {
+  position: absolute;
+  top: 4rpx;
+  left: 4rpx;
+  width: 36rpx;
+  height: 36rpx;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 2rpx 6rpx rgba(0, 0, 0, 0.15);
+  transition: left 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 1;
+}
+.boolSwitchThumbOn {
+  left: 80rpx;
+}
+
+/* ─── Slider (value, writable) - wraps smart-ui Slider ─── */
+.sliderHeader {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  margin-bottom: 8rpx;
+}
+.sliderName {
+  flex: 1;
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--app-T1, #1a1a1a);
+}
+.sliderValueWrap {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  padding: 8rpx 20rpx;
+  border-radius: 16rpx;
+  background: color-mix(in srgb, var(--app-M4, #ff7a45) 10%, transparent);
+}
+.sliderValueBig {
+  font-size: 44rpx;
+  font-weight: 700;
+  color: var(--app-M4, #ff7a45);
+  line-height: 1;
+}
+.sliderValueUnit {
+  font-size: 22rpx;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--app-M4, #ff7a45) 80%, var(--app-T2, #666666));
+  margin-left: 4rpx;
+}
+.sliderWrap {
+  margin: 20rpx 0 8rpx;
+}
+.sliderRange {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  margin-top: 8rpx;
+}
+.sliderRangeLabel {
+  font-size: 22rpx;
+  color: var(--app-T3, #999999);
+  font-weight: 500;
+}
+
+/* ─── Stat tile (value, readonly) - inline readout + accent bar ─── */
+.statBlock {
+  padding: 22rpx 4rpx 4rpx;
+}
+.statReadout {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  margin-bottom: 18rpx;
+}
+.statValue {
+  font-size: 72rpx;
+  font-weight: 800;
+  color: inherit;
+  line-height: 1;
+  letter-spacing: -1rpx;
+}
+.statUnit {
+  font-size: 28rpx;
+  font-weight: 700;
+  color: inherit;
+  opacity: 0.75;
+  margin-left: 8rpx;
+}
+.statBar {
+  width: 100%;
+  height: 16rpx;
+  border-radius: 999rpx;
+  background: var(--app-B3, #e5e7eb);
+  overflow: hidden;
+}
+.statBarFill {
+  height: 100%;
+  border-radius: 999rpx;
+  background: currentColor;
+  box-shadow: 0 0 12rpx color-mix(in srgb, currentColor 45%, transparent);
+  transition: width 0.3s ease;
+}
+.statRange {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  margin-top: 12rpx;
+}
+.statRangeLabel {
+  font-size: 22rpx;
+  color: var(--app-T3, #999999);
+  font-weight: 500;
+}
+
+/* ─── Segmented control (enum) ─── */
+.enumHeader {
+  margin-bottom: 20rpx;
+}
+.segmented {
+  display: flex;
+  flex-direction: row;
+  background: var(--app-B2, #f4f5f7);
+  border-radius: 18rpx;
+  padding: 6rpx;
+}
+.segment {
+  flex: 1;
+  padding: 18rpx 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14rpx;
+  min-height: 88rpx;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+.segmentActive {
+  background: var(--app-B1, #ffffff);
+  box-shadow: 0 2rpx 10rpx color-mix(in srgb, var(--app-T1, #1a1a1a) 8%, transparent);
+}
+.segmentDisabled {
+  opacity: 0.6;
+}
+.segmentText {
+  font-size: 26rpx;
+  font-weight: 500;
+  color: var(--app-T2, #666666);
+}
+.segmentTextActive {
+  color: var(--app-M4, #ff7a45);
+  font-weight: 700;
+}
+
+/* ─── String ─── */
+.stringReadonly {
+  font-size: 26rpx;
+  color: var(--app-T2, #666666);
+  margin-top: 16rpx;
+  word-break: break-all;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+  background: var(--app-B2, #f4f5f7);
+  padding: 16rpx 18rpx;
+  border-radius: 14rpx;
+}
+.stringInputRow {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 12rpx;
+  margin-top: 18rpx;
+}
+.stringInput {
+  flex: 1;
+  background: var(--app-B2, #f4f5f7);
+  border: 2rpx solid transparent;
+  border-radius: 16rpx;
+  padding: 16rpx 20rpx;
+  color: var(--app-T1, #1a1a1a);
+  font-size: 26rpx;
+  box-sizing: border-box;
+}
+.stringSendBtn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 88rpx;
+  min-height: 88rpx;
+  background: linear-gradient(135deg, var(--app-M4, #ff7a45) 0%, #ff9f6e 100%);
+  border-radius: 16rpx;
+  box-shadow: 0 6rpx 16rpx color-mix(in srgb, var(--app-M4, #ff7a45) 30%, transparent);
+}
+.stringSendBtnSuccess {
+  background: linear-gradient(135deg, #22c55e 0%, #4ade80 100%);
+  box-shadow: 0 6rpx 16rpx color-mix(in srgb, #22c55e 30%, transparent);
+}
+.stringSendBtnText {
+  font-size: 32rpx;
+  font-weight: 700;
+  color: #ffffff;
+}
+.stringError {
+  font-size: 22rpx;
+  color: #ef4444;
+  margin-top: 10rpx;
+}
+
+/* ─── Empty state ─── */
+.emptyCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--app-B1, #ffffff);
+  border-radius: 24rpx;
+  padding: 80rpx 40rpx;
+  margin-top: 16rpx;
+  box-shadow: 0 4rpx 16rpx color-mix(in srgb, var(--app-T1, #1a1a1a) 4%, transparent);
+}
+.emptyIconWrap {
+  width: 128rpx;
+  height: 128rpx;
+  border-radius: 32rpx;
+  background: color-mix(in srgb, var(--app-M4, #ff7a45) 12%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 24rpx;
+}
+.emptyTitle {
+  font-size: 32rpx;
+  font-weight: 700;
+  color: var(--app-T1, #1a1a1a);
+  margin-bottom: 12rpx;
+}
+.emptyHint {
+  font-size: 24rpx;
+  color: var(--app-T2, #666666);
+  text-align: center;
+  line-height: 1.6;
+}

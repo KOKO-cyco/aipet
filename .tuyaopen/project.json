@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schemas.tuyaopen.dev/project.v1.json",
+  "schemaVersion": 1,
+  "name": "aipet",
+  "description": "",
+  "version": "0.1.0",
+  "type": "tuyaopen-app",
+  "framework": "base",
+  "createdAt": "2026-09-16T04:33:19.297Z",
+  "createdBy": {
+    "tool": "tuyaopen-ide",
+    "version": "1.0.0"
+  },
+  "updatedAt": "2026-09-16T04:33:19.297Z",
+  "license": "Apache-2.0",
+  "tags": [],
+  "ai": {
+    "agents": [
+      "cursor",
+      "claude-code"
+    ],
+    "skills": [],
+    "notes": "Canonical project descriptor consumed by AI coding agents. Update `version`, `tags`, and `ai.skills` as the project evolves. Do not delete `schemaVersion` — the IDE uses it to migrate."
+  }
+}

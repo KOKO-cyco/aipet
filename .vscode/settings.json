@@ -1,0 +1,22 @@
+{
+    "cmake.sourceDirectory": "${workspaceFolder}/source/embedded",
+    "cmake.buildDirectory": "${workspaceFolder}/source/embedded/.build",
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/source/embedded/.build/compile_commands.json",
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/source/embedded/include",
+        "C:/Users/liyi/TuyaOpenIDE/TuyaOpenSDK/**"
+    ],
+    "files.associations": {
+        "*.h": "c",
+        "*.c": "c"
+    },
+    "terminal.integrated.env.linux": {
+        "PATH": "c:\\Users\\liyi\\TuyaOpenIDE\\projects\\aipet\\.tuyaopen\\ide\\bin:${env:PATH}"
+    },
+    "terminal.integrated.env.osx": {
+        "PATH": "c:\\Users\\liyi\\TuyaOpenIDE\\projects\\aipet\\.tuyaopen\\ide\\bin:${env:PATH}"
+    },
+    "terminal.integrated.env.windows": {
+        "PATH": "c:\\Users\\liyi\\TuyaOpenIDE\\projects\\aipet\\.tuyaopen\\ide\\bin;${env:PATH}"
+    }
+}

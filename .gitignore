@@ -1,0 +1,35 @@
+# OS / editor
+.DS_Store
+*.swp
+*~
+# TuyaOpen IDE — machine-local devplat bridge (auto-generated)
+.tuyaopen/ide/
+
+# ---- 构建产物（可再生成，不进基线） ----------------------------------------
+source/embedded/.build/
+source/embedded/dist/
+source/embedded/log/
+source/embedded/log.log
+source/*.zip
+
+# ---- 巨型素材（另有产出机器，见 memory: anim-frame-pipeline） --------------
+# resources 459M / music 137M，进 git 会让仓库直接失控；代码基线不含它们。
+third_party/resources/
+third_party/music/
+third_party/*.psd
+
+# ---- 2D 角色的源素材与打包产物（同一条理由） --------------------------------
+# blue_big_fat_fish 72M（源 webm/mp4）/ fish 44M（*.spf、*.rgb 打包产物）
+# 两者都能从源视频重跑 `sh tools/build_fish.sh` 得到；进 git 只会让仓库翻倍。
+# 注意：这意味着**换机器要单独拷这两个目录**，光 clone 仓库是跑不出素材的。
+third_party/blue_big_fat_fish/
+third_party/fish/
+preview/
+
+# Python
+__pycache__/
+*.pyc
+
+# ---- Claude Code 的机器本地状态（路径是绝对的，换机器没意义）----
+.claude/settings.local.json
+.claude/scheduled_tasks.lock

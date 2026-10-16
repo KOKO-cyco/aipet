@@ -1,37 +1,58 @@
-# AIPet
+# aipet
 
-#### 介绍
-ai桌宠++
+T5AI 横屏桌宠摆件：**宠物 + 对话 + 备忘录**。
 
-#### 软件架构
-软件架构说明
+```
+┌──────────────────────────────────────────────┐
+│  WiFi   14:32    ☀ 26°    🔊      ▮▮▮ 78%  │  状态栏
+├──────────────────────┬───────────────────────┤
+│                      │                       │
+│         🐟           │   备忘录 / 对话        │
+│       宠物            │                       │
+└──────────────────────┴───────────────────────┘
+```
 
+- **宠物** —— 左半屏，SD 卡上的帧序列精灵，有情绪、会对说话内容做动作
+- **对话** —— AI 语音栈（VAD → AEC → Opus → 云端 → 播放），开机常驻，
+  通过 MCP 工具驱动宠物动作
+- **备忘录** —— 右半屏（**别人做**，现在是设计原型）
+- **状态栏** —— WiFi 键盘 / 天气 / 时间 / AI 音量 / 电量
 
-#### 安装教程
+上手看 [`START-HERE.md`](START-HERE.md)（编译、烧录、SD 卡要放什么、裁剪记录、踩过的坑）。
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+## Build
 
-#### 使用说明
+```sh
+cd source/embedded
+tos.py build
+```
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+纯 C 工程（老产品的 NES 模拟器和 MP3 软解已删，不再需要 C++）。
 
-#### 参与贡献
+## Layout
 
-1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
-3.  提交代码
-4.  新建 Pull Request
+```
+aipet/
+├── .tuyaopen/              # IDE + AI metadata（见 AGENTS.md 的描述符契约）
+├── tools/                  # 素材管线：webm -> PNG -> fish_elf.spf
+├── third_party/
+│   ├── fish/               # 打包产物（gitignore，换机器要单独拷）
+│   └── blue_big_fat_fish/  # 动作素材源（gitignore）
+├── source/
+│   ├── embedded/           # 固件（tos.py build 在这里跑）
+│   │   └── src/
+│   │       ├── core/       # 事件总线 / 配置中心 / 页面路由
+│   │       ├── service/    # 显示 / 音频 / 存储 / 网络 / 时间 / 按键 / 字体 / 天气 / 电量
+│   │       ├── pages/      # 页面 + 状态栏控件
+│   │       ├── modules/    # 精灵引擎 / AI 语音 / 对话驱动动作 / 扬声器
+│   │       └── tests/      # 宏门控的 bring-up 测试
+│   └── miniapp/            # panel / mini-app 占位
+├── AGENTS.md               # AI agent 的项目说明（分层约定、日志规范、硬件规则）
+└── START-HERE.md
+```
 
+## 分层
 
-#### 特技
-
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+`pages → service + modules → core`，**单向**。模块之间不互相 include ——
+AI 要控制宠物动作时走事件总线（`APP_EVT_PET_ACTION`），动作策略留在页面里。
+详见 [`source/embedded/ARCHITECTURE.md`](source/embedded/ARCHITECTURE.md)。

@@ -1,0 +1,147 @@
+{
+  "$schema": "https://schemas.tuyaopen.dev/architecture.v1.json",
+  "schemaVersion": 1,
+  "surfaces": {
+    "embedded": {
+      "enabled": true,
+      "path": "source/embedded",
+      "scaffolded": false,
+      "platform": "t5ai",
+      "framework": "base",
+      "board": "TUYA_T5AI_BOARD",
+      "chip": "BK7258",
+      "entrypoint": {
+        "file": "source/embedded/src/tuya_app_main.c",
+        "symbol": "tuya_app_main"
+      },
+      "rtos": {
+        "kind": "tuya-tal",
+        "tasks": [
+          {
+            "name": "tuya_app_main",
+            "stackDepth": "1024 * 8",
+            "priority": "THREAD_PRIO_1"
+          },
+          {
+            "name": "ui_router",
+            "stackDepth": "8192",
+            "priority": "THREAD_PRIO_3"
+          },
+          {
+            "name": "lvgl",
+            "stackDepth": "8192",
+            "priority": "THREAD_PRIO_2"
+          },
+          {
+            "name": "preload",
+            "stackDepth": "8192",
+            "priority": "THREAD_PRIO_4"
+          }
+        ]
+      },
+      "memory": {
+        "stack": "1024*8",
+        "heap": "PSRAM"
+      },
+      "hardware": {
+        "peripherals": [
+          "display-rgb-main",
+          "sd-card-1",
+          "onchip:gpio8"
+        ],
+        "interfaces": []
+      }
+    },
+    "miniapp": {
+      "enabled": true,
+      "path": "source/miniapp",
+      "scaffolded": false,
+      "panelKind": null,
+      "entrypoint": null
+    }
+  },
+  "modules": [
+    {
+      "id": "core",
+      "name": "Application framework",
+      "kind": "component",
+      "language": "C",
+      "sources": [
+        "source/embedded/src/core/"
+      ],
+      "surface": "embedded",
+      "notes": "事件总线 / 配置中心 / 页面路由。与硬件无关，任何功能都要用。"
+    },
+    {
+      "id": "service",
+      "name": "Capability services",
+      "kind": "component",
+      "language": "C",
+      "sources": [
+        "source/embedded/src/service/"
+      ],
+      "surface": "embedded",
+      "notes": "显示 / 音频 / 扬声器 / 存储 / 网络 / 时间 / 按键 / 字体 / 天气 / 电量 / SD 就绪。"
+    },
+    {
+      "id": "pages",
+      "name": "Pages and UI widgets",
+      "kind": "component",
+      "language": "C",
+      "sources": [
+        "source/embedded/src/pages/"
+      ],
+      "surface": "embedded",
+      "notes": "两个页面（桌宠 page_pet、SD 门页 page_nosd）+ 顶部状态栏控件 app_statusbar。"
+    },
+    {
+      "id": "modules",
+      "name": "Feature modules",
+      "kind": "component",
+      "language": "C",
+      "sources": [
+        "source/embedded/src/modules/"
+      ],
+      "surface": "embedded",
+      "notes": "精灵引擎（app_sprite2d / app_spf6）、AI 语音栈（app_ai_chat）、对话驱动动作（app_avatar_tools）、音量控件（app_volui）。"
+    },
+    {
+      "id": "tests",
+      "name": "Bring-up tests",
+      "kind": "component",
+      "language": "C",
+      "sources": [
+        "source/embedded/src/tests/"
+      ],
+      "surface": "embedded",
+      "notes": "宏门控的开机自检（麦克风 / SD 读压力），默认关。"
+    },
+    {
+      "id": "assets",
+      "name": "Sprite asset pipeline",
+      "kind": "tool",
+      "language": "Python",
+      "sources": [
+        "tools/"
+      ],
+      "surface": "embedded",
+      "notes": "webm -> PNG 序列 -> fish_elf.spf（tools/build_fish.sh）。产物放 SD 卡。"
+    }
+  ],
+  "components": [],
+  "dependencies": [
+    {
+      "id": "tuyaopen-core",
+      "version": "main",
+      "kind": "core",
+      "surface": "embedded"
+    },
+    {
+      "id": "tuyaopen-ai-components",
+      "version": "main",
+      "kind": "core",
+      "surface": "embedded",
+      "notes": "AI 语音对话 + MCP（CONFIG_ENABLE_AI_COMPONENTS=y / CONFIG_ENABLE_COMP_AI_MCP=y）。"
+    }
+  ]
+}

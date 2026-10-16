@@ -1,0 +1,12 @@
+ .../onboard_mic_stream/onboard_mic_stream.c        |    9 +-
+ .../bk_voice_service/src/bk_voice_service.c        |  382 +++---
+ t5_os/ap/components/fatfs/ffconf.h                 |   15 +-
+ .../ap/middleware/driver/sd_card/sd_card_driver.c  |    8 +-
+ .../middleware/soc/bk7257_ap/bk7257_ap.defconfig   |    2 +-
+ .../middleware/soc/bk7258_ap/bk7258_ap.defconfig   | 1324 ++++++++++----------
+ t5_os/projects/tuya_app/ap/config/bk7258_ap/config |   17 +
+ tuyaos/tuyaos_adapter/include/vad/tkl_vad.h        |    6 +
+ tuyaos/tuyaos_adapter/src/driver/tkl_audio.c       |   11 +
+ tuyaos/tuyaos_adapter/src/driver/tkl_kws.c         |   46 +-
+ tuyaos/tuyaos_adapter/src/driver/tkl_vad.c         |  162 ++-
+ 11 files changed, 1101 insertions(+), 881 deletions(-)

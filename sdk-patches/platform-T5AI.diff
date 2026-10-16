@@ -1,0 +1,2523 @@
+diff --git a/t5_os/ap/components/bk_audio/audio_streams/onboard_mic_stream/onboard_mic_stream.c b/t5_os/ap/components/bk_audio/audio_streams/onboard_mic_stream/onboard_mic_stream.c
+index 66bfb57cf..0608bb302 100755
+--- a/t5_os/ap/components/bk_audio/audio_streams/onboard_mic_stream/onboard_mic_stream.c
++++ b/t5_os/ap/components/bk_audio/audio_streams/onboard_mic_stream/onboard_mic_stream.c
+@@ -462,18 +462,19 @@ static bk_err_t _onboard_mic_close(audio_element_handle_t self)
+ 
+     onboard_mic_stream_t *onboard_mic = (onboard_mic_stream_t *)audio_element_getdata(self);
+ 
++    /* Stopping on an already-stopped channel reports an error; that must not
++     * fail the element close (a failing close aborts audio_pipeline_terminate
++     * and strands the adc in the initialized state). Log and go on. */
+     bk_err_t ret = bk_dma_stop(onboard_mic->mic_dma_id);
+     if (ret != BK_OK)
+     {
+-        BK_LOGE(TAG, "%s, %d, dac dma stop fail\n", __func__, __LINE__);
+-        return BK_FAIL;
++        BK_LOGE(TAG, "%s, %d, mic dma stop fail, continue\n", __func__, __LINE__);
+     }
+ 
+     ret = bk_aud_adc_stop();
+     if (ret != BK_OK)
+     {
+-        BK_LOGE(TAG, "%s, %d, dac stop fail\n", __func__, __LINE__);
+-        return BK_FAIL;
++        BK_LOGE(TAG, "%s, %d, adc stop fail, continue\n", __func__, __LINE__);
+     }
+ 
+     onboard_mic->is_open = false;
+diff --git a/t5_os/ap/components/bk_voice_service/src/bk_voice_service.c b/t5_os/ap/components/bk_voice_service/src/bk_voice_service.c
+index 32818ccdb..c7a0f228a 100755
+--- a/t5_os/ap/components/bk_voice_service/src/bk_voice_service.c
++++ b/t5_os/ap/components/bk_voice_service/src/bk_voice_service.c
+@@ -75,8 +75,8 @@ struct voice
+ 
+     voice_sta_t             status;             /**< voice handle status */
+ 
+-    voice_event_handle      event_handle;       /**< voice event handle callback */
+-    void *                  args;               /**< the parameter of event_handle func */
++    voice_event_handle      event_handle;       /**< voice event handle callback */
++    void *                  args;               /**< the parameter of event_handle func */
+ 
+     beken_thread_t          listener_task_hdl;
+     beken_queue_t           listener_msg_que;
+@@ -96,16 +96,22 @@ static bk_err_t record_pipeline_deinit(voice_handle_t voice_handle)
+         return BK_OK;
+     }
+ 
++    /* Best-effort teardown: a failed element stop (e.g. bk_dma_stop on an
++     * already-stopped channel) must NOT skip the destroys below -- the mic
++     * element destroy is what runs bk_aud_adc_deinit. Leaving it out keeps
++     * the adc initialized and the next bk_voice_init fails with
++     * "aud adc is init already". */
+     if (BK_OK != audio_pipeline_terminate(voice_handle->record_pipeline))
+     {
+         BK_LOGE(TAG, "%s, %d, record_pipeline terminate fail\n", __func__, __LINE__);
+-        return BK_FAIL;
+     }
+ 
+-    if (voice_handle->mic_str && BK_OK != audio_pipeline_unregister(voice_handle->record_pipeline, voice_handle->mic_str))
++    if (voice_handle->mic_str)
+     {
+-        BK_LOGE(TAG, "%s, %d, unregister mic_stream fail\n", __func__, __LINE__);
+-        return BK_FAIL;
++        if (BK_OK != audio_pipeline_unregister(voice_handle->record_pipeline, voice_handle->mic_str))
++        {
++            BK_LOGE(TAG, "%s, %d, unregister mic_stream fail\n", __func__, __LINE__);
++        }
+     }
+ 
+     if (voice_handle->aec_en && voice_handle->aec_alg)
+@@ -113,20 +119,23 @@ static bk_err_t record_pipeline_deinit(voice_handle_t voice_handle)
+         if (BK_OK != audio_pipeline_unregister(voice_handle->record_pipeline, voice_handle->aec_alg))
+         {
+             BK_LOGE(TAG, "%s, %d, unregister aec_algorithm fail\n", __func__, __LINE__);
+-            return BK_FAIL;
+         }
+     }
+ 
+-    if (voice_handle->mic_enc && BK_OK != audio_pipeline_unregister(voice_handle->record_pipeline, voice_handle->mic_enc))
++    if (voice_handle->mic_enc)
+     {
+-        BK_LOGE(TAG, "%s, %d, unregister encoder fail\n", __func__, __LINE__);
+-        return BK_FAIL;
++        if (BK_OK != audio_pipeline_unregister(voice_handle->record_pipeline, voice_handle->mic_enc))
++        {
++            BK_LOGE(TAG, "%s, %d, unregister encoder fail\n", __func__, __LINE__);
++        }
+     }
+ 
+-    if (voice_handle->raw_read && BK_OK != audio_pipeline_unregister(voice_handle->record_pipeline, voice_handle->raw_read))
++    if (voice_handle->raw_read)
+     {
+-        BK_LOGE(TAG, "%s, %d, unregister raw_read staream fail\n", __func__, __LINE__);
+-        return BK_FAIL;
++        if (BK_OK != audio_pipeline_unregister(voice_handle->record_pipeline, voice_handle->raw_read))
++        {
++            BK_LOGE(TAG, "%s, %d, unregister raw_read staream fail\n", __func__, __LINE__);
++        }
+     }
+ 
+     if (voice_handle->record_evt)
+@@ -135,66 +144,51 @@ static bk_err_t record_pipeline_deinit(voice_handle_t voice_handle)
+         if (BK_OK != audio_pipeline_remove_listener(voice_handle->record_pipeline))
+         {
+             BK_LOGE(TAG, "%s, %d, remove record pipeline fail\n", __func__, __LINE__);
+-            return BK_FAIL;
+         }
+ 
+         if (BK_OK != audio_event_iface_destroy(voice_handle->record_evt))
+         {
+             BK_LOGE(TAG, "%s, %d, destroy record pipeline fail\n", __func__, __LINE__);
+-            return BK_FAIL;
+         }
++        voice_handle->record_evt = NULL;
+     }
+ 
+     if (BK_OK != audio_pipeline_deinit(voice_handle->record_pipeline))
+     {
+         BK_LOGE(TAG, "%s, %d, record_pipeline deinit fail\n", __func__, __LINE__);
+-        return BK_FAIL;
+-    }
+-    else
+-    {
+-        voice_handle->record_pipeline = NULL;
+     }
++    voice_handle->record_pipeline = NULL;
+ 
+     if (voice_handle->mic_str && BK_OK != audio_element_deinit(voice_handle->mic_str))
+     {
+         BK_LOGE(TAG, "%s, %d, mic_stream deinit fail\n", __func__, __LINE__);
+-        return BK_FAIL;
+-    }
+-    else
+-    {
+-        voice_handle->mic_str = NULL;
+     }
++    voice_handle->mic_str = NULL;
+ 
+     if (voice_handle->aec_en && voice_handle->aec_alg)
+     {
+         if (BK_OK != audio_element_deinit(voice_handle->aec_alg))
+         {
+             BK_LOGE(TAG, "%s, %d, aec_algorithm deinit fail\n", __func__, __LINE__);
+-            return BK_FAIL;
+-        }
+-        else
+-        {
+-            voice_handle->aec_alg = NULL;
+         }
++        voice_handle->aec_alg = NULL;
+     }
+ 
+-    if (voice_handle->mic_enc && BK_OK != audio_element_deinit(voice_handle->mic_enc))
+-    {
+-        BK_LOGE(TAG, "%s, %d, encoder deinit fail\n", __func__, __LINE__);
+-        return BK_FAIL;
+-    }
+-    else
++    if (voice_handle->mic_enc)
+     {
++        if (BK_OK != audio_element_deinit(voice_handle->mic_enc))
++        {
++            BK_LOGE(TAG, "%s, %d, encoder deinit fail\n", __func__, __LINE__);
++        }
+         voice_handle->mic_enc = NULL;
+     }
+ 
+-    if (voice_handle->raw_read && BK_OK != audio_element_deinit(voice_handle->raw_read))
+-    {
+-        BK_LOGE(TAG, "%s, %d, raw_read staream deinit fail\n", __func__, __LINE__);
+-        return BK_FAIL;
+-    }
+-    else
++    if (voice_handle->raw_read)
+     {
++        if (BK_OK != audio_element_deinit(voice_handle->raw_read))
++        {
++            BK_LOGE(TAG, "%s, %d, raw_read staream deinit fail\n", __func__, __LINE__);
++        }
+         voice_handle->raw_read = NULL;
+     }
+ 
+@@ -220,24 +214,24 @@ static bk_err_t record_pipeline_init(voice_handle_t voice_handle, voice_cfg_t *c
+         voice_handle->mic_str = onboard_mic_stream_init(&cfg->mic_cfg.onboard_mic_cfg);
+         VOICE_CHECK_NULL(voice_handle->mic_str, goto fail);
+     }
+-#if CONFIG_ADK_UAC_MIC_STREAM
++#if CONFIG_ADK_UAC_MIC_STREAM
+     else if (voice_handle->mic_type == MIC_TYPE_UAC)
+     {
+         voice_handle->mic_str = uac_mic_stream_init(&cfg->mic_cfg.uac_mic_cfg);
+         VOICE_CHECK_NULL(voice_handle->mic_str, goto fail);
+     }
+-#endif
+-#if CONFIG_ADK_ONBOARD_DUAL_DMIC_MIC_STREAM
++#endif
++#if CONFIG_ADK_ONBOARD_DUAL_DMIC_MIC_STREAM
+     else if (voice_handle->mic_type == MIC_TYPE_ONBOARD_DUAL_DMIC_MIC)
+     {
+-        if(!cfg->aec_en && cfg->mic_cfg.onboard_dual_dmic_mic_cfg.dual_dmic)
++        if(!cfg->aec_en && cfg->mic_cfg.onboard_dual_dmic_mic_cfg.dual_dmic)
+         {
+             cfg->mic_cfg.onboard_dual_dmic_mic_cfg.dual_dmic_sgl_out = 1;
+-        }
++        }
+         voice_handle->mic_str = onboard_dual_dmic_mic_stream_init(&cfg->mic_cfg.onboard_dual_dmic_mic_cfg);
+         VOICE_CHECK_NULL(voice_handle->mic_str, goto fail);
+     }
+-#endif
++#endif
+     else
+     {
+         //nothing todo
+@@ -247,30 +241,30 @@ static bk_err_t record_pipeline_init(voice_handle_t voice_handle, voice_cfg_t *c
+ 
+     if (voice_handle->aec_en)
+     {
+-
+-        #if CONFIG_ADK_AEC_V3_ALGORITHM
++
++        #if CONFIG_ADK_AEC_V3_ALGORITHM
+         bk_voice_cal_vad_buf_size(cfg, voice_handle);
+-        voice_handle->aec_alg = aec_v3_algorithm_init(&cfg->aec_cfg.aec_alg_cfg);
+-        #else
+-        BK_LOGE(TAG, "%s, %d,AEC V3 but CONFIG_ADK_AEC_V3_ALGORITHM is not set!\n", __func__, __LINE__);
+-        #endif
++        voice_handle->aec_alg = aec_v3_algorithm_init(&cfg->aec_cfg.aec_alg_cfg);
++        #else
++        BK_LOGE(TAG, "%s, %d,AEC V3 but CONFIG_ADK_AEC_V3_ALGORITHM is not set!\n", __func__, __LINE__);
++        #endif
+         
+         VOICE_CHECK_NULL(voice_handle->aec_alg, goto fail);
+     }
+-
+-    switch (voice_handle->enc_type)
+-    {
+-        case AUDIO_ENC_TYPE_G711A:
+-        case AUDIO_ENC_TYPE_G711U:
+-            voice_handle->mic_enc = g711_encoder_init(&cfg->enc_cfg.g711_enc_cfg);
+-            break;
+-
+-#if CONFIG_VOICE_SERVICE_AAC_ENCODER
+-        case AUDIO_ENC_TYPE_AAC:
+-            voice_handle->mic_enc = aac_encoder_init(&cfg->enc_cfg.aac_enc_cfg);
+-            break;
+-#endif
+-
++
++    switch (voice_handle->enc_type)
++    {
++        case AUDIO_ENC_TYPE_G711A:
++        case AUDIO_ENC_TYPE_G711U:
++            voice_handle->mic_enc = g711_encoder_init(&cfg->enc_cfg.g711_enc_cfg);
++            break;
++
++#if CONFIG_VOICE_SERVICE_AAC_ENCODER
++        case AUDIO_ENC_TYPE_AAC:
++            voice_handle->mic_enc = aac_encoder_init(&cfg->enc_cfg.aac_enc_cfg);
++            break;
++#endif
++
+ #if CONFIG_VOICE_SERVICE_G722_ENCODER
+         case AUDIO_ENC_TYPE_G722:
+             voice_handle->mic_enc = g722_encoder_init(&cfg->enc_cfg.g722_enc_cfg);
+@@ -282,15 +276,15 @@ static bk_err_t record_pipeline_init(voice_handle_t voice_handle, voice_cfg_t *c
+             break;
+ #endif
+ 
+-        case AUDIO_ENC_TYPE_PCM:
+-            /* not need encoder */
+-            break;
+-
+-        default:
++        case AUDIO_ENC_TYPE_PCM:
++            /* not need encoder */
++            break;
++
++        default:
+             BK_LOGE(TAG, "%s, %d, enc_type: %d is not support\n", __func__, __LINE__, voice_handle->enc_type);
+             goto fail;
+-            break;
+-    }
++            break;
++    }
+     if (voice_handle->enc_type != AUDIO_ENC_TYPE_PCM)
+     {
+         VOICE_CHECK_NULL(voice_handle->mic_enc, goto fail);
+@@ -299,7 +293,7 @@ static bk_err_t record_pipeline_init(voice_handle_t voice_handle, voice_cfg_t *c
+     raw_stream_cfg_t raw_read_cfg = RAW_STREAM_CFG_DEFAULT();
+     raw_read_cfg.type = AUDIO_STREAM_READER;
+     raw_read_cfg.out_block_size = cfg->read_pool_size;
+-    raw_read_cfg.out_block_num = 1;
++    raw_read_cfg.out_block_num = 1;
+     #if CONFIG_VOICE_SERVICE_OPUS_ENCODER
+     if(AUDIO_ENC_TYPE_OPUS == voice_handle->enc_type)
+     {
+@@ -449,28 +443,35 @@ static bk_err_t play_pipeline_deinit(voice_handle_t voice_handle)
+ 
+     audio_element_set_input_timeout(voice_handle->spk_dec, 0);
+ 
++    /* best-effort teardown, same policy as record_pipeline_deinit: never let
++     * a failed stop skip the element destroys */
+     if (BK_OK != audio_pipeline_terminate(voice_handle->play_pipeline))
+     {
+         BK_LOGE(TAG, "%s, %d, play_pipeline terminate fail\n", __func__, __LINE__);
+-        return BK_FAIL;
+     }
+ 
+-    if (voice_handle->raw_write && BK_OK != audio_pipeline_unregister(voice_handle->play_pipeline, voice_handle->raw_write))
++    if (voice_handle->raw_write)
+     {
+-        BK_LOGE(TAG, "%s, %d, unregister raw_write stream fail\n", __func__, __LINE__);
+-        return BK_FAIL;
++        if (BK_OK != audio_pipeline_unregister(voice_handle->play_pipeline, voice_handle->raw_write))
++        {
++            BK_LOGE(TAG, "%s, %d, unregister raw_write stream fail\n", __func__, __LINE__);
++        }
+     }
+ 
+-    if (voice_handle->spk_dec && BK_OK != audio_pipeline_unregister(voice_handle->play_pipeline, voice_handle->spk_dec))
++    if (voice_handle->spk_dec)
+     {
+-        BK_LOGE(TAG, "%s, %d, unregister decoder fail\n", __func__, __LINE__);
+-        return BK_FAIL;
++        if (BK_OK != audio_pipeline_unregister(voice_handle->play_pipeline, voice_handle->spk_dec))
++        {
++            BK_LOGE(TAG, "%s, %d, unregister decoder fail\n", __func__, __LINE__);
++        }
+     }
+ 
+-    if (voice_handle->spk_str && BK_OK != audio_pipeline_unregister(voice_handle->play_pipeline, voice_handle->spk_str))
++    if (voice_handle->spk_str)
+     {
+-        BK_LOGE(TAG, "%s, %d, unregister spk stream fail\n", __func__, __LINE__);
+-        return BK_FAIL;
++        if (BK_OK != audio_pipeline_unregister(voice_handle->play_pipeline, voice_handle->spk_str))
++        {
++            BK_LOGE(TAG, "%s, %d, unregister spk stream fail\n", __func__, __LINE__);
++        }
+     }
+ 
+     if (voice_handle->play_evt)
+@@ -479,55 +480,38 @@ static bk_err_t play_pipeline_deinit(voice_handle_t voice_handle)
+         if (BK_OK != audio_pipeline_remove_listener(voice_handle->play_pipeline))
+         {
+             BK_LOGE(TAG, "%s, %d, pipeline terminate fail\n", __func__, __LINE__);
+-            return BK_FAIL;
+         }
+ 
+         if (BK_OK != audio_event_iface_destroy(voice_handle->play_evt))
+         {
+             BK_LOGE(TAG, "%s, %d, pipeline terminate fail\n", __func__, __LINE__);
+-            return BK_FAIL;
+         }
++        voice_handle->play_evt = NULL;
+     }
+ 
+     if (BK_OK != audio_pipeline_deinit(voice_handle->play_pipeline))
+     {
+         BK_LOGE(TAG, "%s, %d, play_pipeline deinit fail\n", __func__, __LINE__);
+-        return BK_FAIL;
+-    }
+-    else
+-    {
+-        voice_handle->play_pipeline = NULL;
+     }
++    voice_handle->play_pipeline = NULL;
+ 
+     if (voice_handle->raw_write && BK_OK != audio_element_deinit(voice_handle->raw_write))
+     {
+         BK_LOGE(TAG, "%s, %d, raw_write stream deinit fail\n", __func__, __LINE__);
+-        return BK_FAIL;
+-    }
+-    else
+-    {
+-        voice_handle->raw_write = NULL;
+     }
++    voice_handle->raw_write = NULL;
+ 
+     if (voice_handle->spk_dec && BK_OK != audio_element_deinit(voice_handle->spk_dec))
+     {
+         BK_LOGE(TAG, "%s, %d, decoder deinit fail\n", __func__, __LINE__);
+-        return BK_FAIL;
+-    }
+-    else
+-    {
+-        voice_handle->spk_dec = NULL;
+     }
++    voice_handle->spk_dec = NULL;
+ 
+     if (voice_handle->spk_str && BK_OK != audio_element_deinit(voice_handle->spk_str))
+     {
+         BK_LOGE(TAG, "%s, %d, spk stream deinit fail\n", __func__, __LINE__);
+-        return BK_FAIL;
+-    }
+-    else
+-    {
+-        voice_handle->spk_str = NULL;
+     }
++    voice_handle->spk_str = NULL;
+ 
+     return BK_OK;
+ }
+@@ -549,7 +533,7 @@ static bk_err_t play_pipeline_init(voice_handle_t voice_handle, voice_cfg_t *cfg
+     raw_stream_cfg_t raw_write_cfg = RAW_STREAM_CFG_DEFAULT();
+     raw_write_cfg.type = AUDIO_STREAM_WRITER;
+     raw_write_cfg.out_block_size = cfg->write_pool_size;
+-    raw_write_cfg.out_block_num = 1;
++    raw_write_cfg.out_block_num = 1;
+     #if CONFIG_VOICE_SERVICE_OPUS_DECODER
+     if(AUDIO_DEC_TYPE_OPUS == voice_handle->dec_type)
+     {
+@@ -558,20 +542,20 @@ static bk_err_t play_pipeline_init(voice_handle_t voice_handle, voice_cfg_t *cfg
+     #endif
+     voice_handle->raw_write = raw_stream_init(&raw_write_cfg);
+     VOICE_CHECK_NULL(voice_handle->raw_write, goto fail);
+-
+-    switch (voice_handle->dec_type)
+-    {
+-        case AUDIO_DEC_TYPE_G711A:
+-        case AUDIO_DEC_TYPE_G711U:
+-            voice_handle->spk_dec = g711_decoder_init(&cfg->dec_cfg.g711_dec_cfg);
+-            break;
+-
+-#if CONFIG_VOICE_SERVICE_AAC_DECODER
+-        case AUDIO_DEC_TYPE_AAC:
+-            voice_handle->spk_dec = aac_decoder_init(&cfg->dec_cfg.aac_dec_cfg);
+-            break;
+-#endif
+-
++
++    switch (voice_handle->dec_type)
++    {
++        case AUDIO_DEC_TYPE_G711A:
++        case AUDIO_DEC_TYPE_G711U:
++            voice_handle->spk_dec = g711_decoder_init(&cfg->dec_cfg.g711_dec_cfg);
++            break;
++
++#if CONFIG_VOICE_SERVICE_AAC_DECODER
++        case AUDIO_DEC_TYPE_AAC:
++            voice_handle->spk_dec = aac_decoder_init(&cfg->dec_cfg.aac_dec_cfg);
++            break;
++#endif
++
+ #if CONFIG_VOICE_SERVICE_G722_DECODER
+         case AUDIO_DEC_TYPE_G722:
+             voice_handle->spk_dec = g722_decoder_init(&cfg->dec_cfg.g722_dec_cfg);
+@@ -584,15 +568,15 @@ static bk_err_t play_pipeline_init(voice_handle_t voice_handle, voice_cfg_t *cfg
+ #endif
+ 
+ 
+-        case AUDIO_DEC_TYPE_PCM:
+-            /* not need decoder */
+-            break;
+-
+-        default:
++        case AUDIO_DEC_TYPE_PCM:
++            /* not need decoder */
++            break;
++
++        default:
+             BK_LOGE(TAG, "%s, %d, dec_type: %d is not support\n", __func__, __LINE__, voice_handle->dec_type);
+             goto fail;
+-            break;
+-    }
++            break;
++    }
+     if (voice_handle->dec_type != AUDIO_DEC_TYPE_PCM)
+     {
+         VOICE_CHECK_NULL(voice_handle->spk_dec, goto fail);
+@@ -602,12 +586,12 @@ static bk_err_t play_pipeline_init(voice_handle_t voice_handle, voice_cfg_t *cfg
+     {
+         voice_handle->spk_str = onboard_speaker_stream_init(&cfg->spk_cfg.onboard_spk_cfg);
+     }
+-#if CONFIG_ADK_UAC_SPEAKER_STREAM
++#if CONFIG_ADK_UAC_SPEAKER_STREAM
+     else if (voice_handle->spk_type == SPK_TYPE_UAC)
+     {
+         voice_handle->spk_str = uac_speaker_stream_init(&cfg->spk_cfg.uac_spk_cfg);
+     }
+-#endif
++#endif
+     else
+     {
+         //nothing todo
+@@ -845,11 +829,11 @@ static void listener_task_main(beken_thread_arg_t param_data)
+ 
+                                 if ((audio_element_handle_t)event_msg.source == voice_handle->mic_str)
+                                 {
+-                                    bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_MIC_NOT_SUPPORT, NULL, voice_handle->args);
++                                    bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_MIC_NOT_SUPPORT, NULL, voice_handle->args);
+                                 }
+                                 else
+                                 {
+-                                    bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_ERROR_UNKNOW, NULL, voice_handle->args);
++                                    bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_ERROR_UNKNOW, NULL, voice_handle->args);
+                                 }
+ 
+                                 /* stop listener */
+@@ -866,7 +850,7 @@ static void listener_task_main(beken_thread_arg_t param_data)
+                                 BK_LOGW(TAG, "%s, %d, ++>>record pipeline event received, status: %d, ele: %p\n", __func__, __LINE__, (int)event_msg.data, event_msg.source);
+                                 /* stop voice pipeline */
+                                 bk_voice_stop(voice_handle);
+-                                bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_STOP, NULL, voice_handle->args);
++                                bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_STOP, NULL, voice_handle->args);
+ 
+                                 /* stop listener */
+                                 voice_handle->listener_is_running = false;
+@@ -904,11 +888,11 @@ static void listener_task_main(beken_thread_arg_t param_data)
+ 
+                                 if ((audio_element_handle_t)event_msg.source == voice_handle->spk_str)
+                                 {
+-                                    bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_SPK_NOT_SUPPORT, NULL, voice_handle->args);
++                                    bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_SPK_NOT_SUPPORT, NULL, voice_handle->args);
+                                 }
+                                 else
+                                 {
+-                                    bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_ERROR_UNKNOW, NULL, voice_handle->args);
++                                    bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_ERROR_UNKNOW, NULL, voice_handle->args);
+                                 }
+ 
+                                 /* stop listener */
+@@ -925,7 +909,7 @@ static void listener_task_main(beken_thread_arg_t param_data)
+                                 BK_LOGW(TAG, "%s, %d, ++>play pipeline event received, status: %d, ele: %p\n", __func__, __LINE__, (int)event_msg.data, event_msg.source);
+                                 /* stop voice pipeline */
+                                 bk_voice_stop(voice_handle);
+-                                bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_STOP, NULL, voice_handle->args);
++                                bk_voice_event_handle(voice_handle->event_handle, VOC_EVT_STOP, NULL, voice_handle->args);
+ 
+                                 /* stop listener */
+                                 voice_handle->listener_is_running = false;
+@@ -1022,11 +1006,11 @@ fail:
+ static bk_err_t listener_deinit(voice_handle_t voice_handle)
+ {
+     VOICE_CHECK_NULL(voice_handle, return BK_FAIL);
+-
+-    if (!voice_handle->event_handle)
+-    {
+-        return BK_OK;
+-    }
++
++    if (!voice_handle->event_handle)
++    {
++        return BK_OK;
++    }
+ 
+     BK_LOGD(TAG, "%s\n", __func__);
+ 
+@@ -1048,11 +1032,11 @@ static bk_err_t listener_deinit(voice_handle_t voice_handle)
+ static bk_err_t listener_start(voice_handle_t voice_handle)
+ {
+     VOICE_CHECK_NULL(voice_handle, return BK_FAIL);
+-
+-    if (!voice_handle->event_handle)
+-    {
+-        return BK_OK;
+-    }
++
++    if (!voice_handle->event_handle)
++    {
++        return BK_OK;
++    }
+ 
+     BK_LOGD(TAG, "%s\n", __func__);
+ 
+@@ -1068,11 +1052,11 @@ static bk_err_t listener_start(voice_handle_t voice_handle)
+ static bk_err_t listener_stop(voice_handle_t voice_handle)
+ {
+     VOICE_CHECK_NULL(voice_handle, return BK_FAIL);
+-
+-    if (!voice_handle->event_handle)
+-    {
+-        return BK_OK;
+-    }
++
++    if (!voice_handle->event_handle)
++    {
++        return BK_OK;
++    }
+ 
+     BK_LOGD(TAG, "%s\n", __func__);
+ 
+@@ -1090,17 +1074,17 @@ static bk_err_t voice_config_check(voice_cfg_t cfg)
+ {
+     /* check encode config */
+     if (cfg.enc_type != AUDIO_ENC_TYPE_G711A
+-            && cfg.enc_type != AUDIO_ENC_TYPE_G711U
+-#if CONFIG_VOICE_SERVICE_AAC_ENCODER
+-            && cfg.enc_type != AUDIO_ENC_TYPE_AAC
+-#endif
++            && cfg.enc_type != AUDIO_ENC_TYPE_G711U
++#if CONFIG_VOICE_SERVICE_AAC_ENCODER
++            && cfg.enc_type != AUDIO_ENC_TYPE_AAC
++#endif
+ #if CONFIG_VOICE_SERVICE_G722_ENCODER
+             && cfg.enc_type != AUDIO_ENC_TYPE_G722
+ #endif
+ #if CONFIG_VOICE_SERVICE_OPUS_ENCODER
+             && cfg.enc_type != AUDIO_ENC_TYPE_OPUS
+ #endif
+-            && cfg.enc_type != AUDIO_ENC_TYPE_PCM)
++            && cfg.enc_type != AUDIO_ENC_TYPE_PCM)
+     {
+         BK_LOGE(TAG, "%s, %d, enc_type: %d not support\n", __func__, __LINE__, cfg.enc_type);
+         return BK_FAIL;
+@@ -1108,17 +1092,17 @@ static bk_err_t voice_config_check(voice_cfg_t cfg)
+ 
+     /* check decode config */
+     if (cfg.dec_type != AUDIO_DEC_TYPE_G711A
+-            && cfg.dec_type != AUDIO_DEC_TYPE_G711U
+-#if CONFIG_VOICE_SERVICE_AAC_DECODER
+-            && cfg.dec_type != AUDIO_DEC_TYPE_AAC
+-#endif
++            && cfg.dec_type != AUDIO_DEC_TYPE_G711U
++#if CONFIG_VOICE_SERVICE_AAC_DECODER
++            && cfg.dec_type != AUDIO_DEC_TYPE_AAC
++#endif
+ #if CONFIG_VOICE_SERVICE_G722_DECODER
+             && cfg.dec_type != AUDIO_DEC_TYPE_G722
+ #endif
+ #if CONFIG_VOICE_SERVICE_OPUS_DECODER
+             && cfg.dec_type != AUDIO_DEC_TYPE_OPUS
+ #endif
+-            && cfg.dec_type != AUDIO_DEC_TYPE_PCM)
++            && cfg.dec_type != AUDIO_DEC_TYPE_PCM)
+     {
+         BK_LOGE(TAG, "%s, %d, dec_type: %d not support\n", __func__, __LINE__, cfg.dec_type);
+         return BK_FAIL;
+@@ -1179,7 +1163,7 @@ static bk_err_t voice_config_check(voice_cfg_t cfg)
+             }
+         }
+     }
+-    else if (cfg.mic_type == MIC_TYPE_ONBOARD_DUAL_DMIC_MIC)
++    else if (cfg.mic_type == MIC_TYPE_ONBOARD_DUAL_DMIC_MIC)
+     {
+         if (cfg.mic_cfg.onboard_dual_dmic_mic_cfg.adc_cfg.sample_rate != 8000 && cfg.mic_cfg.onboard_dual_dmic_mic_cfg.adc_cfg.sample_rate != 16000)
+         {
+@@ -1220,8 +1204,8 @@ static bk_err_t voice_config_check(voice_cfg_t cfg)
+                 BK_LOGE(TAG, "%s, %d, aec dual dmic: %d, mic dual dmic: %d are not match\n", __func__, __LINE__, cfg.aec_cfg.aec_alg_cfg.dual_ch, cfg.mic_cfg.onboard_dual_dmic_mic_cfg.dual_dmic);
+                 return BK_FAIL;
+             }
+-        }
+-    }
++        }
++    }
+     else
+     {
+         BK_LOGE(TAG, "%s, %d, cfg.mic_type: %d not support\n", __func__, __LINE__, cfg.mic_type);
+@@ -1231,7 +1215,7 @@ static bk_err_t voice_config_check(voice_cfg_t cfg)
+     /* check spk type and spk sample rate config, only support 8000 or 16000 */
+     if (cfg.spk_type == SPK_TYPE_ONBOARD)
+     {
+-#if 0
++#if 0
+         if (cfg.spk_cfg.onboard_spk_cfg.sample_rate != 8000 && cfg.spk_cfg.onboard_spk_cfg.sample_rate != 16000)
+         {
+             BK_LOGE(TAG, "%s, %d, onboard spk sample rate: %d not support\n", __func__, __LINE__, cfg.spk_cfg.onboard_spk_cfg.sample_rate);
+@@ -1254,13 +1238,13 @@ static bk_err_t voice_config_check(voice_cfg_t cfg)
+     }
+     else if (cfg.spk_type == SPK_TYPE_UAC)
+     {
+-#if 0
++#if 0
+         if (cfg.spk_cfg.uac_spk_cfg.samp_rate != 8000 && cfg.spk_cfg.uac_spk_cfg.samp_rate != 16000)
+         {
+             BK_LOGE(TAG, "%s, %d, onboard spk sample rate: %d not support\n", __func__, __LINE__, cfg.spk_cfg.uac_spk_cfg.samp_rate);
+             return BK_FAIL;
+         }
+-#endif
++#endif
+ 
+         if (cfg.spk_cfg.uac_spk_cfg.chl_num != 1)
+         {
+@@ -1292,16 +1276,16 @@ voice_handle_t bk_voice_init(voice_cfg_t *cfg)
+         BK_LOGE(TAG, "%s, %d, check voice config\n", __func__, __LINE__);
+         return NULL;
+     }
+-
++
+ #if (CONFIG_VOICE_SERVICE_USE_PSRAM)
+     voice_handle_t voice_handle = (voice_handle_t)psram_malloc(sizeof(struct voice));
+-#elif (CONFIG_VOICE_SERVICE_USE_AUDIO_HEAP)
++#elif (CONFIG_VOICE_SERVICE_USE_AUDIO_HEAP)
+     voice_handle_t voice_handle = (voice_handle_t)audio_heap_malloc(sizeof(struct voice));
+-#else
++#else
+     voice_handle_t voice_handle = (voice_handle_t)os_malloc(sizeof(struct voice));
+-#endif
+-
+-
++#endif
++
++
+     VOICE_CHECK_NULL(voice_handle, return NULL);
+ 
+     os_memset(voice_handle, 0, sizeof(struct voice));
+@@ -1339,7 +1323,7 @@ voice_handle_t bk_voice_init(voice_cfg_t *cfg)
+     if (voice_handle->aec_en)
+     {
+         /* frame_size = sample_rate * 20ms / 1000 * bits */
+-        ringbuf_port_cfg_t rb_config = {cfg->aec_cfg.aec_alg_cfg.aec_cfg.fs * 20 / 1000 * 2 * 2};
++        ringbuf_port_cfg_t rb_config = {cfg->aec_cfg.aec_alg_cfg.aec_cfg.fs * 20 / 1000 * 2 * 2};
+         voice_handle->aec_alg_ref_rb = ringbuf_port_init(&rb_config);
+         VOICE_CHECK_NULL(voice_handle->aec_alg_ref_rb, goto fail);
+         
+@@ -1374,7 +1358,7 @@ voice_handle_t bk_voice_init(voice_cfg_t *cfg)
+                 BK_LOGE(TAG, "%s, %d, link apk_stream to aec_alg_ref_rb fail\n", __func__, __LINE__);
+                 goto fail;
+             }
+-        }
++        }
+     }
+ 
+     /* check whether event_handle was been register.
+@@ -1404,16 +1388,16 @@ fail:
+         audio_port_deinit(voice_handle->aec_alg_ref_rb);
+         voice_handle->aec_alg_ref_rb = NULL;
+     }
+-
++
+     listener_deinit(voice_handle);
+-
++
+ #if (CONFIG_VOICE_SERVICE_USE_PSRAM)
+-    psram_free(voice_handle);
+-#elif (CONFIG_VOICE_SERVICE_USE_AUDIO_HEAP)
+-    audio_heap_free(voice_handle);
+-#else
+-    os_free(voice_handle);
+-#endif
++    psram_free(voice_handle);
++#elif (CONFIG_VOICE_SERVICE_USE_AUDIO_HEAP)
++    audio_heap_free(voice_handle);
++#else
++    os_free(voice_handle);
++#endif
+ 
+     bk_pm_module_vote_sleep_ctrl(PM_SLEEP_MODULE_NAME_AUDP, 1, 0);
+ 
+@@ -1445,18 +1429,18 @@ bk_err_t bk_voice_deinit(voice_handle_t voice_handle)
+         audio_port_deinit(voice_handle->aec_alg_ref_rb);
+         voice_handle->aec_alg_ref_rb = NULL;
+     }
+-
++
+     listener_deinit(voice_handle);
+-
++
+     voice_handle->status = VOICE_STA_NONE;
+ 
+ #if (CONFIG_VOICE_SERVICE_USE_PSRAM)
+-        psram_free(voice_handle);
+-#elif (CONFIG_VOICE_SERVICE_USE_AUDIO_HEAP)
+-        audio_heap_free(voice_handle);
+-#else
+-        os_free(voice_handle);
+-#endif
++        psram_free(voice_handle);
++#elif (CONFIG_VOICE_SERVICE_USE_AUDIO_HEAP)
++        audio_heap_free(voice_handle);
++#else
++        os_free(voice_handle);
++#endif
+ 
+     bk_pm_module_vote_sleep_ctrl(PM_SLEEP_MODULE_NAME_AUDP, 1, 0);
+ 
+@@ -1697,7 +1681,7 @@ audio_element_handle_t bk_voice_get_spk_element(voice_handle_t voice_handle)
+ 
+ /* used for amp system, not smp system */
+ #if (CONFIG_SOC_SMP)
+-bk_err_t bk_voice_event_handle(voice_event_handle event_handle, vioce_evt_t event, void *param, void *args)
++bk_err_t bk_voice_event_handle(voice_event_handle event_handle, vioce_evt_t event, void *param, void *args)
+ {
+     VOICE_CHECK_NULL(event_handle, return BK_FAIL);
+ 
+@@ -1747,16 +1731,16 @@ void bk_voice_cal_vad_buf_size(voice_cfg_t *cfg, voice_handle_t voice_handle)
+ {
+     if(cfg->aec_en && cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_enable)
+     {
+-        if(!cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_buf_size || !cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_buf_size)
+-        {
+-            uint32_t enc_input_frame_size = bk_voice_get_enc_in_frame_size(cfg);
++        if(!cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_buf_size || !cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_buf_size)
++        {
++            uint32_t enc_input_frame_size = bk_voice_get_enc_in_frame_size(cfg);
+             uint8_t enc_frame_in_ms = bk_voice_get_enc_frame_ms(cfg);
+             uint32 vad_buf_len;
+             vad_buf_len = enc_input_frame_size*((cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_start_threshold + enc_frame_in_ms - 1)/enc_frame_in_ms);
+             cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_buf_size = vad_buf_len;
+             cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_frame_size = enc_input_frame_size;
+-        }
+-        BK_LOGD(TAG, "%s, %d, vad buf size: %d,frame size: %d\n", __func__, __LINE__, cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_buf_size, cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_frame_size);
++        }
++        BK_LOGD(TAG, "%s, %d, vad buf size: %d,frame size: %d\n", __func__, __LINE__, cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_buf_size, cfg->aec_cfg.aec_alg_cfg.vad_cfg.vad_frame_size);
+     }
+ }
+ 
+diff --git a/t5_os/ap/components/fatfs/ffconf.h b/t5_os/ap/components/fatfs/ffconf.h
+index b3fde4bac..adac6cda6 100755
+--- a/t5_os/ap/components/fatfs/ffconf.h
++++ b/t5_os/ap/components/fatfs/ffconf.h
+@@ -80,7 +80,20 @@ This option is used for beken file scan
+ / Locale and Namespace Configurations
+ /---------------------------------------------------------------------------*/
+ 
+-#define FF_CODE_PAGE	437
++/* This is a Chinese-market board and its SD cards hold CJK filenames.
++ * With the upstream default of 437 (U.S.) no CJK character is representable in
++ * the OEM codepage, so ff_uni2oem() maps every Chinese character to '?' and
++ * ff_oem2uni() can never produce one. The practical effect: directory listing
++ * shows the names, but f_open() cannot resolve them -- CJK files are visible
++ * and never openable. (The T5AI VFS hands tkl_dir_name() a UTF-8 name, while
++ * f_open() re-interprets the same bytes in the OEM codepage; with 437 those two
++ * views can never agree on anything outside ASCII.)
++ * 936 (GBK) is the correct codepage for this market and the conversion table is
++ * already in the tree -- ffunicode.c has the CP936 block behind
++ * `#if FF_CODE_PAGE == 936`, and cc936.c is compiled by the component's
++ * CMakeLists -- so switching costs nothing but a rebuild. ASCII names are
++ * byte-identical in both codepages, so nothing that works today can break. */
++#define FF_CODE_PAGE	936
+ /* This option specifies the OEM code page to be used on the target system.
+ /  Incorrect code page setting can cause a file open failure.
+ /
+diff --git a/t5_os/ap/middleware/driver/sd_card/sd_card_driver.c b/t5_os/ap/middleware/driver/sd_card/sd_card_driver.c
+index 0c33b85cd..458161384 100755
+--- a/t5_os/ap/middleware/driver/sd_card/sd_card_driver.c
++++ b/t5_os/ap/middleware/driver/sd_card/sd_card_driver.c
+@@ -65,7 +65,13 @@ static sdcard_rw_state_t sd_card_check_continious_rw(sdcard_rw_ops_t ops, uint32
+ #define DATA_TIMEOUT_6_5_M  208000
+ 
+ #define CMD_TIMEOUT_13M		13000	//1ms, max retry_cnt 128(SD_CARD_MAX_CMD_TRIAL_COUNT)
+-#define DATA_TIMEOUT_13M	416000	//32ms, max retry_cnt 128(SD_CARD_MAX_DATA_TRIAL_COUNT)
++/* 原值 416000(32ms)。真机实测（src/tests/app_sd_test.c，纯 SD 读、零负载）：
++ * 顺序读全过，**散读**在第 5 次上撞 `TODO:read data timeout error!!!` 且
++ * rx real cnt=0 —— 主控的数据超时到点时，卡一个字节都没发出来。
++ * SD 规范允许部分卡的读访问时间(TAAC)到 100ms，32ms 可能只是**比卡慢**而不是卡坏。
++ * 放大到 256ms 试一次：如果就好了，说明是超时太短；如果还挂，说明卡是真不响应。
++ * 代价：真挂住时最多等 256ms（比原来多 224ms），远小于 GDMA 那条路 5.12s 的死等。 */
++#define DATA_TIMEOUT_13M	3328000	//256ms, max retry_cnt 128(SD_CARD_MAX_DATA_TRIAL_COUNT)
+ 
+ #define CMD_TIMEOUT_20M		20000	//1ms, max retry_cnt 128
+ #define DATA_TIMEOUT_20M	640000	//32ms, max retry_cnt 128
+diff --git a/t5_os/ap/middleware/soc/bk7257_ap/bk7257_ap.defconfig b/t5_os/ap/middleware/soc/bk7257_ap/bk7257_ap.defconfig
+index c87ffc8d7..8c865aeac 100755
+--- a/t5_os/ap/middleware/soc/bk7257_ap/bk7257_ap.defconfig
++++ b/t5_os/ap/middleware/soc/bk7257_ap/bk7257_ap.defconfig
+@@ -371,7 +371,7 @@ CONFIG_SDIO=y
+ CONFIG_SDIO_V1P0=n
+ CONFIG_SDIO_V2P0=y
+ CONFIG_SDIO_V2P1=n
+-CONFIG_SDIO_GDMA_EN=n
++CONFIG_SDIO_GDMA_EN=y
+ CONFIG_SDIO_HOST=y
+ CONFIG_SDIO_HOST_DEFAULT_CLOCK_FREQ=7
+ CONFIG_SDIO_HOST_CLR_WRITE_INT=y
+diff --git a/t5_os/ap/middleware/soc/bk7258_ap/bk7258_ap.defconfig b/t5_os/ap/middleware/soc/bk7258_ap/bk7258_ap.defconfig
+index 2a6f7dfb6..0a795bac9 100644
+--- a/t5_os/ap/middleware/soc/bk7258_ap/bk7258_ap.defconfig
++++ b/t5_os/ap/middleware/soc/bk7258_ap/bk7258_ap.defconfig
+@@ -1,660 +1,664 @@
+-#The value config in bk7258.defconfig will over write the Kconfig's default value.
+-#If the default value in Kconfig satisfy your needs, then you needn't to config again here.
+-
+-CONFIG_SOC_ARCH="cm33"
+-CONFIG_SOC_BK7236XX=y
+-CONFIG_SOC_BK7236_V5=y
+-
+-CONFIG_SOC_BK7258=y
+-CONFIG_SOC_STR="bk7258_ap"
+-CONFIG_ARCH_CM33=y
+-CONFIG_CMSIS=y
+-CONFIG_DEFAULT_CMSIS_START=n
+-
+-CONFIG_CPU_CNT=2
+-CONFIG_SOC_SMP=y
+-CONFIG_BUILD_DEFAULT_VERSION=y
+-
+-#
+-# Spinlock
+-#
+-CONFIG_SPINLOCK=y
+-CONFIG_SPINLOCK_SECTION=y
+-CONFIG_SPINLOCK_DYNAMIC_CNT=512
+-CONFIG_SPINLOCK_STATIC_CNT=128
+-# end of Spinlock
+-
+-
+-CONFIG_MAILBOX=y
+-CONFIG_MAILBOX_V2_0=y
+-CONFIG_SLAVE_HEART_BEAT=y
+-
+-
+-#
+-# Test Configuration
+-#
+-CONFIG_INTERRUPT_TEST=y
+-CONFIG_AON_PMU_TEST=y
+-
+-
+-
+-#Enable for FPGA board
+-CONFIG_SPE=1
+-CONFIG_SPE_TEST=y
+-
+-#
+-# ARMINO Configuration
+-#
+-
+-#
+-# Common Configuration
+-#
+-CONFIG_CACHE_ENABLE=y
+-# CONFIG_HEAP_IN_CACHE is not set
+-# CONFIG_SRAM_CACHE_ENABLE is not set
+-CONFIG_MPU=y
+-
+-#
+-# Debug
+-#
+-CONFIG_ASSERT_REBOOT=y
+-# CONFIG_ASSERT_HALT is not set
+-# CONFIG_ASSERT_REBOOT is not set
+-# CONFIG_JTAG is not set
+-# end of Debug
+-# end of Common Configuration
+-
+-#
+-# Features Configuration
+-#
+-#CONFIG_LWIP_V2_0 is not set
+-CONFIG_LWIP_V2_1=y
+-CONFIG_NO_HOSTED=y
+-CONFIG_LWIP_MEM_LIBC_MALLOC=y
+-CONFIG_LWIP_MEMP_MEM_MALLOC=y
+-# CONFIG_SEMI_HOSTED is not set
+-# CONFIG_FULLY_HOSTED is not set
+-# CONFIG_WIFI_SENSOR is not set
+-CONFIG_ANA_REG_WRITE_POLL_REG_B=n
+-# end of Features Configuration
+-
+-
+-
+-#
+-# Components Configuration
+-#
+-
+-#
+-# Application
+-#
+-# CONFIG_DEMO_TEST is not set
+-# CONFIG_FTPD_UPGRADE is not set
+-CONFIG_ALI_MQTT=n
+-
+-CONFIG_HTTP=y
+-CONFIG_OTA_HTTP=y
+-CONFIG_HTTP_OTA_WITH_BLE=y
+-
+-# CONFIG_OTA_TFTP is not set
+-CONFIG_IPERF_TEST=y
+-# end of Application
+-
+-CONFIG_AT=n
+-CONFIG_AT_CMD=n
+-
+-#
+-# Audio
+-#
+-CONFIG_AUDIO=y
+-CONFIG_AUDIO_ADC=y
+-CONFIG_AUDIO_DAC=y
+-CONFIG_AUDIO_TEST=y
+-# end of Audio
+-
+-#
+-# Calibration
+-#
+-CONFIG_CALI=y
+-CONFIG_MANUAL_CALI=y
+-CONFIG_TPC_PA_MAP=y
+-# end of Calibration
+-
+-#
+-# ATE
+-#
+-CONFIG_ATE=n
+-CONFIG_ATE_TEST=n
+-# end of ATE
+-
+-#
+-# BLE
+-#
+-CONFIG_BLE_5_X=n
+-CONFIG_BTDM_5_2=n
+-CONFIG_BTDM_5_T_MINDTREE=n
+-CONFIG_BT=n
+-CONFIG_BLUETOOTH=n
+-# CONFIG_BLE_4_2 is not set
+-# end of BLE
+-
+-#
+-# Cli
+-#
+-CONFIG_CLI=y
+-CONFIG_LOG_LEVEL=6
+-CONFIG_SHELL_ASYNCLOG=y
+-CONFIG_DYM_LOG_MEM_MAX=0x10000
+-CONFIG_MAX_COMMANDS=256
+-CONFIG_BKREG=n
+-# CONFIG_TCP_SERVER_TEST is not set
+-# CONFIG_AIRKISS_TEST is not set
+-# CONFIG_WIFI_RAW_TX_TEST is not set
+-# CONFIG_I2C1_TEST is not set
+-# CONFIG_I2C2_TEST is not set
+-# CONFIG_UART_TEST is not set
+-# CONFIG_SPI_TEST is not set
+-# CONFIG_PERI_TEST is not set
+-# CONFIG_RF_OTA_TEST is not set
+-# end of Cli
+-
+-#
+-# RF
+-#
+-CONFIG_RF_POLICY_BLE_REQ=y
+-# CONFIG_RF_POLICY_WIFI_REQ is not set
+-# CONFIG_RF_POLICY_CO_REQ is not set
+-# end of RF
+-
+-#
+-# Internal Kconfig
+-#
+-CONFIG_CHECK_MISMATCH=y
+-CONFIG_MCU_PS=n
+-CONFIG_DEEP_PS=n
+-CONFIG_TICK_CALI=y
+-CONFIG_STA_PS=n
+-# end of Internal Kconfig
+-
+-#
+-# FreeRTOS
+-#
+-CONFIG_FREERTOS=y
+-CONFIG_FREERTOS_SMP=y
+-CONFIG_FREERTOS_TRACE=n
+-CONFIG_FREERTOS_ALLOW_OS_API_IN_IRQ_DISABLED=y
+-CONFIG_OS_SMP_AFFINITY_DEMO=y
+-
+-#
+-# Memory Debug
+-#
+-# CONFIG_MALLOC_STATIS is not set
+-CONFIG_MEM_DEBUG=y
+-# end of Memory Debug
+-# end of FreeRTOS
+-CONFIG_CM_BACKTRACE=y
+-
+-#
+-# Startup
+-#
+-CONFIG_APP_MAIN_TASK_PRIO=4
+-CONFIG_APP_MAIN_TASK_STACK_SIZE=4096
+-# end of Startup
+-
+-#
+-# System
+-#
+-CONFIG_FLASH_SIZE_4M=y
+-CONFIG_FLASH=y
+-CONFIG_FLASH_MB=y
+-# CONFIG_BASE_MAC_FROM_EFUSE is not set
+-# CONFIG_BASE_MAC_FROM_RF_OTP_FLASH is not set
+-CONFIG_NEW_MAC_POLICY=y
+-CONFIG_BK_MAC_ADDR_CHECK=y
+-CONFIG_RESET_REASON=y
+-# end of System
+-
+-#
+-# Mbedtls
+-#
+-CONFIG_PSA_MBEDTLS=y
+-CONFIG_FULL_MBEDTLS=n
+-CONFIG_MBEDTLS_USE_PSA_CRYPTO=n
+-CONFIG_TRUSTENGINE=y
+-CONFIG_SW_CRYPTO=n
+-CONFIG_TE200_ENTROPY=y
+-CONFIG_MBEDTLS_LOG_LEVEL="OFF"
+-CONFIG_AON_ENCP=y
+-CONFIG_PSA_MBEDTLS_TEST=n
+-CONFIG_TRUSTENGINE_TEST=n
+-# end of Mbedtls
+-#
+-
+-# USB configuration
+-#
+-CONFIG_USB=y
+-CONFIG_USB_VBAT_CONTROL_GPIO_ID=0x1C
+-CONFIG_TASK_USB_PRIO=2
+-CONFIG_CHERRY_USB=y
+-CONFIG_USB_DMA_ENABLE=y
+-CONFIG_USB_HOST=y
+-CONFIG_USBH_MSC=y
+-CONFIG_USBH_UVC=y
+-CONFIG_USBH_UAC=y
+-CONFIG_USBH_SERIAL_CH340=y
+-
+-CONFIG_USB_HUB=y
+-CONFIG_USB_HUB_MULTIPLE_DEVICES=y
+-CONFIG_USBHOST_HUB_MAX_EHPORTS=4
+-CONFIG_USBHOST_HUB_PORT_SUPPORT_MAX_DEVICE=5
+-CONFIG_USBHOST_HUB_PORT_1_VBAT_CONTROL_GPIO_ID=0xFF
+-
+-CONFIG_USB_DEVICE=n
+-CONFIG_USBD_MSC=n
+-CONFIG_USBD_HID=n
+-# end of USB configuration
+-
+-#
+-# WiFi
+-#
+-CONFIG_WIFI_ENABLE=n
+-CONFIG_WIFI6_CODE_STACK=n
+-CONFIG_WIFI6=n
+-CONFIG_WIFI4=n
+-CONFIG_MSDU_RESV_TAIL_LENGTH=16
+-CONFIG_TASK_RECONNECT_PRIO=4
+-CONFIG_WIFI_MAC_VERSION="V22"
+-CONFIG_WIFI_MDM_VERSION="v32"
+-CONFIG_WIFI_PLF_VERSION="v32"
+-CONFIG_MM_PS_SET_LISTEN_INTERVAL_VALUE=30
+-CONFIG_MOBILE_CONNECT_SAP_STATISTICS=y
+-# CONFIG_AP_MONITOR_COEXIST is not set
+-# CONFIG_WIFI_FAST_CONNECT is not set
+-# CONFIG_BSSID_CONNECT is not set
+-# CONFIG_WFA_CERT is not set
+-# CONFIG_LESS_MEMERY_IN_RWNX is not set
+-# CONFIG_AP_PROBEREQ_CB is not set
+-# CONFIG_MM_PS_BASED_ON_LISTEN_INTERVAL is not set
+-CONFIG_WIFI6_IP_DEBUG=y
+-# end of WiFi
+-
+-CONFIG_BLE_PS=n
+-
+-#
+-# BLE 5.x
+-#
+-# CONFIG_BLE_HOST_NONE is not set
+-CONFIG_BLE_HOST_RW=n
+-# CONFIG_BLE_HOST_ZEPHYR is not set
+-CONFIG_BLE_MESH_NONE=n
+-# CONFIG_BLE_MESH_RW is not set
+-CONFIG_BLE_ADV_NUM=1
+-CONFIG_BLE_SCAN_NUM=1
+-CONFIG_BLE_INIT_NUM=1
+-CONFIG_BLE_CONN_NUM=1
+-# end of BLE 5.x
+-
+-#
+-# Driver
+-#
+-
+-#
+-# AON_RTC
+-#
+-CONFIG_AON_RTC=y
+-# end of AON_RTC
+-
+-
+-CONFIG_SYSTEM_CTRL=y
+-CONFIG_HAL_DEBUG_SYS=y
+-CONFIG_AON_PMU=y
+-
+-# I2C
+-#
+-#
+-CONFIG_I2C=y
+-CONFIG_I2C_SUPPORT_ID_BITS=2
+-CONFIG_SIM_I2C=n
+-
+-#
+-# UART
+-#
+-CONFIG_UART0=y
+-CONFIG_UART1=y
+-CONFIG_UART2=y
+-
+-CONFIG_SYS_PRINT_DEV_MAILBOX=y
+-CONFIG_SYS_PRINT_DEV_UART=n
+-CONFIG_UART_PRINT_PORT=1
+-CONFIG_PRINTF_BUF_SIZE=256
+-# CONFIG_BACKGROUND_PRINT is not set
+-CONFIG_KFIFO_SIZE=128
+-CONFIG_UART_ERR_INTERRUPT=y
+-# CONFIG_UART_STATIS is not set
+-# end of UART
+-
+-#
+-# TRNG
+-#
+-CONFIG_TRNG_SUPPORT=y
+-# end of TRNG
+-
+-#depends on CONFIG_TRNG_SUPPORT
+-CONFIG_RANDOM_MAC_ADDR=y
+-
+-#
+-# FATFS
+-#
+-CONFIG_FATFS=y
+-CONFIG_FATFS_SDCARD=y
+-CONFIG_FATFS_SPI_0_FLASH=n
+-CONFIG_FATFS_SPI_1_FLASH=n
+-CONFIG_FATFS_QSPI_0_FLASH=n
+-CONFIG_FATFS_QSPI_1_FLASH=n
+-# end of FATFS
+-
+-
+-
+-CONFIG_LITTLEFS=y
+-CONFIG_LFS_THREADSAFE=y
+-
+-
+-CONFIG_MAC_PHY_BYPASS=y
+-
+-#
+-# SDIO
+-#
+-CONFIG_SDCARD=y
+-CONFIG_SDCARD_DEFAULT_CLOCK_FREQ=14
+-CONFIG_SDCARD_POWER_GPIO_CTRL=y
+-CONFIG_SDCARD_DEBUG_SUPPORT=n
+-CONFIG_SDCARD_BUSWIDTH_4LINE=n
+-CONFIG_SDIO_4LINES_EN=n
+-CONFIG_SDIO=y
+-CONFIG_SDIO_V1P0=n
+-CONFIG_SDIO_V2P0=y
+-CONFIG_SDIO_V2P1=n
+-CONFIG_SDIO_GDMA_EN=n
+-CONFIG_SDIO_HOST=y
+-CONFIG_SDIO_HOST_DEFAULT_CLOCK_FREQ=7
+-CONFIG_SDIO_HOST_CLR_WRITE_INT=y
+-CONFIG_SDIO_PM_CB_SUPPORT=n
+-CONFIG_PIN_SDIO_GROUP_1=n
+-CONFIG_SDIO_SLAVE=n
+-# end of SDIO
+-
+-#
+-# SPI
+-#
+-CONFIG_SPI_DMA=y
+-# CONFIG_SPI_SLAVE is not set
+-# CONFIG_SPI_MASTER is not set
+-CONFIG_SPI=y
+-CONFIG_SPI_STATIS=y
+-CONFIG_SPI_SUPPORT_TX_FIFO_WR_READY=y
+-# CONFIG_HSLAVE_SPI is not set
+-CONFIG_SPI_MST_FLASH=y
+-# CONFIG_SPI_MST_PSRAM is not set
+-# end of SPI
+-#
+-# QSPI
+-#
+-CONFIG_QSPI=y
+-CONFIG_QSPI_TEST=y
+-CONFIG_QSPI_MST_FLASH=y
+-CONFIG_QSPI_FLASH_GD=y
+-# end of QSPI
+-
+-#
+-# GENERAL_DMA
+-#
+-CONFIG_GENERAL_DMA=y
+-CONFIG_DMA_LOGIC_CHAN_CNT=12
+-CONFIG_DMA_LOGIC_CHAN_ID_MIN=0
+-# end of GENERAL_DMA
+-
+-#
+-# PSRAM
+-#
+-CONFIG_PSRAM=y
+-CONFIG_PSRAM_AS_SYS_MEMORY=y
+-CONFIG_TASK_STACK_IN_PSRAM=y
+-# end of PSRAM
+-
+-#
+-# Video
+-#
+-CONFIG_MEDIA=y
+-CONFIG_LCD=y
+-CONFIG_LCD_QSPI=y
+-
+-CONFIG_LCD_GC9503V=n
+-CONFIG_LCD_H050IWV=y
+-CONFIG_LCD_HX8282=y
+-CONFIG_LCD_MD0430R=y
+-CONFIG_LCD_MD0700R=y
+-CONFIG_LCD_NT35512=n
+-CONFIG_LCD_NT35510=n
+-CONFIG_LCD_NT35510_MCU=y
+-CONFIG_LCD_ST7282=y
+-CONFIG_LCD_ST7796S=y
+-CONFIG_LCD_ST7701S_LY=y
+-CONFIG_LCD_ST7701S=y
+-CONFIG_LCD_ST7701SN=y
+-CONFIG_LCD_AML01=y
+-
+-#
+-# lcd function macro
+-#
+-CONFIG_LCD_MEDIA=y
+-CONFIG_LCD_ROTATE=y
+-CONFIG_LCD_HW_PFC=y
+-CONFIG_LCD_HW_DECODE=y
+-CONFIG_LCD_SW_DECODE=y
+-# end of lcd function macro
+-
+-CONFIG_DMA2D=y
+-CONFIG_JPEGDEC_HW=y
+-CONFIG_JPEGDEC_SW=y
+-CONFIG_HW_SCALE=y
+-# end of Video
+-
+-#
+-# CALENDAR
+-#
+-CONFIG_CALENDAR=n
+-# end of CALENDAR
+-
+-#
+-# System control
+-#
+-# CONFIG_SYS_REDUCE_NORMAL_POWER is not set
+-CONFIG_PM_V2=y
+-# CONFIG_XTAL_FREQ_40M is not set
+-CONFIG_XTAL_FREQ_26M=y
+-CONFIG_XTAL_FREQ=26000000
+-CONFIG_DCO_FREQ=120000000
+-CONFIG_SYSTEM_CLOCK=y
+-# end of System control
+-
+-#
+-# PHY
+-#
+-# CONFIG_PTA is not set
+-# end of PHY
+-
+-#
+-# I2S
+-#
+-CONFIG_I2S=y
+-CONFIG_I2S_TEST=y
+-# end of I2S
+-
+-#
+-# pwm
+-#
+-CONFIG_PWM=n
+-CONFIG_PWM_V1PX=y
+-# end of pwm
+-
+-# CONFIG_SUPPORT_IRDA is not set
+-
+-#
+-# efuse
+-#
+-CONFIG_EFUSE=n
+-
+-#
+-# vfs
+-#
+-CONFIG_VFS=y
+-CONFIG_VFS_TEST=y
+-
+-# end of Driver
+-
+-#
+-# LwIP 2.0.2
+-#
+-CONFIG_LWIP=y
+-CONFIG_DHCP=y
+-CONFIG_TASK_LWIP_PRIO=4
+-# CONFIG_LWIP_MEM_DEFAULT is not set
+-CONFIG_LWIP_MEM_REDUCE=y
+-
+-# end of LwIP 2.0.2
+-
+-#
+-# LwIP 2.1.2
+-#
+-# end of LwIP 2.1.2
+-
+-#
+-# Bk_netif
+-#
+-CONFIG_BK_NETIF=y
+-CONFIG_NETIF_LWIP=y
+-# end of Bk_netif
+-
+-# CONFIG_MP3PLAYER is not set
+-# CONFIG_PCM_RESAMPLER is not set
+-
+-#
+-# Power Save
+-#
+-# CONFIG_AP_IDLE is not set
+-# CONFIG_FAKE_RTC_PS is not set
+-# CONFIG_PM_MODEM_PWD is not set
+-# CONFIG_PM_STANDALONE is not set
+-CONFIG_PM_V2=y
+-# end of Power Save
+-
+-#
+-# PWR_CLK
+-#
+-CONFIG_PM_DEMO_ENABLE=y
+-CONFIG_PM_CLI_ENABLE=y
+-CONFIG_PM_LV_SUBCORES_ON=y
+-# end of PWR_CLK
+-
+-#
+-# RF Test
+-#
+-CONFIG_TX_EVM_TEST=y
+-CONFIG_RX_SENSE_TEST=y
+-# end of RF Test
+-
+-#
+-# WiFi RWNX Interface
+-#
+-CONFIG_WIFI_KMSG_TASK_PRIO=3
+-CONFIG_WIFI_KMSG_TASK_STACK_SIZE=4096
+-CONFIG_WIFI_CORE_TASK_PRIO=2
+-CONFIG_WIFI_CORE_TASK_STACK_SIZE=2048
+-CONFIG_RWNX_QOS_MSDU=y
+-CONFIG_RWNX_SW_TXQ=n
+-CONFIG_RWNX_FAST_CONNECT=y
+-# end of WiFi RWNX Interface
+-
+-CONFIG_SARADC=y
+-CONFIG_SARADC_MB=y
+-# CONFIG_SARADC_CALI=y
+-# CONFIG_SPIDMA is not set
+-CONFIG_TEMP_DETECT=n
+-CONFIG_SARADC_NEED_FLUSH=n
+-CONFIG_SARADC_RANGE_DIVIDE=y
+-# CONFIG_UART_DEBUG is not set
+-# CONFIG_UDISK_MP3 is not set
+-# CONFIG_WFA_CA is not set
+-
+-#
+-# Supplicant
+-#
+-CONFIG_TASK_WPAS_PRIO=5
+-CONFIG_WPA3=y
+-CONFIG_PMF=y
+-CONFIG_WPA_CTRL_IFACE=y
+-CONFIG_AP_HT_IE=y
+-CONFIG_AP_VHT=y
+-CONFIG_AP_HE=y
+-# CONFIG_WPA_TWT_TEST is not set
+-CONFIG_STA_AUTO_RECONNECT=y
+-# CONFIG_WPA_LOG is not set
+-# end of Supplicant
+-# end of Components Configuration
+-# end of ARMINO Configuration
+-
+-#
+-# DEMOS_CONFIG
+-#
+-CONFIG_FFT=n
+-# end of DEMOS_CONFIG
+-
+-CONFIG_TFM=n
+-CONFIG_SDMADC=y
+-CONFIG_SDMADC_TEST=y
+-
+-CONFIG_HW_ROTATE_PFC=y
+-CONFIG_HW_ROTT_TEST=n
+-#
+-# CONFIG_FREERTOS_USE_TICKLESS_IDLE
+-#
+-CONFIG_FREERTOS_USE_TICKLESS_IDLE=1
+-#
+-# CONFIG_SYSTICK_32K
+-#
+-CONFIG_SYSTICK_32K=y
+-
+-CONFIG_TIMER_US=y
+-CONFIG_TIMER_SUPPORT_ID_BITS=56
+-
+-CONFIG_UART_LOW_VOLTAGE_SUPPORT=y
+-#
+-#GPIO for Power Save: WANIING: modify it should check properties/soc/bk7256/bk7256.defconfig also
+-#
+-CONFIG_GPIO_WAKEUP_SUPPORT=y
+-CONFIG_GPIO_DYNAMIC_WAKEUP_SUPPORT=y
+-CONFIG_GPIO_DYNAMIC_WAKEUP_SOURCE_MAX_CNT=4
+-CONFIG_GPIO_WAKEUP_DEBUG=n
+-CONFIG_GPIO_DEFAULT_SET_SUPPORT=n
+-CONFIG_WIFI_VNET_CONTROLLER=y
+-
+-CONFIG_CAN=n
+-CONFIG_CAN_TEST=n
+-
+-CONFIG_NTP_SYNC_RTC=n
+-CONFIG_AON_RTC_KEEP_TIME_SUPPORT=y
+-
+-#
+-#ETH config
+-#
+-CONFIG_ETH=n
+-CONFIG_PHY_SMSC=y
+-CONFIG_ETH_PIN_GROUP1=y
+-CONFIG_ETH_DHCP=n
+-
+-#
+-# Bk_Modem
+-#
+-CONFIG_BK_MODEM=n
+-CONFIG_LWIP_PPP_SUPPORT=n
+-CONFIG_USB_CDC_MODEM=n
+-CONFIG_USB_CDC=n
++#The value config in bk7258.defconfig will over write the Kconfig's default value.
++#If the default value in Kconfig satisfy your needs, then you needn't to config again here.
++
++CONFIG_SOC_ARCH="cm33"
++CONFIG_SOC_BK7236XX=y
++CONFIG_SOC_BK7236_V5=y
++
++CONFIG_SOC_BK7258=y
++CONFIG_SOC_STR="bk7258_ap"
++CONFIG_ARCH_CM33=y
++CONFIG_CMSIS=y
++CONFIG_DEFAULT_CMSIS_START=n
++
++CONFIG_CPU_CNT=2
++CONFIG_SOC_SMP=y
++CONFIG_BUILD_DEFAULT_VERSION=y
++
++#
++# Spinlock
++#
++CONFIG_SPINLOCK=y
++CONFIG_SPINLOCK_SECTION=y
++CONFIG_SPINLOCK_DYNAMIC_CNT=512
++CONFIG_SPINLOCK_STATIC_CNT=128
++# end of Spinlock
++
++
++CONFIG_MAILBOX=y
++CONFIG_MAILBOX_V2_0=y
++CONFIG_SLAVE_HEART_BEAT=y
++
++
++#
++# Test Configuration
++#
++CONFIG_INTERRUPT_TEST=y
++CONFIG_AON_PMU_TEST=y
++
++
++
++#Enable for FPGA board
++CONFIG_SPE=1
++CONFIG_SPE_TEST=y
++
++#
++# ARMINO Configuration
++#
++
++#
++# Common Configuration
++#
++CONFIG_CACHE_ENABLE=y
++# CONFIG_HEAP_IN_CACHE is not set
++# CONFIG_SRAM_CACHE_ENABLE is not set
++CONFIG_MPU=y
++
++#
++# Debug
++#
++CONFIG_ASSERT_REBOOT=y
++# CONFIG_ASSERT_HALT is not set
++# CONFIG_ASSERT_REBOOT is not set
++# CONFIG_JTAG is not set
++# end of Debug
++# end of Common Configuration
++
++#
++# Features Configuration
++#
++#CONFIG_LWIP_V2_0 is not set
++CONFIG_LWIP_V2_1=y
++CONFIG_NO_HOSTED=y
++CONFIG_LWIP_MEM_LIBC_MALLOC=y
++CONFIG_LWIP_MEMP_MEM_MALLOC=y
++# CONFIG_SEMI_HOSTED is not set
++# CONFIG_FULLY_HOSTED is not set
++# CONFIG_WIFI_SENSOR is not set
++CONFIG_ANA_REG_WRITE_POLL_REG_B=n
++# end of Features Configuration
++
++
++
++#
++# Components Configuration
++#
++
++#
++# Application
++#
++# CONFIG_DEMO_TEST is not set
++# CONFIG_FTPD_UPGRADE is not set
++CONFIG_ALI_MQTT=n
++
++CONFIG_HTTP=y
++CONFIG_OTA_HTTP=y
++CONFIG_HTTP_OTA_WITH_BLE=y
++
++# CONFIG_OTA_TFTP is not set
++CONFIG_IPERF_TEST=y
++# end of Application
++
++CONFIG_AT=n
++CONFIG_AT_CMD=n
++
++#
++# Audio
++#
++CONFIG_AUDIO=y
++CONFIG_AUDIO_ADC=y
++CONFIG_AUDIO_DAC=y
++CONFIG_AUDIO_TEST=y
++# end of Audio
++
++#
++# Calibration
++#
++CONFIG_CALI=y
++CONFIG_MANUAL_CALI=y
++CONFIG_TPC_PA_MAP=y
++# end of Calibration
++
++#
++# ATE
++#
++CONFIG_ATE=n
++CONFIG_ATE_TEST=n
++# end of ATE
++
++#
++# BLE
++#
++CONFIG_BLE_5_X=n
++CONFIG_BTDM_5_2=n
++CONFIG_BTDM_5_T_MINDTREE=n
++CONFIG_BT=n
++CONFIG_BLUETOOTH=n
++# CONFIG_BLE_4_2 is not set
++# end of BLE
++
++#
++# Cli
++#
++CONFIG_CLI=y
++CONFIG_LOG_LEVEL=6
++CONFIG_SHELL_ASYNCLOG=y
++CONFIG_DYM_LOG_MEM_MAX=0x10000
++CONFIG_MAX_COMMANDS=256
++CONFIG_BKREG=n
++# CONFIG_TCP_SERVER_TEST is not set
++# CONFIG_AIRKISS_TEST is not set
++# CONFIG_WIFI_RAW_TX_TEST is not set
++# CONFIG_I2C1_TEST is not set
++# CONFIG_I2C2_TEST is not set
++# CONFIG_UART_TEST is not set
++# CONFIG_SPI_TEST is not set
++# CONFIG_PERI_TEST is not set
++# CONFIG_RF_OTA_TEST is not set
++# end of Cli
++
++#
++# RF
++#
++CONFIG_RF_POLICY_BLE_REQ=y
++# CONFIG_RF_POLICY_WIFI_REQ is not set
++# CONFIG_RF_POLICY_CO_REQ is not set
++# end of RF
++
++#
++# Internal Kconfig
++#
++CONFIG_CHECK_MISMATCH=y
++CONFIG_MCU_PS=n
++CONFIG_DEEP_PS=n
++CONFIG_TICK_CALI=y
++CONFIG_STA_PS=n
++# end of Internal Kconfig
++
++#
++# FreeRTOS
++#
++CONFIG_FREERTOS=y
++CONFIG_FREERTOS_SMP=y
++CONFIG_FREERTOS_TRACE=n
++CONFIG_FREERTOS_ALLOW_OS_API_IN_IRQ_DISABLED=y
++CONFIG_OS_SMP_AFFINITY_DEMO=y
++
++#
++# Memory Debug
++#
++# CONFIG_MALLOC_STATIS is not set
++CONFIG_MEM_DEBUG=y
++# end of Memory Debug
++# end of FreeRTOS
++CONFIG_CM_BACKTRACE=y
++
++#
++# Startup
++#
++CONFIG_APP_MAIN_TASK_PRIO=4
++CONFIG_APP_MAIN_TASK_STACK_SIZE=4096
++# end of Startup
++
++#
++# System
++#
++CONFIG_FLASH_SIZE_4M=y
++CONFIG_FLASH=y
++CONFIG_FLASH_MB=y
++# CONFIG_BASE_MAC_FROM_EFUSE is not set
++# CONFIG_BASE_MAC_FROM_RF_OTP_FLASH is not set
++CONFIG_NEW_MAC_POLICY=y
++CONFIG_BK_MAC_ADDR_CHECK=y
++CONFIG_RESET_REASON=y
++# end of System
++
++#
++# Mbedtls
++#
++CONFIG_PSA_MBEDTLS=y
++CONFIG_FULL_MBEDTLS=n
++CONFIG_MBEDTLS_USE_PSA_CRYPTO=n
++CONFIG_TRUSTENGINE=y
++CONFIG_SW_CRYPTO=n
++CONFIG_TE200_ENTROPY=y
++CONFIG_MBEDTLS_LOG_LEVEL="OFF"
++CONFIG_AON_ENCP=y
++CONFIG_PSA_MBEDTLS_TEST=n
++CONFIG_TRUSTENGINE_TEST=n
++# end of Mbedtls
++#
++
++# USB configuration
++#
++CONFIG_USB=y
++CONFIG_USB_VBAT_CONTROL_GPIO_ID=0x1C
++CONFIG_TASK_USB_PRIO=2
++CONFIG_CHERRY_USB=y
++CONFIG_USB_DMA_ENABLE=y
++CONFIG_USB_HOST=y
++CONFIG_USBH_MSC=y
++CONFIG_USBH_UVC=y
++CONFIG_USBH_UAC=y
++CONFIG_USBH_SERIAL_CH340=y
++
++CONFIG_USB_HUB=y
++CONFIG_USB_HUB_MULTIPLE_DEVICES=y
++CONFIG_USBHOST_HUB_MAX_EHPORTS=4
++CONFIG_USBHOST_HUB_PORT_SUPPORT_MAX_DEVICE=5
++CONFIG_USBHOST_HUB_PORT_1_VBAT_CONTROL_GPIO_ID=0xFF
++
++CONFIG_USB_DEVICE=n
++CONFIG_USBD_MSC=n
++CONFIG_USBD_HID=n
++# end of USB configuration
++
++#
++# WiFi
++#
++CONFIG_WIFI_ENABLE=n
++CONFIG_WIFI6_CODE_STACK=n
++CONFIG_WIFI6=n
++CONFIG_WIFI4=n
++CONFIG_MSDU_RESV_TAIL_LENGTH=16
++CONFIG_TASK_RECONNECT_PRIO=4
++CONFIG_WIFI_MAC_VERSION="V22"
++CONFIG_WIFI_MDM_VERSION="v32"
++CONFIG_WIFI_PLF_VERSION="v32"
++CONFIG_MM_PS_SET_LISTEN_INTERVAL_VALUE=30
++CONFIG_MOBILE_CONNECT_SAP_STATISTICS=y
++# CONFIG_AP_MONITOR_COEXIST is not set
++# CONFIG_WIFI_FAST_CONNECT is not set
++# CONFIG_BSSID_CONNECT is not set
++# CONFIG_WFA_CERT is not set
++# CONFIG_LESS_MEMERY_IN_RWNX is not set
++# CONFIG_AP_PROBEREQ_CB is not set
++# CONFIG_MM_PS_BASED_ON_LISTEN_INTERVAL is not set
++CONFIG_WIFI6_IP_DEBUG=y
++# end of WiFi
++
++CONFIG_BLE_PS=n
++
++#
++# BLE 5.x
++#
++# CONFIG_BLE_HOST_NONE is not set
++CONFIG_BLE_HOST_RW=n
++# CONFIG_BLE_HOST_ZEPHYR is not set
++CONFIG_BLE_MESH_NONE=n
++# CONFIG_BLE_MESH_RW is not set
++CONFIG_BLE_ADV_NUM=1
++CONFIG_BLE_SCAN_NUM=1
++CONFIG_BLE_INIT_NUM=1
++CONFIG_BLE_CONN_NUM=1
++# end of BLE 5.x
++
++#
++# Driver
++#
++
++#
++# AON_RTC
++#
++CONFIG_AON_RTC=y
++# end of AON_RTC
++
++
++CONFIG_SYSTEM_CTRL=y
++CONFIG_HAL_DEBUG_SYS=y
++CONFIG_AON_PMU=y
++
++# I2C
++#
++#
++CONFIG_I2C=y
++CONFIG_I2C_SUPPORT_ID_BITS=2
++CONFIG_SIM_I2C=n
++
++#
++# UART
++#
++CONFIG_UART0=y
++CONFIG_UART1=y
++CONFIG_UART2=y
++
++CONFIG_SYS_PRINT_DEV_MAILBOX=y
++CONFIG_SYS_PRINT_DEV_UART=n
++CONFIG_UART_PRINT_PORT=1
++CONFIG_PRINTF_BUF_SIZE=256
++# CONFIG_BACKGROUND_PRINT is not set
++CONFIG_KFIFO_SIZE=128
++CONFIG_UART_ERR_INTERRUPT=y
++# CONFIG_UART_STATIS is not set
++# end of UART
++
++#
++# TRNG
++#
++CONFIG_TRNG_SUPPORT=y
++# end of TRNG
++
++#depends on CONFIG_TRNG_SUPPORT
++CONFIG_RANDOM_MAC_ADDR=y
++
++#
++# FATFS
++#
++CONFIG_FATFS=y
++CONFIG_FATFS_SDCARD=y
++CONFIG_FATFS_SPI_0_FLASH=n
++CONFIG_FATFS_SPI_1_FLASH=n
++CONFIG_FATFS_QSPI_0_FLASH=n
++CONFIG_FATFS_QSPI_1_FLASH=n
++# end of FATFS
++
++
++
++CONFIG_LITTLEFS=y
++CONFIG_LFS_THREADSAFE=y
++
++
++CONFIG_MAC_PHY_BYPASS=y
++
++#
++# SDIO
++#
++CONFIG_SDCARD=y
++# 20M(14) -> 13M(0)：随机读（seek 之后那一帧）偶发 -6722 信号量超时，
++# 每次冻住 5.12 秒（= SDIO_MAX_RX_WAIT_TIME 512ms x 10）。降一档换信号余量。
++# 档位见 ap/include/driver/hal/hal_sdio_host_types.h：0=13M 1=6.5M ... 14=20M。
++# 1 线 13MHz ≈ 1.6MB/s，电影要 ~560KB/s、2D 动画要 ~756KB/s，仍有余量。
++CONFIG_SDCARD_DEFAULT_CLOCK_FREQ=0
++CONFIG_SDCARD_POWER_GPIO_CTRL=y
++CONFIG_SDCARD_DEBUG_SUPPORT=n
++CONFIG_SDCARD_BUSWIDTH_4LINE=n
++CONFIG_SDIO_4LINES_EN=n
++CONFIG_SDIO=y
++CONFIG_SDIO_V1P0=n
++CONFIG_SDIO_V2P0=y
++CONFIG_SDIO_V2P1=n
++CONFIG_SDIO_GDMA_EN=y
++CONFIG_SDIO_HOST=y
++CONFIG_SDIO_HOST_DEFAULT_CLOCK_FREQ=7
++CONFIG_SDIO_HOST_CLR_WRITE_INT=y
++CONFIG_SDIO_PM_CB_SUPPORT=n
++CONFIG_PIN_SDIO_GROUP_1=n
++CONFIG_SDIO_SLAVE=n
++# end of SDIO
++
++#
++# SPI
++#
++CONFIG_SPI_DMA=y
++# CONFIG_SPI_SLAVE is not set
++# CONFIG_SPI_MASTER is not set
++CONFIG_SPI=y
++CONFIG_SPI_STATIS=y
++CONFIG_SPI_SUPPORT_TX_FIFO_WR_READY=y
++# CONFIG_HSLAVE_SPI is not set
++CONFIG_SPI_MST_FLASH=y
++# CONFIG_SPI_MST_PSRAM is not set
++# end of SPI
++#
++# QSPI
++#
++CONFIG_QSPI=y
++CONFIG_QSPI_TEST=y
++CONFIG_QSPI_MST_FLASH=y
++CONFIG_QSPI_FLASH_GD=y
++# end of QSPI
++
++#
++# GENERAL_DMA
++#
++CONFIG_GENERAL_DMA=y
++CONFIG_DMA_LOGIC_CHAN_CNT=12
++CONFIG_DMA_LOGIC_CHAN_ID_MIN=0
++# end of GENERAL_DMA
++
++#
++# PSRAM
++#
++CONFIG_PSRAM=y
++CONFIG_PSRAM_AS_SYS_MEMORY=y
++CONFIG_TASK_STACK_IN_PSRAM=y
++# end of PSRAM
++
++#
++# Video
++#
++CONFIG_MEDIA=y
++CONFIG_LCD=y
++CONFIG_LCD_QSPI=y
++
++CONFIG_LCD_GC9503V=n
++CONFIG_LCD_H050IWV=y
++CONFIG_LCD_HX8282=y
++CONFIG_LCD_MD0430R=y
++CONFIG_LCD_MD0700R=y
++CONFIG_LCD_NT35512=n
++CONFIG_LCD_NT35510=n
++CONFIG_LCD_NT35510_MCU=y
++CONFIG_LCD_ST7282=y
++CONFIG_LCD_ST7796S=y
++CONFIG_LCD_ST7701S_LY=y
++CONFIG_LCD_ST7701S=y
++CONFIG_LCD_ST7701SN=y
++CONFIG_LCD_AML01=y
++
++#
++# lcd function macro
++#
++CONFIG_LCD_MEDIA=y
++CONFIG_LCD_ROTATE=y
++CONFIG_LCD_HW_PFC=y
++CONFIG_LCD_HW_DECODE=y
++CONFIG_LCD_SW_DECODE=y
++# end of lcd function macro
++
++CONFIG_DMA2D=y
++CONFIG_JPEGDEC_HW=y
++CONFIG_JPEGDEC_SW=y
++CONFIG_HW_SCALE=y
++# end of Video
++
++#
++# CALENDAR
++#
++CONFIG_CALENDAR=n
++# end of CALENDAR
++
++#
++# System control
++#
++# CONFIG_SYS_REDUCE_NORMAL_POWER is not set
++CONFIG_PM_V2=y
++# CONFIG_XTAL_FREQ_40M is not set
++CONFIG_XTAL_FREQ_26M=y
++CONFIG_XTAL_FREQ=26000000
++CONFIG_DCO_FREQ=120000000
++CONFIG_SYSTEM_CLOCK=y
++# end of System control
++
++#
++# PHY
++#
++# CONFIG_PTA is not set
++# end of PHY
++
++#
++# I2S
++#
++CONFIG_I2S=y
++CONFIG_I2S_TEST=y
++# end of I2S
++
++#
++# pwm
++#
++CONFIG_PWM=n
++CONFIG_PWM_V1PX=y
++# end of pwm
++
++# CONFIG_SUPPORT_IRDA is not set
++
++#
++# efuse
++#
++CONFIG_EFUSE=n
++
++#
++# vfs
++#
++CONFIG_VFS=y
++CONFIG_VFS_TEST=y
++
++# end of Driver
++
++#
++# LwIP 2.0.2
++#
++CONFIG_LWIP=y
++CONFIG_DHCP=y
++CONFIG_TASK_LWIP_PRIO=4
++# CONFIG_LWIP_MEM_DEFAULT is not set
++CONFIG_LWIP_MEM_REDUCE=y
++
++# end of LwIP 2.0.2
++
++#
++# LwIP 2.1.2
++#
++# end of LwIP 2.1.2
++
++#
++# Bk_netif
++#
++CONFIG_BK_NETIF=y
++CONFIG_NETIF_LWIP=y
++# end of Bk_netif
++
++# CONFIG_MP3PLAYER is not set
++# CONFIG_PCM_RESAMPLER is not set
++
++#
++# Power Save
++#
++# CONFIG_AP_IDLE is not set
++# CONFIG_FAKE_RTC_PS is not set
++# CONFIG_PM_MODEM_PWD is not set
++# CONFIG_PM_STANDALONE is not set
++CONFIG_PM_V2=y
++# end of Power Save
++
++#
++# PWR_CLK
++#
++CONFIG_PM_DEMO_ENABLE=y
++CONFIG_PM_CLI_ENABLE=y
++CONFIG_PM_LV_SUBCORES_ON=y
++# end of PWR_CLK
++
++#
++# RF Test
++#
++CONFIG_TX_EVM_TEST=y
++CONFIG_RX_SENSE_TEST=y
++# end of RF Test
++
++#
++# WiFi RWNX Interface
++#
++CONFIG_WIFI_KMSG_TASK_PRIO=3
++CONFIG_WIFI_KMSG_TASK_STACK_SIZE=4096
++CONFIG_WIFI_CORE_TASK_PRIO=2
++CONFIG_WIFI_CORE_TASK_STACK_SIZE=2048
++CONFIG_RWNX_QOS_MSDU=y
++CONFIG_RWNX_SW_TXQ=n
++CONFIG_RWNX_FAST_CONNECT=y
++# end of WiFi RWNX Interface
++
++CONFIG_SARADC=y
++CONFIG_SARADC_MB=y
++# CONFIG_SARADC_CALI=y
++# CONFIG_SPIDMA is not set
++CONFIG_TEMP_DETECT=n
++CONFIG_SARADC_NEED_FLUSH=n
++CONFIG_SARADC_RANGE_DIVIDE=y
++# CONFIG_UART_DEBUG is not set
++# CONFIG_UDISK_MP3 is not set
++# CONFIG_WFA_CA is not set
++
++#
++# Supplicant
++#
++CONFIG_TASK_WPAS_PRIO=5
++CONFIG_WPA3=y
++CONFIG_PMF=y
++CONFIG_WPA_CTRL_IFACE=y
++CONFIG_AP_HT_IE=y
++CONFIG_AP_VHT=y
++CONFIG_AP_HE=y
++# CONFIG_WPA_TWT_TEST is not set
++CONFIG_STA_AUTO_RECONNECT=y
++# CONFIG_WPA_LOG is not set
++# end of Supplicant
++# end of Components Configuration
++# end of ARMINO Configuration
++
++#
++# DEMOS_CONFIG
++#
++CONFIG_FFT=n
++# end of DEMOS_CONFIG
++
++CONFIG_TFM=n
++CONFIG_SDMADC=y
++CONFIG_SDMADC_TEST=y
++
++CONFIG_HW_ROTATE_PFC=y
++CONFIG_HW_ROTT_TEST=n
++#
++# CONFIG_FREERTOS_USE_TICKLESS_IDLE
++#
++CONFIG_FREERTOS_USE_TICKLESS_IDLE=1
++#
++# CONFIG_SYSTICK_32K
++#
++CONFIG_SYSTICK_32K=y
++
++CONFIG_TIMER_US=y
++CONFIG_TIMER_SUPPORT_ID_BITS=56
++
++CONFIG_UART_LOW_VOLTAGE_SUPPORT=y
++#
++#GPIO for Power Save: WANIING: modify it should check properties/soc/bk7256/bk7256.defconfig also
++#
++CONFIG_GPIO_WAKEUP_SUPPORT=y
++CONFIG_GPIO_DYNAMIC_WAKEUP_SUPPORT=y
++CONFIG_GPIO_DYNAMIC_WAKEUP_SOURCE_MAX_CNT=4
++CONFIG_GPIO_WAKEUP_DEBUG=n
++CONFIG_GPIO_DEFAULT_SET_SUPPORT=n
++CONFIG_WIFI_VNET_CONTROLLER=y
++
++CONFIG_CAN=n
++CONFIG_CAN_TEST=n
++
++CONFIG_NTP_SYNC_RTC=n
++CONFIG_AON_RTC_KEEP_TIME_SUPPORT=y
++
++#
++#ETH config
++#
++CONFIG_ETH=n
++CONFIG_PHY_SMSC=y
++CONFIG_ETH_PIN_GROUP1=y
++CONFIG_ETH_DHCP=n
++
++#
++# Bk_Modem
++#
++CONFIG_BK_MODEM=n
++CONFIG_LWIP_PPP_SUPPORT=n
++CONFIG_USB_CDC_MODEM=n
++CONFIG_USB_CDC=n
+diff --git a/t5_os/projects/tuya_app/ap/config/bk7258_ap/config b/t5_os/projects/tuya_app/ap/config/bk7258_ap/config
+index 35fba4edc..d9253dd72 100644
+--- a/t5_os/projects/tuya_app/ap/config/bk7258_ap/config
++++ b/t5_os/projects/tuya_app/ap/config/bk7258_ap/config
+@@ -151,6 +151,23 @@ CONFIG_TRNG_PM_CB_SUPPORT=y
+ CONFIG_ROSC_COMPENSATION=y
+ 
+ CONFIG_SDCARD_POWER_GPIO_CTRL_AUTO_POWERDOWN_WHEN_IDLE=n
++
++# SDIO 用 GDMA 收数据 —— **关掉**（2026-10-12 实测结论）。
++#
++# 当初开它是基于一个从没验证过的"CPU 轮询收 FIFO 的 400us 超时会被高优先级任务
++# 饿到"的假设。纯 SD 读压力测试（src/tests/app_sd_test.c，零其他负载）实测：
++#   - 11 秒就出 -6722（SDIO DMA 完成信号量 5.12 秒超时）
++#   - **缓冲区两端 canary 里的 post 被踩** ⇒ DMA 写到了调用者缓冲区外面
++#
++# 病根在分段链式重启的记账上（ap/middleware/driver/sdio_host/sdio_host_driver.c
++# 的 sdio_dma_rx_finish / sdio_dma_rx_start）：它假设"一次 finish 中断 = 一段搬完"，
++# 这个假设一被破坏，rx_transfered_len / rx_cur_trans_len 就跑飞 ——
++# 既可能越界写（多起一段），也可能永远收不到信号量（直接判完不成 -> 5.12 秒超时）。
++# 一个 bug 解释了内存被踩、-6722 超时、播放时 "EOI 缺失" 三个症状。
++#
++# 关掉后走 CPU 轮询收 FIFO 的老路：失败模式变成 400us FIFO 超时
++# （SDIO_READ_FIFO_TIMEOUT，可调），而不是 5.12 秒死等 + 踩内存。
++# 平台默认本来就是 n（见 ap/middleware/driver/sdio/Kconfig）。
+ CONFIG_SDIO_GDMA_EN=n
+ 
+ # CONFIG_LOG_LEVEL=4
+diff --git a/tuyaos/tuyaos_adapter/include/vad/tkl_vad.h b/tuyaos/tuyaos_adapter/include/vad/tkl_vad.h
+index 3b1a7ebd1..3fbd4b800 100755
+--- a/tuyaos/tuyaos_adapter/include/vad/tkl_vad.h
++++ b/tuyaos/tuyaos_adapter/include/vad/tkl_vad.h
+@@ -53,6 +53,12 @@ OPERATE_RET tkl_vad_start(void);
+ 
+ OPERATE_RET tkl_vad_stop(void);
+ 
++/* Restart the RNN VAD state machine (rnn_vad_stop + rnn_vad_start).
++ * Thread-safe: the pair runs on the AEC pipeline thread at a frame boundary,
++ * so it never races rnn_vad_process(). Use it instead of a bare
++ * stop()+start() when the audio pipeline is live. */
++OPERATE_RET tkl_vad_restart(void);
++
+ OPERATE_RET tkl_vad_deinit(void);
+ 
+ #ifdef __cplusplus
+diff --git a/tuyaos/tuyaos_adapter/src/driver/tkl_audio.c b/tuyaos/tuyaos_adapter/src/driver/tkl_audio.c
+index c84cab620..ce896e1c2 100644
+--- a/tuyaos/tuyaos_adapter/src/driver/tkl_audio.c
++++ b/tuyaos/tuyaos_adapter/src/driver/tkl_audio.c
+@@ -75,6 +75,17 @@ static AUIDO_INIT_T s_audio_init = {0};
+ int voice_read_callback(unsigned char *data, unsigned int len, void *args)
+ {
+     TKL_AUDIO_FRAME_INFO_T pframe = {0};
++    /* [probe] voice_read 出帧计数（每 100 帧 = 2s 一条）：>0 = BK 语音管线活着 */
++#ifndef AI_VOICE_TRACE
++#define AI_VOICE_TRACE 0
++#endif
++#if AI_VOICE_TRACE
++    static uint32_t s_probe_cnt = 0;
++    if ((++s_probe_cnt % 100) == 0) {
++        bk_printf("[probe] voice_read frames=%u cb=%p\r\n",
++                  (unsigned)s_probe_cnt, (void *)user_mic_cb);
++    }
++#endif
+     pframe.buf_size = len;
+     pframe.used_size = len;
+     pframe.pbuf = (char *)data;
+diff --git a/tuyaos/tuyaos_adapter/src/driver/tkl_kws.c b/tuyaos/tuyaos_adapter/src/driver/tkl_kws.c
+index 0e8d8e1a1..fc831688a 100755
+--- a/tuyaos/tuyaos_adapter/src/driver/tkl_kws.c
++++ b/tuyaos/tuyaos_adapter/src/driver/tkl_kws.c
+@@ -67,9 +67,8 @@ static void *pExternallyAllocatedMem = NULL;
+ 
+ static KWS_WAKEUP_WORD_MAP_T cKWS_WAKEUP_WORD_MAP[] = {
+     {1, "你好涂鸦",    TKL_KWS_WAKEUP_NIHAO_TUYA},
+-    {2, "小智同学",    TKL_KWS_WAKEUP_XIAOZHI_TONGXUE},
+-    {3, "heytuya",    TKL_KWS_WAKEUP_HEY_TUYA},
+-    {4, "smartlife",  TKL_KWS_WAKEUP_SMARTLIFE},
++    /* other wake words of the model are deliberately not mapped: the engine
++     * still detects them, but they are ignored (wakeup_info == NULL) */
+ };
+ 
+ /***********************************************************
+@@ -242,6 +241,47 @@ OPERATE_RET tkl_kws_init(void)
+     return rt;
+ }
+ 
++OPERATE_RET tkl_kws_deinit(void)
++{
++    if (false == sg_kws_mgr.init) {
++        return OPRT_OK;
++    }
++
++    tkl_kws_disable();
++
++    /* Stop the detect task. It releases its own thread handle and clears
++     * sg_kws_mgr.thread on exit -- poll that as the exit handshake, so the
++     * buffers below are never freed under a running detect() call. */
++    sg_kws_mgr.thread_running = false;
++    tkl_semaphore_post(sg_kws_mgr.sem);
++    while (NULL != sg_kws_mgr.thread) {
++        tkl_system_sleep(20);
++    }
++
++    tuya_ring_buff_free(sg_kws_mgr.rb);
++    tkl_mutex_release(sg_kws_mgr.mutex);
++    tkl_semaphore_release(sg_kws_mgr.sem);
++    if (NULL != sg_kws_mgr.oneframe) {
++        tkl_system_psram_free(sg_kws_mgr.oneframe);
++        sg_kws_mgr.oneframe = NULL;
++    }
++    if (NULL != sg_kws_mgr.buffer) {
++        tkl_system_psram_free(sg_kws_mgr.buffer);
++        sg_kws_mgr.buffer = NULL;
++    }
++#ifdef __EN_EXTERNALLY_ALLOCATION__
++    if (NULL != pExternallyAllocatedMem) {
++        psram_free(pExternallyAllocatedMem);
++        pExternallyAllocatedMem = NULL;
++    }
++    sg_tutuclear_obj = NULL;
++#endif
++
++    memset(&sg_kws_mgr, 0, sizeof(sg_kws_mgr));
++
++    return OPRT_OK;
++}
++
+ OPERATE_RET tkl_kws_enable(void)
+ {
+     tkl_mutex_lock(sg_kws_mgr.mutex);
+diff --git a/tuyaos/tuyaos_adapter/src/driver/tkl_vad.c b/tuyaos/tuyaos_adapter/src/driver/tkl_vad.c
+index ea925cd4e..d01409033 100755
+--- a/tuyaos/tuyaos_adapter/src/driver/tkl_vad.c
++++ b/tuyaos/tuyaos_adapter/src/driver/tkl_vad.c
+@@ -41,30 +41,166 @@ extern OPERATE_RET tkl_kws_feed_with_vad(uint8_t *data, uint16_t datalen, uint8_
+ /***********************************************************
+ ***********************variable define**********************
+ ***********************************************************/
++#define VAD_CMD_NONE    (0)
++#define VAD_CMD_START   (1)
++#define VAD_CMD_STOP    (2)
++#define VAD_CMD_RESTART (3)
++
++/* 2 帧（40ms）之内钩子没跑过 = 音频管线已经停了，此时 start/stop 直接执行即可，
++ * 反正没人跟 rnn_vad_process() 抢状态。 */
++#define VAD_HOOK_ALIVE_MS  (200)
++
+ static void *__s_speex_aec_handle = NULL;
+ static void *__s_rnn_vad_handle = NULL;
+ static uint16_t *__s_linearaec = NULL;
+ static uint32_t __s_frame_size = 0;
+ static TKL_VAD_STATUS_T __s_aec_vad_flag = TKL_VAD_STATUS_NONE;
+ 
++/* 跨线程指令槽：别的线程只写这里，真正的 rnn_vad_start/stop 由 AEC 管线线程在帧
++ * 边界执行。rnn_vad_process() 和 rnn_vad_stop()/start() 操作的是同一份内部状态，
++ * 从两个线程并发调用会把 RNN VAD 卡成"永远返回无语音"（症状：麦克风正常、帧也
++ * 在流、AEC 钩子计数在涨，但 tkl_vad_get_status() 永远返回 NONE，只有重新
++ * init/重启音频管线才能恢复）。 */
++static volatile uint8_t  __s_vad_cmd        = VAD_CMD_NONE;
++static volatile uint32_t __s_hook_calls     = 0;
++static volatile uint32_t __s_hook_tick_ms   = 0;
++
+ /***********************************************************
+ ***********************function define**********************
+ ***********************************************************/
++static void __vad_apply_cmd(uint8_t cmd)
++{
++    switch (cmd) {
++    case VAD_CMD_START:
++        __s_aec_vad_flag = TKL_VAD_STATUS_NONE;
++        if (__s_rnn_vad_handle) {
++            rnn_vad_start(__s_rnn_vad_handle);
++        }
++        break;
++    case VAD_CMD_STOP:
++        __s_aec_vad_flag = TKL_VAD_STATUS_NONE;
++        if (__s_rnn_vad_handle) {
++            rnn_vad_stop(__s_rnn_vad_handle);
++        }
++        break;
++    case VAD_CMD_RESTART:
++        /* 丢掉上一句的 VAD 尾状态，保证下一次唤醒从一个干净的起始姿态开始 */
++        __s_aec_vad_flag = TKL_VAD_STATUS_NONE;
++        if (__s_rnn_vad_handle) {
++            rnn_vad_stop(__s_rnn_vad_handle);
++            rnn_vad_start(__s_rnn_vad_handle);
++        }
++        break;
++    default:
++        break;
++    }
++}
++
++static BOOL_T __vad_hook_alive(void)
++{
++    return (__s_hook_calls > 0) &&
++           ((tkl_system_get_millisecond() - __s_hook_tick_ms) < VAD_HOOK_ALIVE_MS);
++}
++
++static OPERATE_RET __vad_request(uint8_t cmd)
++{
++    if (!__vad_hook_alive()) {
++        __vad_apply_cmd(cmd);
++        return OPRT_OK;
++    }
++
++    __s_vad_cmd = cmd;      /* 交给 AEC 线程，帧边界生效（≤20ms） */
++
++    return OPRT_OK;
++}
++
++/* 16bit 单声道帧峰值 -> 整数 dBFS 近似（每进一位 6dB）。
++ * 用来区分"收不到人声"的三种物理原因：
++ *   mic 也安静   -> 麦克风/采集链路没数据
++ *   mic 有声但 aec 静 -> AEC/NS 把输出压死了（回声消除跑飞）
++ *   两个都有声但 raw=0  -> RNN VAD 自己卡死
++ * 值域严格是 [-96, -12]：peak=32767 右移 15 次到 1，故满量程读数 -12（不是 -6）。
++ * 这个范围也说明：日志里出现的 0dB / 超大正数一定是输出被并发写串口污染了，不可信。 */
++static int16_t __vad_peak_dbfs(const int16_t *p, uint32_t n)
++{
++    uint32_t peak = 0;
++    int16_t  db   = -96;
++
++    if (NULL == p || 0 == n) {
++        return -96;
++    }
++
++    for (uint32_t i = 0; i < n; i++) {
++        int32_t  v = p[i];
++        uint32_t a = (uint32_t)((v < 0) ? -v : v);
++        if (a > peak) {
++            peak = a;
++        }
++    }
++
++    while (peak > 1) {
++        peak >>= 1;
++        db   += 6;
++    }
++
++    return db;
++}
++
+ static OPERATE_RET __tkl_aec_vad_process(int16_t *mic_data, int16_t *ref_data, int16_t *out_data)
+ {
+     OPERATE_RET rt = OPRT_OK;
++    /* [probe] AEC/VAD 钩子调用计数 + 人声命中计数（每 100 次 = 2s 一条）。
++     * calls 增长 = AEC 管线在出帧；speech 增长 = VAD 检测到人声。
++     * mic/aec 是进/出 AEC 的帧峰值 dBFS，raw 是 rnn_vad_process 的原始返回值×100。 */
++    static uint32_t s_call_cnt = 0;
++    static uint32_t s_hit_cnt = 0;
++    int s_has_vad = 0;
++    int16_t mic_db = -96, aec_db = -96;
++    int s_raw = 0;
+ 
+     if (mic_data == NULL || ref_data == NULL || out_data == NULL) {
+         tkl_log_output("Invalid parameter: mic_data, ref_data, or out_data is NULL\r\n");
+         return OPRT_INVALID_PARM;
+     }
+ 
++    mic_db = __vad_peak_dbfs(mic_data, __s_frame_size / 2);
++
+     if (__s_speex_aec_handle) {
+         speex_aes_process(__s_speex_aec_handle, (short *)mic_data, (short *)ref_data, (short *)out_data);
+     }
+ 
+     if (__s_speex_aec_handle && __s_rnn_vad_handle && __s_linearaec) {
+-        int has_vad = (int)rnn_vad_process(__s_rnn_vad_handle, (short *)out_data);
++        aec_db = __vad_peak_dbfs(out_data, __s_frame_size / 2);
++
++        /* 跨线程指令（start/stop/restart）统一在这里落地：本函数是唯一碰
++         * rnn_vad_* 的线程。 */
++        __s_hook_tick_ms = tkl_system_get_millisecond();
++        __s_hook_calls++;
++        if (VAD_CMD_NONE != __s_vad_cmd) {
++            __vad_apply_cmd(__s_vad_cmd);
++            __s_vad_cmd = VAD_CMD_NONE;
++        }
++
++        {
++            float vad_raw = rnn_vad_process(__s_rnn_vad_handle, (short *)out_data);
++            s_has_vad = (int)vad_raw;
++            s_raw     = (int)(vad_raw * 100.0f);
++        }
++        if (s_has_vad) {
++            s_hit_cnt++;
++        }
++#ifndef AI_VOICE_TRACE
++#define AI_VOICE_TRACE 0
++#endif
++#if AI_VOICE_TRACE
++        if ((s_call_cnt % 100) == 0) {
++            tkl_log_output("[probe] vad hook calls=%u speech=%u flag=%d mic=%ddB aec=%ddB raw=%d\r\n",
++                           (unsigned)s_call_cnt, (unsigned)s_hit_cnt,
++                           (int)__s_aec_vad_flag, (int)mic_db, (int)aec_db, s_raw);
++        }
++#endif
++        s_call_cnt++;
++        int has_vad = s_has_vad;
+         if (has_vad && __s_aec_vad_flag != TKL_VAD_STATUS_SPEECH) {
+             // tkl_log_output("################ [vad start] ################\r\n");
+             __s_aec_vad_flag = TKL_VAD_STATUS_SPEECH;
+@@ -165,22 +301,24 @@ TKL_VAD_STATUS_T tkl_vad_get_status(void)
+ 
+ OPERATE_RET tkl_vad_start(void)
+ {
+-    __s_aec_vad_flag = TKL_VAD_STATUS_NONE;
+-    if (__s_rnn_vad_handle) {
+-        rnn_vad_start(__s_rnn_vad_handle);
+-    }
+-
+-    return OPRT_OK;
++    return __vad_request(VAD_CMD_START);
+ }
+ 
+ OPERATE_RET tkl_vad_stop(void)
+ {
+-    __s_aec_vad_flag = TKL_VAD_STATUS_NONE;
+-    if (__s_rnn_vad_handle) {
+-        rnn_vad_stop(__s_rnn_vad_handle);
+-    }
++    return __vad_request(VAD_CMD_STOP);
++}
+ 
+-    return OPRT_OK;
++/**
++ * @brief Restart the RNN VAD state machine (drop the current utterance tail).
++ *
++ * Safe to call from any thread while the audio pipeline is live: the actual
++ * rnn_vad_stop()/rnn_vad_start() pair is executed on the AEC pipeline thread at
++ * a frame boundary, so it can never race rnn_vad_process().
++ */
++OPERATE_RET tkl_vad_restart(void)
++{
++    return __vad_request(VAD_CMD_RESTART);
+ }
+ 
+ OPERATE_RET tkl_vad_deinit(void)

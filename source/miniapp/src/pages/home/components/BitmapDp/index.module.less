@@ -1,0 +1,141 @@
+/* Bitmap DP — fault/flag bit array. Red = fault semantics.
+   rpx units + --app-* vars, follows IDE theme. */
+
+.bitmapCard {
+  background: var(--app-B1, #ffffff);
+  border-radius: 24rpx;
+  padding: 28rpx;
+  margin-bottom: 16rpx;
+  box-shadow: 0 4rpx 16rpx color-mix(in srgb, var(--app-T1, #1a1a1a) 4%, transparent);
+}
+.bitmapHeader {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+.bitmapIcon {
+  flex-shrink: 0;
+  width: 76rpx;
+  height: 76rpx;
+  border-radius: 22rpx;
+  background: color-mix(in srgb, #ef4444 12%, transparent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 22rpx;
+}
+.bitmapTitleWrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.bitmapName {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--app-T1, #1a1a1a);
+}
+.bitmapCode {
+  font-size: 22rpx;
+  color: var(--app-T3, #999999);
+  margin-top: 6rpx;
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+.bitmapState {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  padding: 8rpx 20rpx;
+  border-radius: 16rpx;
+  background: var(--app-B2, #f4f5f7);
+  transition: background 0.3s ease, box-shadow 0.3s ease;
+}
+.bitmapStateActive {
+  background: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
+  box-shadow: 0 4rpx 12rpx color-mix(in srgb, #ef4444 30%, transparent);
+}
+.bitmapStateCount {
+  font-size: 36rpx;
+  font-weight: 700;
+  color: var(--app-T2, #666666);
+  line-height: 1;
+}
+.bitmapStateActive .bitmapStateCount {
+  color: #ffffff;
+}
+.bitmapStateLabel {
+  font-size: 20rpx;
+  font-weight: 600;
+  color: var(--app-T3, #999999);
+  margin-left: 4rpx;
+}
+.bitmapStateActive .bitmapStateLabel {
+  color: #ffffff;
+}
+.bitmapValueRow {
+  display: flex;
+  flex-direction: row;
+  gap: 16rpx;
+  margin-top: 20rpx;
+}
+.bitmapValueChip {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--app-B2, #f4f5f7);
+  border-radius: 14rpx;
+  padding: 14rpx 18rpx;
+}
+.bitmapValueLabel {
+  font-size: 20rpx;
+  font-weight: 700;
+  color: var(--app-T3, #999999);
+  letter-spacing: 0.5rpx;
+}
+.bitmapValueText {
+  font-size: 26rpx;
+  color: var(--app-T1, #1a1a1a);
+  font-family: 'SFMono-Regular', Consolas, monospace;
+}
+.bitmapBits {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 14rpx;
+  margin-top: 20rpx;
+}
+.bitmapBit {
+  width: 96rpx;
+  height: 96rpx;
+  border-radius: 18rpx;
+  background: var(--app-B2, #f4f5f7);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+.bitmapBitActive {
+  background: linear-gradient(135deg, #ef4444 0%, #f87171 100%);
+  box-shadow: 0 4rpx 12rpx color-mix(in srgb, #ef4444 32%, transparent);
+}
+.bitmapBitReadOnly {
+  opacity: 0.65;
+}
+.bitmapBitIdx {
+  font-size: 28rpx;
+  font-weight: 700;
+  color: var(--app-T2, #666666);
+  line-height: 1;
+}
+.bitmapBitLabel {
+  font-size: 18rpx;
+  color: var(--app-T3, #999999);
+  margin-top: 4rpx;
+}
+.bitmapBitActive .bitmapBitIdx,
+.bitmapBitActive .bitmapBitLabel {
+  color: #ffffff;
+}
