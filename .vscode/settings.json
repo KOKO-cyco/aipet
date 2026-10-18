@@ -11,12 +11,12 @@
         "*.c": "c"
     },
     "terminal.integrated.env.linux": {
-        "PATH": "c:\\Users\\liyi\\TuyaOpenIDE\\projects\\aipet\\.tuyaopen\\ide\\bin:${env:PATH}"
+        "PATH": "c:\\Users\\23594\\TuyaOpenIDE\\projects\\aipet\\.tuyaopen\\ide\\bin:${env:PATH}"
     },
     "terminal.integrated.env.osx": {
-        "PATH": "c:\\Users\\liyi\\TuyaOpenIDE\\projects\\aipet\\.tuyaopen\\ide\\bin:${env:PATH}"
+        "PATH": "c:\\Users\\23594\\TuyaOpenIDE\\projects\\aipet\\.tuyaopen\\ide\\bin:${env:PATH}"
     },
     "terminal.integrated.env.windows": {
-        "PATH": "c:\\Users\\liyi\\TuyaOpenIDE\\projects\\aipet\\.tuyaopen\\ide\\bin;${env:PATH}"
+        "PATH": "c:\\Users\\23594\\TuyaOpenIDE\\projects\\aipet\\.tuyaopen\\ide\\bin;${env:PATH}"
     }
 }

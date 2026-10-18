@@ -381,6 +381,11 @@ def main():
     ap.add_argument("--shrink", action="append", default=[], metavar="名字=像素",
                     help="某个动作单独缩小这么多像素，覆盖 --shrink-default（可重复），"
                          "例：--shrink idle=10")
+    ap.add_argument("--cap", action="append", default=[], metavar="名字=宽x高",
+                    help="某个动作的裁剪窗口上限（**输出像素**，可重复），超出部分绕角色"
+                         "站位点居中裁掉。给'带铺满全幅特效'的表演动作用 —— 特效会把该组"
+                         "裁剪框撑大，连锚点框（屏幕画布大小）一起撑，角色本身不受影响。"
+                         "例：--cap rnd_photo=160x206")
     ap.add_argument("--order", default=None,
                     help="动作顺序，逗号分隔；默认用内置表，第 0 个是待机")
     ap.add_argument("--align", choices=("off", "first", "median"), default="median",
@@ -581,6 +586,41 @@ def main():
         if h <= 0:
             return scale * max(0.05, (args.height - shrink_px(name)) / float(args.height))
         return max(0.05, (args.height - shrink_px(name)) / h)
+
+    # ---- 单动作裁剪窗口上限（--cap）----------------------------------------
+    # 表演素材里偶尔有"铺满整幅"的特效帧 —— 拍照那段的白色闪光星爆宽 513px
+    # （源画幅 554 的 93%），它把 rnd_photo 这一组的裁剪框撑到 321x199：
+    #   1) 超过固件单帧上限（SP2D_MAX_W/H），这组会被拒绝加载；
+    #   2) 更麻烦的是锚点框 —— 它就是**屏幕上的画布大小**，会从 160 被撑到 352，
+    #      比屏还宽，角色也跟着缩。
+    # 而角色本体只有 ~190px 宽，闪光只是从角色往外辐射。所以这类动作单独限一个
+    # 窗口（绕角色站位点居中），把超出的特效裁掉 —— 角色一个像素都不动，位置和
+    # 大小仍然和其他动作完全一致（用户 2026-10-16 的硬要求）。
+    cap_map = {}
+    for s in args.cap:
+        k, _, v = s.partition("=")
+        cw, _, ch = v.partition("x")
+        cap_map[k.strip()] = (int(cw), int(ch) if ch else args.max_h)
+
+    for name, _, _ in plan:
+        if name not in cap_map or boxes[name][1] < 0:
+            continue
+        cw_max, ch_max = cap_map[name]
+        bx0s, bx1s, by0s, by1s = boxes[name]
+        sc = scale_of(name)
+        pcx, pbot = pivot[name]
+        # 输出尺寸 = (源窗口 + 2*pad/scale) * sc，所以源窗口要先把 pad 让出来
+        sw = (cw_max - 2 * args.pad) / sc
+        sh = (ch_max - 2 * args.pad) / sc
+        if bx1s - bx0s + 1 > sw:
+            c0 = min(max(pcx - sw / 2.0, bx0s), bx1s - sw + 1)
+            bx0s, bx1s = c0, c0 + sw - 1
+            print("  %-18s 裁剪宽 %.0f -> 限到 %.0f 源px（--cap %dx%d）"
+                  % (name, boxes[name][1] - boxes[name][0] + 1, sw, cw_max, ch_max))
+        if by1s - by0s + 1 > sh:
+            c0 = min(max(pbot - sh, by0s), by1s - sh + 1)
+            by0s, by1s = c0, c0 + sh - 1
+        boxes[name] = (bx0s, bx1s, by0s, by1s)
 
     # 第一趟（不读帧，只用已算好的包围盒）：未缩小的矩形 + 站位参考点落点。
     rect0, anchor = {}, {}

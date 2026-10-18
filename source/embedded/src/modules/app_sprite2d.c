@@ -90,6 +90,22 @@ typedef struct {
     uint8_t     *rle_buf;       /**< 流式帧的 RLE 暂存（按最坏情况分配） */
     uint32_t     rle_cap;
 
+    /* ---- 每组首帧常驻（切组那拍不读卡）----
+     *
+     * 切组那一拍要额外做一次**跨组 f_lseek + 读帧 + inflate**：fatfs 没开
+     * FF_USE_FASTSEEK，跨组 seek 要顺着簇链走一段，实测那拍从 42ms 拉到
+     * 54~58ms —— 这就是"一切换就卡一下"。待机之所以不卡，是因为它整组都在
+     * PSRAM 里（见 idle_rle）。
+     *
+     * 所以把**每组第 0 帧**在开机时解好常驻：切组永远从第 0 帧进，那一拍就只是
+     * blit，完全不碰 SD。约 0.8 MB PSRAM，换掉切换处那一停。
+     * 用户 2026-10-18 的要求原话：**"宁可切换不连贯，也不要卡顿"**。
+     *
+     * 某一组分配/读取失败就留 NULL，照旧走流式读 —— 功能不受影响，只是那组
+     * 切进来时还会顿一下。 */
+    uint16_t   **head_px;       /**< [clip_count] 每组首帧的解码结果 */
+    sp2d_span_t **head_spans;   /**< [clip_count] */
+
     /* ---- 流式：当前从 SD 读进来的那一帧 ---- */
     uint16_t    *cur_px;
     sp2d_span_t *cur_spans;
@@ -115,6 +131,25 @@ static uint32_t sg_dbg_clip = 0xFFFFFFFFu;
 
 /** 常驻的是第几组动作（图集里第 0 行 = 待机+眨眼）。 */
 #define SP2D_IDLE_CLIP      0
+
+/* ---- 切组卡顿探针（2026-10-17）--------------------------------------------
+ *
+ * 现象：**切到另一个动作的那一下会停住**，动作本身播得顺（用户 2026-10-17）。
+ * 差别在于 idle 整组常驻 PSRAM、不碰 SD，其余组每帧现读 —— 所以切进动作组
+ * 的那一拍要付一次"跨几 MB 的 fseek + 读 40~60KB + 解压"，而 tick 只有 33ms。
+ *
+ * 打三类日志，定位完把 SP2D_TRACE_SWITCH 置 0 就全关（不影响任何行为）：
+ *   ① 切组后前 FOLLOW_N 拍的实际间隔 —— **第一拍那个数就是用户感觉到的停顿时长**
+ *   ② **全程**任意一拍间隔超过 SLOW_TICK_MS（基准 42ms 的 ~15%）就报 ——
+ *      2026-10-18 复盘：上一版只跟切换后 3 拍，用户报"开心最卡"时日志里
+ *      17 次切换全部 49~53ms 无一超时，其实说明卡的动作没被覆盖到；
+ *      这一版把"卡在哪一拍"的网撒到动作全程（原慢帧阈值 25ms 太粗，
+ *      6~24ms 的微顿感知得到但不记录，是当时的盲区）
+ *   ③ 单帧读（seek + read + RLE 解压 + 建 spans）超过 TRACE_SLOW_MS 就报一条 */
+#define SP2D_TRACE_SWITCH      1
+#define SP2D_TRACE_SLOW_MS     25u
+#define SP2D_TRACE_FOLLOW_N    8
+#define SP2D_TRACE_SLOW_TICK   48u     /* 大于此值的拍间隔 = 可疑（基准 42ms）*/
 
 
 /* PackBits 解压搬去了 app_spf6.c（`spf6_inflate`）—— 角色页也要解同一个格式。 */
@@ -504,6 +539,10 @@ static BOOL_T prv_read_frame(uint32_t idx)
     const sp2d_clip_t *c = prv_clip_of(idx);
     uint32_t a, b;
 
+#if SP2D_TRACE_SWITCH
+    uint32_t t_cost = (uint32_t)tal_system_get_millisecond();
+#endif
+
     if (NULL == c || idx + 1u >= sg_data.file.total_frames + 1u) {
         return FALSE;
     }
@@ -552,6 +591,19 @@ static BOOL_T prv_read_frame(uint32_t idx)
     sg_data.bad_run = 0;
     spf6_inflate(sg_data.rle_buf, b - a, sg_data.cur_px, (uint32_t)c->w * c->h);
     spf6_build_spans(sg_data.cur_px, sg_data.cur_spans, 1, c->w, c->h);
+
+#if SP2D_TRACE_SWITCH
+    {
+        uint32_t dt = (uint32_t)tal_system_get_millisecond() - t_cost;
+
+        if (dt >= SP2D_TRACE_SLOW_MS) {
+            PR_NOTICE("[sp2d] 读帧慢 %u ms：%s 第 %u 帧（全局 %u），RLE %u KB",
+                      (unsigned)dt, c->name, (unsigned)(idx - c->first),
+                      (unsigned)idx, (unsigned)((b - a) / 1024u));
+        }
+    }
+#endif
+
     return TRUE;
 }
 
@@ -593,13 +645,37 @@ static const sp2d_fr_t *prv_frame_at(uint32_t idx)
 {
     const sp2d_clip_t *c = prv_clip_of(idx);
 
-    if (NULL == c || 0 == sg_data.idle_frames) {
-        return NULL;                        /* 表坏了 / 连 idle 都没有：这一帧不画 */
+    /* **"连 idle 都没有"不能在这一层否掉**（2026-10-16）：idle 常驻分配失败
+     * （PSRAM 不够拿 6.4 MB 的 idle RLE）时会整组退化成流式读，那时
+     * idle_frames = 0、每一帧都走下面的 SD 流式读，和别的组一模一样。
+     * 以前这里把 "0 == idle_frames" 也一起 return NULL，结果 idle 一退化就
+     * **整只宠物消失** —— 日志表现就是 "[sp2d] idle 常驻分配/读取失败"之后
+     * 一帧都不画，而点击 / 随机插播的打印照打（渲染被否在 prv_frame_at，
+     * 页面调度在更外层，互不影响）。 */
+    if (NULL == c) {
+        return NULL;                        /* 表坏了：这一帧不画 */
     }
 
     if (idx < sg_data.idle_frames) {
         prv_fr_set_idle(idx);
         return &sg_data.fr;
+    }
+
+    /* 首帧命中常驻（见 head_px 的字段注释）：切组那一拍直接 blit，不跨组 seek、
+     * 不 inflate —— 这就是"切换不再顿一下"的来源。
+     * 只认**组内第 0 帧**：切组永远从 0 开始，其余帧照常流式读。 */
+    if (0 == (idx - c->first) && NULL != sg_data.head_px) {
+        uint32_t gi = (uint32_t)(c - sg_data.file.clips);
+
+        if (NULL != sg_data.head_px[gi]) {
+            sg_data.fr.px    = sg_data.head_px[gi];
+            sg_data.fr.spans = sg_data.head_spans[gi];
+            sg_data.fr.w     = c->w;
+            sg_data.fr.h     = c->h;
+            sg_data.fr.dx    = c->dx;
+            sg_data.fr.dy    = c->dy;
+            return &sg_data.fr;
+        }
     }
 
     if (idx != sg_data.cur_frame) {
@@ -616,6 +692,13 @@ static const sp2d_fr_t *prv_frame_at(uint32_t idx)
                 sg_data.fail_log_t = now;
                 PR_ERR("[sp2d] 读第 %u 帧失败（累计 %u 次）—— 切 idle 顶上",
                        (unsigned)idx, (unsigned)sg_data.fail_count);
+            }
+
+            /* **没有常驻 idle 可退时**（idle 常驻分配失败、整组退化流式）：
+             * idle_px 是 NULL，不能解压；idle_frames 是 0，不能取模。
+             * 这一帧不画，下一帧 tick 还会重试当前帧。 */
+            if (NULL == sg_data.idle_px) {
+                return NULL;
             }
 
             sg_stat.fallback = 1;
@@ -758,6 +841,66 @@ OPERATE_RET app_sprite2d_init(void)
          * SP2D_PATH_SPF 重开）。 */
         sg_data.loaded = TRUE;
 
+        /* ---- 每组首帧常驻（见 head_px 的字段注释）-----------------------
+         * 开机时把除 idle 之外的每组第 0 帧解好放 PSRAM；切组那拍直接 blit，
+         * 不跨组 seek、不 inflate，切换处就不会多停那一拍。尽力而为：
+         * 哪组拿不到内存/读失败就留 NULL，照旧流式读。 */
+        {
+            uint32_t nclip    = sg_data.file.clip_count;
+            uint32_t cached_kb = 0;
+            int      cached_n  = 0;
+
+            sg_data.head_px    = (uint16_t **)tal_malloc(nclip * sizeof(uint16_t *));
+            sg_data.head_spans = (sp2d_span_t **)tal_malloc(nclip * sizeof(sp2d_span_t *));
+
+            /* 两个数组各自清零：只成功一个时 deinit 也要能安全遍历 */
+            if (NULL != sg_data.head_px) {
+                memset(sg_data.head_px, 0, nclip * sizeof(uint16_t *));
+            }
+            if (NULL != sg_data.head_spans) {
+                memset(sg_data.head_spans, 0, nclip * sizeof(sp2d_span_t *));
+            }
+
+            if (NULL != sg_data.head_px && NULL != sg_data.head_spans) {
+                for (uint32_t i = 1; i < nclip; i++) {      /* 0 = idle，已常驻 */
+                    const sp2d_clip_t *hc = &sg_data.file.clips[i];
+                    uint32_t a = sg_data.file.offs[hc->first];
+                    uint32_t b = sg_data.file.offs[hc->first + 1u];
+                    uint16_t    *px;
+                    sp2d_span_t *sp;
+
+                    if (b <= a || (b - a) > sg_data.rle_cap) {
+                        continue;
+                    }
+
+                    px = (uint16_t *)tal_psram_malloc((size_t)hc->w * hc->h * 2u);
+                    sp = (sp2d_span_t *)tal_psram_malloc(
+                        (size_t)hc->h * sizeof(sp2d_span_t));
+
+                    if (NULL == px || NULL == sp ||
+                        TRUE != prv_read_at(a, b - a, sg_data.rle_buf)) {
+                        if (NULL != px) tal_psram_free(px);
+                        if (NULL != sp) tal_psram_free(sp);
+                        continue;
+                    }
+
+                    spf6_inflate(sg_data.rle_buf, b - a, px,
+                                 (uint32_t)hc->w * hc->h);
+                    spf6_build_spans(px, sp, 1, hc->w, hc->h);
+
+                    sg_data.head_px[i]    = px;
+                    sg_data.head_spans[i] = sp;
+                    cached_n++;
+                    cached_kb += (uint32_t)((size_t)hc->w * hc->h * 2u / 1024u);
+                }
+            } else {
+                PR_WARN("[sp2d] 首帧常驻表分配失败，切组仍走流式读");
+            }
+
+            PR_NOTICE("[sp2d] 首帧常驻 %d/%u 组（%u KB）：切组那一拍不读卡",
+                      cached_n, (unsigned)(nclip - 1u), (unsigned)cached_kb);
+        }
+
         /* "角色高"只算 idle 的第 0 帧（常驻里已经解好了那一帧）。待机是匀速摇摆，
          * 各帧高度一致，第 0 帧够代表；真要逐帧算就得把整组解一遍，不值。 */
         int ch_h = 0;
@@ -785,6 +928,23 @@ OPERATE_RET app_sprite2d_init(void)
 
 void app_sprite2d_deinit(void)
 {
+    /* 首帧常驻必须**先于** spf6_close 释放：要按 clip_count 逐项 free，
+     * 而 spf6_close 会把那张动作表一起收掉。 */
+    if (NULL != sg_data.head_px || NULL != sg_data.head_spans) {
+        for (uint32_t i = 0; i < sg_data.file.clip_count; i++) {
+            if (NULL != sg_data.head_px && NULL != sg_data.head_px[i]) {
+                tal_psram_free(sg_data.head_px[i]);
+            }
+            if (NULL != sg_data.head_spans && NULL != sg_data.head_spans[i]) {
+                tal_psram_free(sg_data.head_spans[i]);
+            }
+        }
+        if (NULL != sg_data.head_px)    tal_free(sg_data.head_px);
+        if (NULL != sg_data.head_spans) tal_free(sg_data.head_spans);
+        sg_data.head_px    = NULL;
+        sg_data.head_spans = NULL;
+    }
+
     spf6_close(&sg_data.file);              /* 句柄 + 动作表 + 偏移表一起收干净 */
     if (NULL != sg_data.idle_px)    tal_psram_free(sg_data.idle_px);
     if (NULL != sg_data.idle_spans) tal_psram_free(sg_data.idle_spans);
@@ -973,6 +1133,37 @@ void app_sprite2d_render_clip(uint16_t *dst, int w, int h,
     if (NULL == dst || w <= 0 || h <= 0) {
         return;
     }
+
+#if SP2D_TRACE_SWITCH
+    {
+        static int      s_clip   = -2;      /* -2 = 还没跑过第一拍 */
+        static uint32_t s_t      = 0;
+        static int      s_follow = 0;       /* 切组后还要盯几拍 */
+
+        uint32_t now = (uint32_t)tal_system_get_millisecond();
+        uint32_t gap = now - s_t;
+
+        if (-2 == s_clip) {
+            s_clip = clip;                  /* 首拍不算"切组" */
+        } else if (clip != s_clip) {
+            PR_NOTICE("[sp2d] 切组 %d -> %d（%s，%d 帧）", s_clip, clip,
+                      app_sprite2d_clip_name(clip), app_sprite2d_clip_frames(clip));
+            s_clip   = clip;
+            s_follow = SP2D_TRACE_FOLLOW_N;
+        } else if (gap > SP2D_TRACE_SLOW_TICK) {
+            /* **动作播放全程的慢拍检测**：不限切换后，任何一拍间隔超标就记 */
+            PR_NOTICE("[sp2d] 慢拍：%s 帧 %d，距上一拍 %u ms",
+                      app_sprite2d_clip_name(clip), frame, (unsigned)gap);
+        }
+        if (s_follow > 0) {
+            /* **这一条才是卡顿的读数**：切组那拍花了多久，下一拍就多隔了多久 */
+            PR_NOTICE("[sp2d]   切换后 %d 拍：帧 %d，距上一拍 %u ms",
+                      SP2D_TRACE_FOLLOW_N + 1 - s_follow, frame, (unsigned)gap);
+            s_follow--;
+        }
+        s_t = now;
+    }
+#endif
 
     for (int i = 0; i < w * h; i++) {
         dst[i] = bg;

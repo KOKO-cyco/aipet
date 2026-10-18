@@ -44,12 +44,11 @@
  * 改动作集（fish_extract.py 的 CLIPS / build_fish.sh 的 --order）时**这里要跟着改**；
  * 漏改的后果是"模型要求演某个新动作，被这层挡下来"。
  *
- * **不含 `snap` / `snap_l` / `drag_up` / `drag_hold` / `drag_down`** —— 那五组是
- * "贴边 / 拖拽"的状态帧，不是给大模型点名的表演动作。 */
+ * **只列当前动作集（2026-10-16，third_party/动作视频/ 的 8 条）真实存在的组** —— 
+ * snap / drag / talk 那些旧组随旧素材一起没了，列了只会让大模型点名演不存在的动作。 */
 #define AVATAR_ANIM_NAMES                                                      \
-    "idle, happy, think, sad, talk, click_angry, click_wave, click_shy, "      \
-    "click_happy, rnd_lookaround, rnd_float, rnd_scare, "                      \
-    "rnd_breakfast, rnd_lunch, rnd_yawn, rnd_whale, rnd_photo"
+    "idle, click_wave, click_happy, "                                       \
+    "rnd_photo, rnd_note"
 
 /* 情绪名 = skill_emotion.h 里的 EMOJI_*（page_pet.c 的情绪表按这些键映射动作）。
  * 大模型给大小写都认（页面里用 strcasecmp 比对），这里列全便于它挑。 */
@@ -60,10 +59,7 @@
     "RELAXED, SLEEP"
 
 static const char *const sg_anim_whitelist[] = {
-    "idle", "happy", "think", "sad", "talk",
-    "click_angry", "click_wave", "click_shy", "click_happy",
-    "rnd_lookaround", "rnd_float", "rnd_scare", "rnd_breakfast", "rnd_lunch",
-    "rnd_yawn", "rnd_whale", "rnd_photo",
+    "idle", "click_wave", "click_happy", "rnd_photo", "rnd_note",
 };
 
 /* MCP 服务器是否已经建好（= 工具已登记）。MQTT 没连上时是 false。 */

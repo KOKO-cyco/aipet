@@ -1,15 +1,31 @@
 #!/usr/bin/env python3
-"""blue_big_fat_fish 的 WebM 素材 -> 带 alpha 的 PNG 序列，供 pack_seq.py 打包。
+"""third_party/新动作视频 的 WebM 素材 -> 带 alpha 的 PNG 序列，供 pack_seq.py 打包。
 
-**必须用 `-c:v libvpx-vp9` 解码。**
+**必须用 `-c:v libvpx-vp9` 解码（这一项永远不能省）。**
 ffmpeg 的原生 `vp9` 解码器**不读 alpha 平面** —— 用默认解码器解出来的帧没有
 alpha，`ffprobe` 也把 `pix_fmt` 报成 `yuv420p`。这会让人以为"素材根本没透明
-通道"（本项目 2026-10-14 就在这上面判断错过一次）。实际是：alpha 好好地在文件
-里，只是要显式指定 libvpx 解码器。
+通道"（2026-10-17 就在这上面判断错过一次：抽帧命令漏了 `-c:v libvpx-vp9`，
+把 native 解码器填的假 alpha=255 当成了无 alpha）。实际是：alpha 好好地在文件
+里，只要显式指定 libvpx 解码器。
+
+VP9 alpha 编码时**透明区的 RGB 就是纯黑 (0,0,0)**，所以系统自带播放器
+（照片查看器 / Windows Media Player / QuickTime）播这类 webm 会显示黑底，而不是
+透明—— 这也不能反证文件没有 alpha。Chrome/Edge 直接拖进去才看得到透明。
 
 另一个容易看走眼的点：这些片段的**背景 alpha 是 1 而不是 0**。1/255 和全透明
 肉眼没区别，但按"alpha 是不是 0"去判断会觉得蒙版是坏的。pack_seq.py 的
 ALPHA_MIN=16 天然把 1 当透明，不用特殊处理。
+
+**静止帧裁剪（2026-10-18 用户要求）**：这批素材里动作演完后画面会僵住
+（相邻帧几乎完全一致），实测 16 条尾部静止 0.25~1.29s、中段最长 2.12s。
+抽帧时自动按 TRIM_* 常量裁掉多余静止帧：
+
+    尾部静止段只保留最后 1 帧（2026-10-18 用户改主意：末尾重复只留一帧）；
+    中段静止段超过 TRIM_MID_MAX 对的裁到只保留 TRIM_MID_MAX 对（<=0.5s）；
+    **开头部的静止段一律不裁**（用户只点名了尾段和中段）。
+
+删的是完全相同的帧，不改变任何一帧的内容，也不碰第 1 帧（pack_seq 的
+`--align first` 对齐基准、锚点框都不变）。待机组（第 0 组）同样适用。
 
 输出布局（pack_seq.py 要的样子）：
 
@@ -22,12 +38,10 @@ ALPHA_MIN=16 天然把 1 当透明，不用特殊处理。
 或者手动两步：
 
     python tools/fish_extract.py --out third_party/resources/fish_seq
-    python tools/pack_seq.py --src third_party/resources/fish_seq \\
-        --out third_party/fish/fish_elf.spf \\
-        --height 156 --ref-action idle --src-fps 24 --fps 24 --idle-frames 48 \\
-        --order idle,snap,snap_l,click_angry,click_wave,click_shy,click_happy,\\
-drag_up,drag_hold,drag_down,talk,rnd_lookaround,rnd_float,rnd_scare,\\
-rnd_breakfast,rnd_lunch,rnd_dinner,rnd_yawn,rnd_whale
+    python tools/pack_seq.py --src third_party/resources/fish_seq \
+        --out third_party/fish/fish_elf.spf \
+        --height 156 --ref-action idle --src-fps 24 --fps 24 --idle-frames 48 \
+        --order idle,tap_proud,tap_shy,tap_happy,tap_tickle,fn_photo,fn_note,emo_sad,emo_happy,emo_think,rnd_gomoku,rnd_pigeon,rnd_yawn,rnd_cat,rnd_lion,rnd_scare
 
 （完整的两个文件、各自该用哪些参数，见 `tools/build_fish.sh` —— 那里是唯一权威。）
 
@@ -49,13 +63,23 @@ import shutil
 import subprocess
 import sys
 
+from PIL import Image
+
 # 源素材根目录（相对本脚本）
-SRC_ROOT = "../third_party/blue_big_fat_fish"
+SRC_ROOT = "../third_party/新动作视频"
 
 # 中间分辨率。源是 640x360，角色本体约 216x270；目标成品高 120px，所以按
 # **一半分辨率**取中间帧就够了（角色约 108x135 -> 缩到 120 高是 0.89 倍），
 # 再大只是白白吃磁盘。
-INTER_W, INTER_H = 320, 180
+INTER_W, INTER_H = 554, 312
+
+# ---- 静止帧裁剪参数（2026-10-18 用户定：末尾重复只留一帧、中段最多 0.5s）----
+# 检测在读好的 PNG 上做（缩到 64x36 灰度，与打包同一条像素路径）。
+TRIM_W, TRIM_H = 64, 36
+TRIM_MAD_TH = 0.6        # 相邻帧平均绝对差（0-255）低于此值算"没动"
+TRIM_RATIO_TH = 0.002    # 且 |d|>8 的像素占比低于此值
+TRIM_TAIL_KEEP = 1       # 尾部静止段只保留最后 1 帧（用户 2026-10-18 改主意）
+TRIM_MID_MAX = 12        # 中段静止段超过 12 对（0.5s）就裁到 12 对
 
 # 片段表：输出名 -> 源 .webm（相对 SRC_ROOT）。
 #
@@ -64,99 +88,51 @@ INTER_W, INTER_H = 320, 180
 #
 # 名字用 ASCII：它们会进 SD 卡路径和 C 代码里的映射表。
 CLIPS = [
-    # 素材统一从 `动作视频优化版/` 取 —— 那是**人工剪过的版本**（去死区、砍多余循环、
-    # 整体变速），已经替代了原始 webm。原始素材留在同级目录（click/ random/ move/
-    # turn/ idle/ drag/）作为备份，不要再直接引用。
+    # 素材根 = third_party/新动作视频/（用户 2026-10-18 更新的第四套动作集，
+    # 共 16 条，**文件名本身就说明了用途**）：
     #
-    # ---- 待机（常驻） ----
-    # **2026-10-16 换成豆包那一版**（`豆包生成动作/待机.webm`，361 帧）。
-    # 旧的 `idle/待机摇摆.webm`（74 帧）是当年从 `video(1)` 抠出来、再拿
-    # normalize_clip.py 对齐到旧取景的产物。豆包这一版是**一整套重新生成**的
-    # （待机/开心/伤心/思考/拍照），彼此的角色大小和站位本来就一致
-    # （用户的 `角色一致性检验.jpg` 量过：躯干 ±0.6%、高 ±0.4%），
-    # 所以整套换成豆包版，不用再逐段手工对齐。
+    #   待机              x1   常驻 PSRAM
+    #   点击回应-*        x4   点宠物时随机演
+    #   功能-*            x2   拍照 / 记笔记（AI 工具或流程触发）
+    #   表情-*            x3   情绪驱动（伤心 / 开心 / 思考）
+    #   随机-*            x6   待机时随机插播（照镜子、东张西望已按用户要求删掉）
     #
-    # **但原片 15 秒（361 帧）不能直接进** —— 待机组整组常驻 PSRAM，帧数是硬预算
-    # （`--idle-frames 48`）。361 帧抽到 48 帧只剩 **3fps**，待机变成幻灯片。
-    # 所以先用 clip_cut.py 裁出**一个摇摆周期**：
+    # 组名前缀就是用途编码（tap_ / fn_ / emo_ / rnd_），固件按前缀分组取用；
+    # 顺序无所谓（固件按名字找组），但**第 0 组必须是 idle**（常驻）。
     #
-    #     py -3 tools/clip_cut.py 豆包生成动作/待机.webm     #         --out 豆包生成动作/待机_单周期.webm --keep 50:117
+    # **这批素材自带 alpha**，但抽帧必须带 `-c:v libvpx-vp9`（VP9 的 alpha 在
+    # 侧数据里，native vp9 解码器不读，见文件头）。
     #
-    # 帧号是 tools/find_loop.py 量出来的（它找接缝最小的循环段）：50..116 共
-    # 67 帧 / 2.79s，接缝 0.65x 帧步、内部幅度 90%（= 完整摆了一轮）。
-    # 67 帧抽到 48 帧 = 17fps，和旧的 74 帧 / 3.08s 一个量级。
-    #
-    # **换 idle 会动整份几何** —— 它是 `--ref-action`，pack_seq 的缩放比、
-    # 锚点框都从它推。换完必须重跑打包并核对 build_fish.sh 打出来的锚点框，
-    # 以及 `[sp2d] 已加载` 那条日志里的"角色高"。
-    ("idle",            "豆包生成动作/待机_单周期.webm"),
+    # 加新动作：webm 丢进 third_party/新动作视频/，这里加一行，再同步
+    # build_fish.sh 的 ELF_ORDER 和固件里的几张表。
 
-    # ---- 点击回应 ×4 ----
-    # **挠痒咯咯笑（click_tickle）2026-10-15 删掉了**：那一版素材头顶的呆毛是坏的
-    # （细发丝抠不干净，边缘发暗、比别的动作粗一圈，放大一眼能看出来）。
-    # 源文件还在 `动作视频优化版/点击回应-挠痒咯咯笑.webm`，重新生成一版干净的
-    # 就能加回来 —— 加回来要同时改 build_fish.sh 的 --order、page_char.c 的情绪表、
-    # app_avatar_tools.c 的 AVATAR_ANIM_NAMES。
-    ("click_angry",     "动作视频优化版/点击回应-傲娇生气.webm"),
-    ("click_wave",      "动作视频优化版/点击回应-元气挥手.webm"),
-    ("click_shy",       "动作视频优化版/点击回应-害羞惊讶.webm"),
-    ("click_happy",     "动作视频优化版/点击回应-开心跃动.webm"),
+    # ---- 待机（常驻）----
+    # **第一个必须是待机组**（pack_seq 按 --idle-frames 抽帧、降 fps 保时长）。
+    # 单周期由 build_fish.sh 第 0 步现量（find_loop.py），产物是 待机_单周期.webm。
+    ("idle",            "待机_单周期.webm"),
 
-    # ---- 拖拽：**三段**，不是一段 ----
-    # 拖拽是状态驱动的：按下 -> 起手 -> 悬空 -> 松手 -> 落地。
-    # 三段是从 `动作视频优化版/被鼠标拖拽悬空反馈.webm`（130 帧）切出来的：
-    #     0..13   起飘（底沿 328->296）
-    #     13      悬空 —— **只有一帧**。源素材里 13..115 那 4 秒本来就是定住的
-    #             （逐帧能量≈0），留一帧就够了；按多久飘多久由手指决定，
-    #             不需要拿 100 多帧去凑时长。
-    #     112..129 落地
-    # 切点用 tools/clip_probe.py 的"底沿"曲线量的（底沿 = 脚的位置，越小=越高）。
-    # 要重切就照上面这组帧号跑 tools/clip_cut.py --keep。
-    ("drag_up",         "动作视频优化版/drag_up.webm"),
-    ("drag_hold",       "动作视频优化版/drag_hold.webm"),
-    ("drag_down",       "动作视频优化版/drag_down.webm"),
+    # ---- 点击回应 x4 ----
+    ("tap_proud",       "点击回应-傲娇生气.webm"),
+    ("tap_shy",         "点击回应-害羞惊讶.webm"),
+    ("tap_happy",       "点击回应-开心跃动.webm"),
+    ("tap_tickle",      "点击回应-挠痒咯咯笑.webm"),
 
-    # ---- AI 回复（对屏碎碎念）----
-    ("talk",            "动作视频优化版/碎碎念-对屏碎碎念.webm"),
+    # ---- 功能 x2 ----
+    ("fn_photo",        "功能-拍照.webm"),
+    ("fn_note",         "功能-记笔记.webm"),
 
-    # ---- AI 表情 ×3（开心 / 思考 / 伤心）+ 拍照 ----
-    # **2026-10-16 全部换成豆包那一版**（`豆包生成动作/`）。旧的 `ai/*.webm` 是
-    # 当年一条条抠出来、再拿 normalize_clip.py 对齐取景的；豆包这一版是整套
-    # 重新生成的，尺寸站位天生一致（见上面 idle 那段），处理链短得多。
-    # 旧的 ai/*.webm 留着做备份，不要再引用。
-    #
-    # 它们在 pack_seq.py 里的 role 是 ROLE_AI（不进内置随机池）。**但精灵里也要带
-    # 上这三组** —— 对话时宠物要按情绪演开心/思考/伤心，见 page_pet.c 的情绪表。
-    # 桌宠页用的是自己的动作状态机 + app_sprite2d_render_clip()，不走内置随机池，
-    # 所以 ROLE_AI 这个标记对我们没有影响。
-    #
-    # **think 换了源 = 帧数变了**（163 -> 241），page_pet.c 的 `sg_loop[]` 里那条
-    # `{ "think", 71, 122, 163 }` 就失效了 —— 打包时会打警告，要重跑
-    #     py -3 tools/find_loop.py third_party/resources/fish_seq/think
-    # 把新的循环区间抄回去。
-    ("happy",           "豆包生成动作/开心.webm"),
-    ("think",           "豆包生成动作/思考.webm"),
-    ("sad",             "豆包生成动作/伤心.webm"),
+    # ---- 表情 x3 ----
+    ("emo_sad",         "表情-伤心.webm"),
+    ("emo_happy",       "表情-开心.webm"),
+    ("emo_think",       "表情-思考.webm"),
 
-    # 拍照：新动作（2026-10-16 加）。名字前缀 `rnd_` = 进内置随机池（role 3），
-    # 也进 page_pet.c 的 sg_idle_acts[] 待机插播表。
-    ("rnd_photo",       "豆包生成动作/拍照.webm"),
-
-    # ---- 随机 ×8 ----
-    ("rnd_lookaround",  "动作视频优化版/工作状态-原地踱步张望.webm"),
-    ("rnd_float",       "动作视频优化版/漂浮踏步.webm"),
-    ("rnd_scare",       "动作视频优化版/被吓一跳.webm"),
-    ("rnd_breakfast",   "动作视频优化版/吃早餐.webm"),
-    ("rnd_lunch",       "动作视频优化版/吃午餐.webm"),
-    # **吃晚餐 2026-10-15 删掉了**：它是**锚点框的宽度元凶** —— 带三盘菜，
-    # 裁剪框比角色本体宽一倍多，把"所有动作的并集"整个撑开，导致角色本体
-    # 只能画得很小（锚点框宽 ≈ 1.75 × 角色高）。删掉它锚点框就窄下来了，
-    # 同样的屏幕里角色能画大得多。源文件还在 `动作视频优化版/吃晚餐.webm`。
-    ("rnd_yawn",        "动作视频优化版/哈欠连天.webm"),
-    # **蓝鲸现世留着**（2026-10-15 试删过又放回来了）：它也很宽（帧 199px、
-    # 偏移只到 10，删完吃晚餐之后就是它在顶并集的左右两边），但用户要先看效果
-    # 再决定。真想再窄一截的时候，删它是最划算的一刀。
-    ("rnd_whale",       "动作视频优化版/蓝鲸现世.webm"),
+    # ---- 随机表演 x6 ----
+    ("rnd_gomoku",      "随机-下五子棋.webm"),
+    ("rnd_pigeon",      "随机-变鸽子.webm"),
+    ("rnd_yawn",        "随机-哈欠连天.webm"),
+    ("rnd_cat",         "随机-撸猫.webm"),
+    ("rnd_lion",        "随机-舞狮头.webm"),
+    ("rnd_scare",       "随机-被吓一跳.webm"),
 ]
 
 
@@ -167,8 +143,146 @@ def ffmpeg_bin():
     return exe
 
 
+def is_static(a, b):
+    """两帧是否"几乎没动"：MAD 与变化像素占比双低于阈值。"""
+    n = len(a)
+    tot = 0
+    ch = 0
+    for x, y in zip(a, b):
+        d = x - y if x > y else y - x
+        tot += d
+        if d > 8:
+            ch += 1
+    return tot / n < TRIM_MAD_TH and ch / n < TRIM_RATIO_TH
+
+
+def png_gray(path):
+    """读一张已抽好的 PNG，缩到 TRIM 尺寸转灰度字节。"""
+    im = Image.open(path).convert("RGBA").resize((TRIM_W, TRIM_H))
+    return im.convert("L").tobytes()
+
+
+def trim_plan(out_dir):
+    """算裁剪方案（迭代到不动点）。返回 (删除帧号集合, 说明串)。
+
+    帧号 1-based。两个要点：
+
+    **在抽好的 PNG 上检测**（与打包输入同一条像素路径，避免"webm 直接缩小"
+    和"PNG 再缩小"在段边界帧上的判定分歧 —— 2026-10-18 实测 emo_happy
+    两条路径差 1 对）。
+
+    **为什么要迭代**：删帧会改变邻接关系。run 中间常有一帧"和两边都差一点"
+    的孤帧，删掉它以后前后帧成了新邻居且彼此几乎一致，静止段反而变长
+    （2026-10-18 实测 tap_tickle：删 1 帧后尾部静止从 5 帧变成 7 帧）。
+    所以每删一轮都要在**幸存序列**上重新检测，直到没有可删的为止。
+    灰帧只读一遍，迭代全在内存里做（上限 64 轮，每轮至少删 1 帧，
+    帧数单调递减，绝不会跑满）。
+
+    每轮规则相同：尾部连续相同帧只保留最后 TRIM_TAIL_KEEP 帧；
+    非头非尾的静止段超过 TRIM_MID_MAX 对的裁到只留 TRIM_MID_MAX 对；
+    开头部一律不裁。
+    """
+    files = sorted(f for f in os.listdir(out_dir) if f.endswith(".png"))
+    n = len(files)
+    if n < 2:
+        return set(), ""
+    frames = [png_gray(os.path.join(out_dir, f)) for f in files]
+
+    alive = list(range(1, n + 1))       # 幸存帧的原始帧号（升序）
+    dead = set()
+    tail_rounds = 0
+    tail_last = 0
+    mid_notes = []
+
+    for _ in range(64):
+        m = len(alive)
+        if m < 2:
+            break
+        sub = [frames[k - 1] for k in alive]
+        # ds[k]（0-based）= 幸存序列第(k+1)帧 -> 第(k+2)帧 是否静止
+        ds = [is_static(sub[k], sub[k + 1]) for k in range(m - 1)]
+
+        dels = set()                    # alive 空间里的位置（1-based）
+
+        # ---- 尾部：从后往前数连续静止对数 t；相同帧数 = t+1 ----
+        t = 0
+        for s in reversed(ds):
+            if s:
+                t += 1
+            else:
+                break
+        # t < m-1 是保险：整片全静止时不动它（只可能是坏素材，不能裁成 1 帧）
+        tail_fired = t + 1 > TRIM_TAIL_KEEP and t < m - 1
+        if tail_fired:
+            # 相同帧占末尾 t+1 帧，保留最后 KEEP 帧，删前面的
+            dels.update(range(m - t, m - TRIM_TAIL_KEEP + 1))
+
+        # ---- 中段：扫描所有连续静止段；跳过头段（位置 1）和尾段 ----
+        i = 0
+        while i < len(ds):
+            if ds[i]:
+                j = i
+                while j < len(ds) and ds[j]:
+                    j += 1
+                pairs = j - i            # 该段的对数（相同帧数 = pairs+1）
+                if pairs > TRIM_MID_MAX and i != 0 and j != len(ds):
+                    first = i + 1        # 段内第 1 个相同帧（alive 位置）
+                    last = j + 1         # 段内最后 1 个相同帧
+                    keep_until = first + TRIM_MID_MAX   # 保留前 MID_MAX+1 帧
+                    dels.update(range(keep_until + 1, last + 1))
+                    mid_notes.append("中段 %d..%d 帧（%d 对）-> 留 %d 对"
+                                     % (alive[first - 1], alive[last - 1],
+                                        pairs, TRIM_MID_MAX))
+                i = j
+            else:
+                i += 1
+
+        if not dels:
+            break
+        if tail_fired:
+            tail_rounds += 1
+            tail_last = t + 1
+        for p in dels:
+            dead.add(alive[p - 1])
+        alive = [k for k in alive if k not in dead]
+
+    notes = []
+    if tail_rounds:
+        notes.append("尾部 %d 帧 -> %d 帧（%d 轮）"
+                     % (tail_last, TRIM_TAIL_KEEP, tail_rounds))
+    merged = []
+    for x in mid_notes:
+        if merged and merged[-1][0] == x:
+            merged[-1][1] += 1
+        else:
+            merged.append([x, 1])
+    notes.extend(("%s x%d" % (t, c)) if c > 1 else t for t, c in merged)
+    return dead, "; ".join(notes)
+
+
+def apply_trim(out_dir, dels):
+    """按删除帧号集合删帧并把剩余帧重连续号。返回实际删除数。"""
+    files = sorted(f for f in os.listdir(out_dir) if f.endswith(".png"))
+    keep = [f for idx, f in enumerate(files, start=1) if idx not in dels]
+    for idx, f in enumerate(files, start=1):
+        if idx in dels:
+            os.remove(os.path.join(out_dir, f))
+    if len(keep) == len(files):
+        return 0
+    # 两步 rename：先集体挪到临时名，再按序命名（避免 0005->0004 覆盖串号）
+    tmp = []
+    for idx, f in enumerate(keep, start=1):
+        src = os.path.join(out_dir, f)
+        dst = os.path.join(out_dir, "tmp_%04d.png" % idx)
+        os.rename(src, dst)
+        tmp.append(dst)
+    for idx, t in enumerate(tmp, start=1):
+        os.rename(t, os.path.join(out_dir, "%04d.png" % idx))
+    return len(files) - len(keep)
+
+
 def extract(ff, webm, out_dir):
-    """一个 .webm -> out_dir/0001.png ... 返回帧数。"""
+    """一个 .webm -> out_dir/0001.png ... 返回 (帧数, 删除数, 裁剪说明)。"""
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
     os.makedirs(out_dir)
@@ -191,7 +305,12 @@ def extract(ff, webm, out_dir):
     if r.returncode != 0:
         sys.exit("ffmpeg 失败 (%s):\n%s" % (webm, r.stderr.strip()))
 
-    return len([f for f in os.listdir(out_dir) if f.endswith(".png")])
+    n = len([f for f in os.listdir(out_dir) if f.endswith(".png")])
+
+    # 静止帧裁剪（trim_plan 内部已迭代到不动点，这里只应用一次）
+    dels, why = trim_plan(out_dir)
+    removed = apply_trim(out_dir, dels) if dels else 0
+    return n, removed, why
 
 
 def main():
@@ -213,6 +332,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     total = 0
+    total_removed = 0
     print("素材根: %s\n中间分辨率: %dx%d\n输出: %s\n" % (root, INTER_W, INTER_H, args.out))
 
     for name, rel in CLIPS:
@@ -224,11 +344,16 @@ def main():
             continue
 
         out_dir = os.path.join(args.out, name)
-        n = extract(ff, webm, out_dir)
-        total += n
-        print("  %-14s %3d 帧  <- %s" % (name, n, rel))
+        n, removed, why = extract(ff, webm, out_dir)
+        total += n - removed
+        total_removed += removed
+        if removed:
+            print("  %-14s %3d -> %3d 帧  <- %s  [裁 %d: %s]"
+                  % (name, n, n - removed, rel, removed, why))
+        else:
+            print("  %-14s %3d 帧  <- %s" % (name, n, rel))
 
-    print("\n合计 %d 帧" % total)
+    print("\n合计 %d 帧（静止裁剪共删除 %d 帧）" % (total, total_removed))
 
 
 if __name__ == "__main__":

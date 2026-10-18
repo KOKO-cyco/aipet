@@ -139,11 +139,78 @@
 /** 待机时每隔多久随机演一个小动作（真产品里由状态机决定，这里先让它有生气）。 */
 #define PET_IDLE_ACT_AFTER_MS 6000u
 
-/** 宠物动画刷新间隔（30fps）。 */
-#define PET_TICK_MS           33
+/** 宠物动画刷新间隔。
+ *
+ * **必须等于 PET_FRAME_MS（42）**：一拍正好一帧，节奏才是均匀的 24fps。
+ *
+ * 以前这里是 33（30Hz），而帧长是 42ms —— 帧号按 (now - sg_clip_at) / 42 算，
+ * 于是每拍的取帧结果是 0,0,1,2,3,3,4,5,6,7,7…：**每 3~4 帧就有一次 66ms 的
+ * 重复帧**。平时看着像轻微抖动，切动作时最明显 —— 新组的第 0 帧正好落在那个
+ * 重复位上，先多停一拍才开始动，就是用户反馈的"切换的时候卡一下"。
+ * （实测日志：切换后第 1 拍距上一拍 32~36ms，而正常拍 33ms —— 停顿不在读帧，
+ *  就在这个节奏量化上。） */
+#define PET_TICK_MS           42
 
 /** 待机组的组号。素材约定第 0 组必须是 idle（见 tools/build_fish.sh 的 --order）。 */
 #define PET_CLIP_IDLE         0
+
+/***********************************************************
+************************ 动作巡检 *****************************
+***********************************************************/
+/* **只为核对素材存在**：开机后按「待机、待机、动作、待机、待机、动作……」的节奏
+ * 把每个非待机动作各放**一次**，最后一组后面不补待机，然后从头再来。
+ * 串口打 `[AUDIT] 3/15 表情-伤心（emo_sad）130 帧`，右半屏同时显示
+ * "3/15 + 中文名"，不用回头翻日志对时间。
+ *
+ * 打开时**整页只剩巡检**：随机插播 / 想起 / 点击切动作全部让位（点击只打一行
+ * 日志），否则动作会被打断，没法逐组核对。核完把这里置 0 就是正常桌宠 ——
+ * 状态机代码一行没动，只是在它之前 return。
+ *
+ * 加/删素材后**这张表和 ELF_ORDER 要同序**：动作序号是按表里的顺序数的，
+ * 错位不影响播放（按名字找组），但屏幕上的 "i/15" 会和实际播放的组对不上。 */
+#define PET_ACT_AUDIT      1
+
+/** 每组放几遍。**1 = 只放一次**（用户核对用，放两遍反而要等）。 */
+#define PET_AUDIT_LOOPS    1
+
+/** 两个非待机动作之间夹几个待机 —— 用户要的节奏是
+ *  「待机-待机-开心-待机-待机-伤心」，即夹 2 个。 */
+#define PET_AUDIT_GAP      2
+
+/** 巡检表：按打包顺序（= tools/build_fish.sh 的 ELF_ORDER）列全部组。
+ * 第 0 条必须是 idle（既当夹在中间的空档，又是动作序号 0 的基准）。
+ * label 是给人看的中文名，和源视频文件名一一对应。 */
+typedef struct {
+    const char *clip;
+    const char *label;
+} PET_AUDIT_T;
+
+static const PET_AUDIT_T sg_audit[] = {
+    { "idle",       "待机"          },
+    { "tap_proud",  "点击-傲娇生气" },
+    { "tap_shy",    "点击-害羞惊讶" },
+    { "tap_happy",  "点击-开心跃动" },
+    { "tap_tickle", "点击-挠痒咯咯笑" },
+    { "fn_photo",   "拍照"          },
+    { "fn_note",    "记笔记"        },
+    { "emo_sad",    "表情-伤心"     },
+    { "emo_happy",  "表情-开心"     },
+    { "emo_think",  "表情-思考"     },
+    { "rnd_gomoku", "随机-下五子棋" },
+    { "rnd_pigeon", "随机-变鸽子"   },
+    { "rnd_yawn",   "随机-哈欠连天" },
+    { "rnd_cat",    "随机-撸猫"     },
+    { "rnd_lion",   "随机-舞狮头"   },
+    { "rnd_scare",  "随机-被吓一跳" },
+};
+
+#define PET_AUDIT_N  (int)(sizeof(sg_audit) / sizeof(sg_audit[0]))
+
+/** 非待机动作数（表里除第 0 条 idle 之外的全部）与整条播放序列的步数。
+ *  15 个动作 ×（2 个待机 + 1 个动作）= 45 步，最后一步是最后一个动作，
+ *  后面不补待机。 */
+#define PET_AUDIT_N_ACT  (PET_AUDIT_N - 1)
+#define PET_AUDIT_STEPS  (PET_AUDIT_N_ACT * (PET_AUDIT_GAP + 1))
 
 /***********************************************************
 ********************** 持续动作的循环区间 ********************
@@ -169,20 +236,14 @@ typedef struct {
 } PET_LOOP_T;
 
 static const PET_LOOP_T sg_loop[] = {
-    /* talk：整条 205 帧，但只有 39..203 这段接得上。
-     * 选长的那条而不是接缝最小的 133..181（2.0 秒）—— AI 说 20 秒的话，
-     * 2 秒的循环要重复 10 遍，一眼看出在循环；6.9 秒只重复 3 遍，
-     * 而且覆盖了整段表演。接缝 2.0x 帧步在绝对量上只有满幅姿态差的 4%。 */
-    { "talk",   39, 203, 205 },
-
-    /* think：**2026-10-16 换源之后重算的**（豆包那版思考，整条 241 帧，
-     * 原来是 163 帧，旧帧号已失效）。
+    /* **空表（2026-10-17，第三套动作集）**：5 条动作里没有"要按子区间循环"的
+     * 组了 —— think / talk 随旧素材一起没了，剩下的 click_wave / click_happy /
+     * rnd_photo / rnd_note 都是一次性表演，整条播完回待机。
      *
-     * 这里取的是 find_loop.py 的**接缝最小**那条（105..181，77 帧 = 3.2 秒，
-     * 1.50x 帧步），不是它"推荐"的 99..178（80 帧但接缝 1.94x）—— 多 3 帧
-     * （0.13 秒）换接缝小 30%，用户的硬要求是"接缝要接得上，不能瞬移抽动"，
-     * 长度不是瓶颈。 */
-    { "think", 105, 181, 241 },
+     * 表不能是 0 长度（C 不允许），留一条 `strcmp` 永远匹配不上的哨兵行；消费处
+     * （prv_loop_frame）本来就是"匹配不上 = 没有循环区间"。以后哪个动作要加循环
+     * 段：重跑 tools/find_loop.py，把 { 名, 起, 止, 总帧 } 换成真数据。 */
+    { "", 0, 0, 0 },
 };
 
 /***********************************************************
@@ -208,14 +269,17 @@ static PET_MEMO_T sg_memos[] = {
 /** 原型里"捕获"演示用的假输入 —— 真接上就是 ASR 的识别结果。 */
 #define PET_DEMO_UTTER   "我明天下午三点得交房租"
 
-/** 点宠物时插播的动作 —— 素材里那 4 个"点击回应"。
+/** 点宠物时插播的动作 —— **第三套动作集（2026-10-17）里除 idle 外的全部 4 条**：
+ * 元气挥手 / 开心跃动 / 拍照 / 记笔记
+ * （源在 third_party/新动作视频/，名字映射见 tools/fish_extract.py 的 CLIPS 表）。
  *
- * **别写死成一个**：以前这里只有 `"click_happy"`（原型阶段留下的），于是不管
- * 怎么点都是同一套"开心跃动"，另外三个（元气挥手 / 害羞惊讶 / 傲娇生气）永远
- * 不会出现。现在随机挑，且**避开上一次刚演过的那一个**。 */
+ * **别写死成一个**：以前这里只有 `"click_happy"`，于是不管怎么点都是同一套
+ * 动作，别的永远不会出现。现在随机挑，且**避开上一次刚演过的那一个**。 */
+#if !PET_ACT_AUDIT
 static const char *const sg_tap_acts[] = {
-    "click_happy", "click_wave", "click_shy", "click_angry",
+    "click_wave", "click_happy", "rnd_photo", "rnd_note",
 };
+#endif
 
 /***********************************************************
 ************************* 视图 *****************************
@@ -260,6 +324,13 @@ static BOOL_T      sg_recalled;     /* 这一轮待机里"想起"演过了没有
 static int      sg_clip;         /* 当前正在播的组 */
 static uint32_t sg_clip_at;      /* 本组开始的时刻 */
 static BOOL_T   sg_clip_once;    /* TRUE = 播完这一轮就回"当前该演的" */
+
+/* 本组已经播到第几帧（**计数器，不按墙钟算**，见 prv_tick_cb 里的说明）。
+ * sg_frame_clip / sg_frame_at 用来判断"是不是换了组 / 同一组被重新点名"，
+ * 两者任一变化就把帧号归零。 */
+static uint32_t sg_frame_idx;
+static int      sg_frame_clip = -1;
+static uint32_t sg_frame_at;
 static uint32_t sg_idle_at;      /* 上次回到待机的时刻（决定下次随机插播） */
 
 /** AI 要求"持续演某一组"（思考 / 说话）；-1 = 没有，按待机走。 */
@@ -278,7 +349,9 @@ static volatile int sg_ai_state = AI_MODE_STATE_IDLE;
 ********************** 前向声明 ******************************
 ***********************************************************/
 static void prv_set_view(PET_VIEW_E v);
+#if !PET_ACT_AUDIT
 static int  prv_pick_tap_act(void);     /* 定义在下面的"动作状态机"一节 */
+#endif
 
 /***********************************************************
 *********************** 小工具 ******************************
@@ -552,14 +625,9 @@ static void prv_set_view(PET_VIEW_E v)
 /***********************************************************
 *********************** 动作状态机 ***************************
 ***********************************************************/
-/* 一组播完要多久。固定 24fps（素材原速）；1 帧的组给个最短时长，
- * 否则 snap / drag_hold 这种一闪而过根本看不见。 */
-static uint32_t prv_clip_ms(int clip)
-{
-    uint32_t ms = (uint32_t)app_sprite2d_clip_frames(clip) * PET_FRAME_MS;
-
-    return (ms < PET_CLIP_MIN_MS) ? PET_CLIP_MIN_MS : ms;
-}
+/* 注：这里原来有 prv_clip_ms()（"一组播完要多久" = 帧数 × 42ms）。
+ * 2026-10-18 动作"演完"和巡检切换都改成看**帧号**（prv_tick_cb 的 ③ 与
+ * prv_seq_len）—— 按墙钟算会在末尾多播几拍、回绕到第 0 帧，那正是切换处那一下卡。 */
 
 /** 按名字找组号。找不到返回 -1（名字表就是 app_sprite2d_clip_name() 那份）。 */
 static int prv_clip_by_name(const char *name)
@@ -578,10 +646,125 @@ static int prv_clip_by_name(const char *name)
     return -1;
 }
 
+/***********************************************************
+************************* 动作巡检 ****************************
+***********************************************************/
+#if PET_ACT_AUDIT
+/* 只推进"该播哪一组"；帧号推进和渲染仍走 tick 末尾那一份，不重复实现。 */
+
+static int sg_audit_pos;    /* 巡检序列走到第几步（0..PET_AUDIT_STEPS-1） */
+
+/** 右半屏显示当前这一拍：动作显示 "i/17 + 中文名 + 帧数"，待机间隔只写"待机"。 */
+static void prv_audit_show(const char *label, int clip, int act_no)
+{
+    char      buf[40];
+    lv_obj_t *l;
+    uint32_t  ms = (uint32_t)app_sprite2d_clip_frames(clip) * PET_FRAME_MS;
+
+    prv_info_reset();
+
+    l = prv_label(sg_info, PET_PAD, 78, PET_INFO_W - PET_PAD * 2,
+                  "动作巡检", PET_COL_FAINT, UI_FONT_CN);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+
+    if (act_no > 0) {
+        snprintf(buf, sizeof(buf), "%d/%d", act_no, PET_AUDIT_N_ACT);
+        l = prv_label(sg_info, PET_PAD, 104, PET_INFO_W - PET_PAD * 2,
+                      buf, PET_COL_ACCENT, UI_FONT_21);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+
+        l = prv_label(sg_info, PET_PAD, 146, PET_INFO_W - PET_PAD * 2,
+                      label, PET_COL_TEXT, UI_FONT_CN);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    } else {
+        l = prv_label(sg_info, PET_PAD, 116, PET_INFO_W - PET_PAD * 2,
+                      "待机", PET_COL_SUB, UI_FONT_21);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    }
+
+    snprintf(buf, sizeof(buf), "%d 帧 · %u.%u 秒",
+             app_sprite2d_clip_frames(clip),
+             (unsigned)(ms / 1000u), (unsigned)((ms % 1000u) / 100u));
+    l = prv_label(sg_info, PET_PAD, 176, PET_INFO_W - PET_PAD * 2,
+                  buf, PET_COL_FAINT, UI_FONT_CN);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+/** 巡检状态：每拍调一次。每一步放完就进下一步，走到头回到第 0 步。
+ *
+ * 序列（PET_AUDIT_GAP = 2）：
+ *   待机、待机、动作1、待机、待机、动作2、…、待机、待机、动作17
+ * 即第 pos 步 = pos % 3 == 2 ? 表里第 1+pos/3 条 : 第 0 条（待机）。
+ * **最后一个动作后面不补待机** —— 所以总步数正好是 17×3。 */
+static void prv_audit_state(uint32_t now)
+{
+    int n = app_sprite2d_clip_count();
+    int entry = 0;
+    int act_no;
+    int clip;
+
+    if (n <= 0) {
+        return;
+    }
+
+    /* sg_clip < 0 = 刚进页面还没选组；否则看当前这一组**整条播完没有**。
+     *
+     * **判据是帧号，不是墙钟**（2026-10-18）。帧号由 tick 的计数器推进，每拍 +1；
+     * 而实际拍间隔会因为读帧、重绘、WiFi 扫描抖动成 42~58ms 不等，墙钟比计数器
+     * 走得快。按墙钟判，拍数富余时动作末尾会**再回绕到第 0 帧**播一拍才切走
+     * （"演完突然跳回开头"），拍数不足时最后一帧又没演 —— 两种都看着像卡一下。
+     * 待机→动作之所以不卡，是因为待机本来就在循环，回绕看不出来。
+     *
+     * 按帧号判：渲染完第 L-1 帧的下一拍就切，永远整条一次、不回绕。
+     * sg_frame_idx 此刻还是**上一拍**渲染的帧号（本拍的 ++ 在下面）。 */
+    if (sg_clip < 0 || sg_clip >= n ||
+        (sg_frame_idx + 1u) >= (uint32_t)app_sprite2d_clip_frames(sg_clip)) {
+        if (sg_clip >= 0 && sg_clip < n) {
+            sg_audit_pos = (sg_audit_pos + 1) % PET_AUDIT_STEPS;
+        }
+
+        /* 素材里缺这一组就跳到下一步（某条视频没打包进去时别卡住） */
+        clip = -1;
+        for (int k = 0; k < PET_AUDIT_STEPS; k++) {
+            int slot = sg_audit_pos % (PET_AUDIT_GAP + 1);
+
+            entry = (PET_AUDIT_GAP == slot)
+                    ? (1 + sg_audit_pos / (PET_AUDIT_GAP + 1))
+                    : 0;
+            clip  = prv_clip_by_name(sg_audit[entry].clip);
+            if (clip >= 0) {
+                break;
+            }
+            PR_WARN("[AUDIT] 素材里没有 %s，跳过", sg_audit[entry].clip);
+            sg_audit_pos = (sg_audit_pos + 1) % PET_AUDIT_STEPS;
+        }
+        if (clip < 0) {
+            return;
+        }
+
+        act_no     = entry;         /* 0 = 待机（夹在中间的间隔） */
+        sg_clip    = clip;
+        sg_clip_at = now;
+
+        if (act_no > 0) {
+            PR_NOTICE("[AUDIT] %d/%d %s（%s）%d 帧",
+                      act_no, PET_AUDIT_N_ACT, sg_audit[entry].label,
+                      app_sprite2d_clip_name(clip), app_sprite2d_clip_frames(clip));
+        } else {
+            PR_NOTICE("[AUDIT] · 待机（间隔）");
+        }
+        prv_audit_show(sg_audit[entry].label, clip, act_no);
+    }
+}
+#endif
+
 /** 情绪名 -> 动作名。**以精灵里真实存在的组为准**（见 app_sprite2d_clip_name()）。
  *
  * 云端给的是一套固定的 emoji 标签（见 skill_emotion.h），这里把它们归到精灵
- * 有的那几组上：开心/伤心/思考有专属组，其余按"像不像"就近映射。
+ * 有的那几组上。**第三套动作集（2026-10-17）只有 click_happy 一组能对上表情**
+ * （开心/大笑/调皮这类），sad / think / click_angry 都随旧素材没了 —— 映射到
+ * 不存在的组只会刷"素材里没有这一组"的警告，所以这些情绪**不演**（见函数尾），
+ * 宠物保持待机。想给伤心/生气配替身动作，就把下面 map[] 里加一行指到现有组。
  * 大小写不敏感 —— 云端偶尔会发小写。 */
 static const char *prv_emotion_clip_name(const char *emo)
 {
@@ -595,31 +778,16 @@ static const char *prv_emotion_clip_name(const char *emo)
         const char *key;
         const char *clip;
     } map[] = {
-        { "HAPPY",       "happy"        },
-        { "LAUGHING",    "happy"        },
-        { "FUNNY",       "happy"        },
-        { "DELICIOUS",   "happy"        },
-        { "COOL",        "happy"        },
-        { "CONFIDENT",   "happy"        },
-        { "LOVING",      "happy"        },
-        { "KISSY",       "happy"        },
-        { "WINK",        "happy"        },
-        { "RELAXED",     "happy"        },
-        { "SAD",         "sad"          },
-        { "DISAPPOINTED","sad"          },
-        { "CRYING",      "sad"          },
-        { "FEARFUL",     "sad"          },
-        { "THINKING",    "think"        },
-        { "CONFUSED",    "think"        },
-        { "SLEEP",       "think"        },
-        { "ANGRY",       "click_angry"  },
-        { "ANNOYED",     "click_angry"  },
-        { "SURPRISE",    "rnd_scare"    },
-        { "SHOCKED",     "rnd_scare"    },
-        { "WAKEUP",      "click_wave"   },
-        { "TOUCH",       "click_shy"    },
-        { "EMBARRASSED", "click_shy"    },
-        { "SILLY",       "rnd_float"    },
+        { "HAPPY",       "click_happy"  },
+        { "LAUGHING",    "click_happy"  },
+        { "FUNNY",       "click_happy"  },
+        { "DELICIOUS",   "click_happy"  },
+        { "COOL",        "click_happy"  },
+        { "CONFIDENT",   "click_happy"  },
+        { "LOVING",      "click_happy"  },
+        { "KISSY",       "click_happy"  },
+        { "WINK",        "click_happy"  },
+        { "RELAXED",     "click_happy"  },
     };
 
     for (uint32_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
@@ -663,8 +831,11 @@ static void prv_pet_evt_cb(APP_EVT_E evt, void *data, void *user)
         break;
     }
 
-    /* AI 状态是**持续**的：思考时一直演 think，说话时一直演"碎碎念"，
-     * 状态一变就跟着换（见上面"持续 vs 一次性"的说明）。 */
+    /* AI 状态是**持续**的：思考时一直演 think，状态一变就跟着换
+     * （见上面"持续 vs 一次性"的说明）。
+     * **思考和说话都没有专属组了** —— 第三套动作集没有思考/碎碎念素材，
+     * 期间回待机；想给它们配替身动作（比如思考 -> rnd_note），把下面的 -1
+     * 改成组名即可。 */
     case APP_EVT_AI_STATE: {
         int state = (int)(intptr_t)data;
 
@@ -672,10 +843,9 @@ static void prv_pet_evt_cb(APP_EVT_E evt, void *data, void *user)
 
         switch (state) {
         case AI_MODE_STATE_THINK:
-            clip = prv_clip_by_name("think");
-            break;
+            clip = -1;      /* 第三套动作集没有 think（思考）组：期间回待机 */
         case AI_MODE_STATE_SPEAK:
-            clip = prv_clip_by_name("talk");
+            clip = -1;      /* 新动作集没有 talk（碎碎念）组：说话期间回待机 */
             break;
         default:
             clip = -1;      /* IDLE / LISTEN / UPLOAD / INIT -> 回待机 */
@@ -701,6 +871,13 @@ static void prv_pet_evt_cb(APP_EVT_E evt, void *data, void *user)
  * 播放器停止和 CHAT_BREAK），所以这里调它是安全的。 */
 static void prv_stage_click(lv_event_t *e)
 {
+#if PET_ACT_AUDIT
+    /* 巡检只核对素材：点击不切动作、不弹捕获卡，只把"现在核对的是哪一组"
+     * 再打一遍，省得翻前面的日志。 */
+    (void)e;
+    PR_NOTICE("[AUDIT] 巡检中（第 %d/%d 步），点击不切动作",
+              sg_audit_pos + 1, PET_AUDIT_STEPS);
+#else
     int state = sg_ai_state;
 
     (void)e;
@@ -718,21 +895,25 @@ static void prv_stage_click(lv_event_t *e)
      * 动作从 4 个"点击回应"里随机挑（见 sg_tap_acts）。 */
     sg_req_clip = prv_pick_tap_act();
     prv_set_view(PET_VIEW_CAPTURE);
+#endif
 }
 
 /***********************************************************
 *********************** 定时器 *******************************
 ***********************************************************/
-/* 待机时随机插播的小动作池。**不包含 idle 本身，也不包含 snap / drag_***
- * —— 那几组是贴边/拖拽的状态帧，不是表演动作（和 app_avatar_tools.c 的白名单
- * 是同一个口径）。 */
+/* 待机时随机插播的小动作池。**不包含 idle 本身**。
+ * 第三套动作集（2026-10-17）只剩 5 条，没有 snap / drag / talk / think 那几组，
+ * 所以池子 = 4 条非待机动作（和 sg_tap_acts 同一个口径，与
+ * app_avatar_tools.c 的白名单一致）。 */
+#if !PET_ACT_AUDIT
 static const char *const sg_idle_acts[] = {
-    "rnd_lookaround", "rnd_float", "rnd_yawn", "rnd_whale", "rnd_breakfast",
-    "rnd_photo",
+    "click_wave", "click_happy", "rnd_photo", "rnd_note",
 };
+#endif
 
 /* 一个够用的伪随机源 —— 只是挑"演哪个 / 隔多久演一次"，不需要好随机。
  * 不用 rand() 是因为它在裸机上没有播种来源（和 app_sprite2d.c 里同一个理由）。 */
+#if !PET_ACT_AUDIT
 static uint32_t prv_rand(uint32_t n)
 {
     static uint32_t s_seed = 0x2468ACE1u;
@@ -767,6 +948,7 @@ static int prv_pick_tap_act(void)
     s_last = pick;
     return prv_clip_by_name(sg_tap_acts[pick]);
 }
+#endif /* !PET_ACT_AUDIT —— 巡检时不挑动作，这两个 pick 没人调 */
 
 /* 把"播到第几帧"映射到这条动作的**循环区间**里。
  *
@@ -809,6 +991,29 @@ static int prv_loop_frame(int clip, int frame)
     return (s_len > 0) ? (s_first + (frame % s_len)) : frame;
 }
 
+/** 这条动作实际会播多少帧：配了循环区间就是区间长度，否则整条。
+ *  一次性动作"演完"的判据用它（见 prv_tick_cb 的 ③）—— 用总帧数会在有循环
+ *  区间时多播几拍（末尾回绕），正好是切换处那一下卡。 */
+#if !PET_ACT_AUDIT     /* 只有正常模式的一次性动作"演完"会问它 */
+static int prv_seq_len(int clip)
+{
+    const char *name   = app_sprite2d_clip_name(clip);
+    int         frames = app_sprite2d_clip_frames(clip);
+
+    for (uint32_t i = 0; i < sizeof(sg_loop) / sizeof(sg_loop[0]); i++) {
+        if (0 != strcmp(name, sg_loop[i].clip)) {
+            continue;
+        }
+        if (frames != sg_loop[i].frames) {
+            break;                      /* 素材重打过，帧号失效，按整条 */
+        }
+        return sg_loop[i].last - sg_loop[i].first + 1;
+    }
+
+    return frames;
+}
+#endif
+
 static void prv_tick_cb(lv_timer_t *t){
     uint32_t now = (uint32_t)tal_system_get_millisecond();
     int      n   = app_sprite2d_clip_count();
@@ -822,6 +1027,9 @@ static void prv_tick_cb(lv_timer_t *t){
      *   ③ 一次性动作演完 -> 收敛回"当前该演的"
      *   ④ 待机够久 -> 随机插播一个小动作 */
     if (NULL != sg_cbuf && sg_cw > 0 && n > 0) {
+#if PET_ACT_AUDIT
+        prv_audit_state(now);       /* 巡检接管：下面整块正常状态机不跑 */
+#else
         int req  = sg_req_clip;
         int hold = sg_req_hold;
 
@@ -858,8 +1066,10 @@ static void prv_tick_cb(lv_timer_t *t){
             sg_clip = PET_CLIP_IDLE;
         }
 
-        /* ③ 一次性动作演完 */
-        if (sg_clip_once && (now - sg_clip_at) >= prv_clip_ms(sg_clip)) {
+        /* ③ 一次性动作演完 —— 判据同样是**帧号**，不是墙钟（理由见 prv_audit_state
+         * 开头那段）：按墙钟会在末尾多播几拍，正好回绕到第 0 帧，就是切换卡一下。 */
+        if (sg_clip_once &&
+            (sg_frame_idx + 1u) >= (uint32_t)prv_seq_len(sg_clip)) {
             sg_clip_once = FALSE;
             sg_clip_at   = now;             /* 下一拍按 want 收敛 */
         }
@@ -887,10 +1097,25 @@ static void prv_tick_cb(lv_timer_t *t){
                 }
             }
         }
+#endif /* PET_ACT_AUDIT */
+
+        /* 帧号用**计数器**推进，不用 (now - sg_clip_at) / PET_FRAME_MS：
+         * tick 和帧周期都是 42ms，一拍正好一帧；按墙钟除法会在定时器有一两毫秒
+         * 抖动时把同一帧算两遍（66ms 不动），下一帧再追回来 —— 那点不均匀就是
+         * 眼睛看到的"卡"。计数器只在换组、或同一组被重新点名（sg_clip_at 变了）
+         * 时归零，节奏恒定 24fps。
+         *
+         * 帧号超出本组帧数不用管：app_sprite2d_blit_clip 内部按组帧数取模。 */
+        if (sg_clip != sg_frame_clip || sg_clip_at != sg_frame_at) {
+            sg_frame_clip = sg_clip;
+            sg_frame_at   = sg_clip_at;
+            sg_frame_idx  = 0;
+        } else {
+            sg_frame_idx++;
+        }
 
         app_sprite2d_render_clip(sg_cbuf, sg_cw, sg_ch, sg_clip,
-                                 prv_loop_frame(sg_clip,
-                                                (int)((now - sg_clip_at) / PET_FRAME_MS)),
+                                 prv_loop_frame(sg_clip, (int)sg_frame_idx),
                                  PET_COL_BG565);
         if (NULL != sg_stage) {
             lv_obj_invalidate(sg_stage);
@@ -898,12 +1123,15 @@ static void prv_tick_cb(lv_timer_t *t){
     }
 
     /* ---- 待机够久就演一次"想起" ----------------------------------------
-     * 原型里自动触发；真产品里由后端 / LLM 决定时机。 */
+     * 原型里自动触发；真产品里由后端 / LLM 决定时机。
+     * 巡检时不演 —— 它会占掉右半屏那块"i/n + 中文名"。 */
+#if !PET_ACT_AUDIT
     if (PET_VIEW_IDLE == sg_view && !sg_recalled &&
         (now - sg_view_at) >= PET_RECALL_AFTER_MS) {
         sg_recalled = TRUE;
         prv_set_view(PET_VIEW_RECALL);
     }
+#endif
 }
 
 /***********************************************************
@@ -1003,6 +1231,10 @@ static OPERATE_RET prv_pet_enter(void *arg)
     sg_recalled  = FALSE;
     sg_clip      = PET_CLIP_IDLE;
     sg_clip_at   = sg_view_at;
+#if PET_ACT_AUDIT
+    sg_clip      = -1;      /* 巡检：第一拍就切到"待机"，并把右半屏换成巡检信息 */
+    sg_audit_pos = 0;
+#endif
     sg_clip_once = FALSE;
     sg_idle_at   = sg_view_at;
     sg_hold_clip = -1;

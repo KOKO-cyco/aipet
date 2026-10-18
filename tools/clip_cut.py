@@ -33,6 +33,7 @@ tools/clip_probe.py 输出的帧号，换算成秒容易错一位。`--keep` 可
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,15 +48,34 @@ def ffmpeg_bin():
     return exe
 
 
+def video_wh(ff, path):
+    """(宽, 高)。先问 ffprobe，没有（imageio-ffmpeg 只带 ffmpeg）就从
+    `ffmpeg -hide_banner -i` 的 stderr 里解析 Stream 行。"""
+    try:
+        pr = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                             "-show_entries", "stream=width,height",
+                             "-of", "csv=p=0", path],
+                            capture_output=True, text=True)
+        if pr.returncode == 0 and "," in pr.stdout:
+            w, h = [int(x) for x in pr.stdout.strip().split(",")[:2]]
+            return w, h
+    except OSError:
+        pass
+    # 降级：ffmpeg 把流信息打在 stderr 里，抓 "Video: ..., 640x360,"
+    r = subprocess.run([ff, "-hide_banner", "-i", path],
+                       capture_output=True, text=True)
+    m = re.search(r"Stream #.*?: Video:.*?, (\d+)x(\d+)", r.stderr)
+    if not m:
+        sys.exit("拿不到视频尺寸（ffprobe 和 ffmpeg stderr 都没解析出 %s）" % path)
+    return int(m.group(1)), int(m.group(2))
+
+
 def count_frames(ff, path):
     # 解一遍数帧 —— nb_frames 对这些 webm 常常是 N/A，信不过
+    w, h = video_wh(ff, path)
     r = subprocess.run([ff, "-v", "error", "-c:v", "libvpx-vp9", "-i", path,
                         "-f", "rawvideo", "-pix_fmt", "gray", "-"],
                        capture_output=True)
-    pr = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
-                         "-show_entries", "stream=width,height",
-                         "-of", "csv=p=0", path], capture_output=True, text=True)
-    w, h = [int(x) for x in pr.stdout.strip().split(",")[:2]]
     return len(r.stdout) // (w * h)
 
 
