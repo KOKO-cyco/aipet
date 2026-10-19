@@ -108,6 +108,41 @@ void app_sprite2d_render(uint16_t *dst, int w, int h,
 void app_sprite2d_render_clip(uint16_t *dst, int w, int h,
                               int clip, int frame, uint16_t bg);
 
+/** 一帧**实际画过**的矩形（画布坐标，闭区间 [x0,x1]×[y0,y1]）。
+ *
+ * 不是裁剪框：框里有透明 pad 和起跳余量，角色真正画到的只有其中一块
+ * （待机 ~129×152，画布 193×199）。脏矩形渲染只清、只标这一块。 */
+typedef struct {
+    int16_t x0, y0, x1, y1;
+} SP2D_RECT_T;
+
+/**
+ * @brief 整帧渲染，但**只动角色那一块**：先把上一帧实际画过的矩形铺回背景色，
+ * 再画当前帧，输出两帧的并集。
+ *
+ * 和 `app_sprite2d_render_clip()` 的区别：那个每帧把整块画布
+ * （193×199 ≈ 150KB）memset 一遍、整块标脏；这个只碰 ~40KB，页面拿并集
+ * 去 `lv_obj_invalidate_area()`。读失败退回 idle 时按**实际画出的 idle 帧**
+ * 取矩形，所以切组 / 读失败都不会留残影。
+ *
+ * SD 读 + RLE 解压在预取线程（sp2d_pf）里做，本函数**只从解码槽取**：
+ * 槽没好就复读本组上一帧 / 常驻首帧 / 常驻 idle，绝不在 LVGL 线程里读卡。
+ *
+ * @param[out] dirty 两帧并集（画布坐标）。可以为 NULL。
+ * @return TRUE = 画了（dirty 有效，调用方该标脏）；FALSE = 没画（参数错 /
+ *         没加载 / 这一帧什么都取不到），画布保持原样、别标脏。
+ */
+BOOL_T app_sprite2d_render_clip_dirty(uint16_t *dst, int w, int h,
+                                      int clip, int frame, uint16_t bg,
+                                      SP2D_RECT_T *dirty);
+
+/**
+ * @brief 清掉"上一帧画过哪"的记录（下一次从整块画布重新铺起）。
+ *
+ * 什么时候调：画布重建、进出桌宠页。不调的话上一次页面的矩形状态会串到
+ * 下一次（表现为残留一小块上一帧的角色）。同时放掉预取槽的占用。 */
+void app_sprite2d_dirty_reset(void);
+
 /**
  * @brief 同上，但**不铺背景** —— 只把精灵混合上去。
  *

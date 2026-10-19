@@ -23,6 +23,8 @@
 
 #include "tal_api.h"
 #include "tal_system.h"
+#include "tal_thread.h"
+#include "tal_mutex.h"
 #include "tkl_fs.h"
 
 #include <math.h>
@@ -607,6 +609,468 @@ static BOOL_T prv_read_frame(uint32_t idx)
     return TRUE;
 }
 
+/* ======================= SD 预取线程（sp2d_pf） =======================
+ *
+ * 为什么要有它：LVGL 线程里**同步**读一帧实测 26~61ms（20KB 的 RLE），比
+ * 42ms 的拍子还长 —— 动作一顿一顿的直接原因。所以把唯一的 SD 读者挪到这个
+ * 最低优先级线程：
+ *
+ *   - 它按"一批最多 4 帧、一次 fseek + fread 连读"摊薄每次 SD 调用的固定
+ *     开销，inflate / build_spans 也在这里做；
+ *   - 渲染路径（LVGL 线程）只从解码槽里取：槽没好就复读本组上一帧 /
+ *     常驻首帧 / 常驻 idle，**绝不在 LVGL 线程里读卡**；
+ *   - 只有换组才算"换代"：顺序播下一帧不会把 loader 正在读的批次判成过期；
+ *   - "卡不在 / 连续读坏 6 次重建链路"整套策略搬进 loader；
+ *   - 线程或内存起不来 → 自动退回原来的同步读，功能不变（s_pf.on = FALSE）。
+ *
+ * 槽的并发协议（**平台是 SMP**，两颗核都可能跑这两条线程）：
+ *   状态 0 空 / 1 就绪 / 2 渲染取用中 / 3 loader 填充中。所有状态转换都在
+ *   s_pf.lock 这把互斥锁里做；loader 只写 空/填充中 状态的槽，渲染只读
+ *   就绪→取用中 状态的槽 —— 同一块槽永不并发读写。 */
+
+#define SP2D_PF_NAME        "sp2d_pf"
+#define SP2D_PF_PRIO        THREAD_PRIO_4     /* 最低档：谁也不许被它挤到 */
+#define SP2D_PF_STACK       4096              /* PSRAM 栈 */
+#define SP2D_PF_SLOTS       4                 /* 解码槽数 */
+#define SP2D_PF_BATCH       4                 /* 一次连读最多几帧 */
+#define SP2D_PF_BATCH_BYTES 65536             /* 一批连读的字节预算 */
+#define SP2D_PF_IDLE_SLEEP  2                 /* 没有新作业时的轮询间隔(ms) */
+
+#define SP2D_PF_EMPTY       0
+#define SP2D_PF_READY       1
+#define SP2D_PF_RENDER      2
+#define SP2D_PF_LOADING     3
+
+typedef struct {
+    uint16_t    *px;              /**< max_w × max_h 的解码槽（PSRAM）*/
+    sp2d_span_t *spans;
+    uint32_t     idx;             /**< 这块槽里是全局第几帧 */
+    int16_t      w, h, dx, dy;
+    volatile uint8_t state;
+} sp2d_pf_slot_t;
+
+static struct {
+    BOOL_T       on;              /**< 预取开着吗（线程 + 槽都好使）*/
+    BOOL_T       stop;            /**< 通知 loader 退出 */
+    THREAD_HANDLE thrd;
+    MUTEX_HANDLE lock;
+    sp2d_pf_slot_t slots[SP2D_PF_SLOTS];
+    uint8_t     *rle;             /**< 一次连读的原始字节（按最坏单帧分配）*/
+    uint32_t     rle_cap;
+    uint8_t      next;            /**< 取槽的轮转起点 */
+
+    uint32_t     want;            /**< 渲染想要的帧；SP2D_NO_FRAME = 无 */
+    uint32_t     want_clip;       /**< want 属于哪一组 */
+    uint32_t     loader_clip;     /**< loader 正在供哪一组（换代判据）*/
+
+    sp2d_pf_slot_t *held;         /**< 渲染线程正拿着的那块槽（上次取用）*/
+
+    uint32_t     hit, miss;       /**< 槽命中 / 缺失（渲染线程计数）*/
+    uint32_t     rd_n, rd_frames, rd_sum, rd_max, rd_bytes;
+    uint32_t     stat_at;
+} s_pf;
+
+static void prv_pf_lock(void)   { (void)tal_mutex_lock(s_pf.lock); }
+static void prv_pf_unlock(void) { (void)tal_mutex_unlock(s_pf.lock); }
+
+/** 取一块可写的槽（调用方持锁）。优先空的；没有就按轮转偷就绪的；
+ *  渲染正在用的（RENDER）不偷。拿到的置 LOADING。 */
+static sp2d_pf_slot_t *prv_pf_pick_slot(void)
+{
+    for (uint8_t i = 0; i < SP2D_PF_SLOTS; i++) {
+        uint8_t k = (uint8_t)((s_pf.next + i) % SP2D_PF_SLOTS);
+
+        if (SP2D_PF_EMPTY == s_pf.slots[k].state ||
+            SP2D_PF_READY == s_pf.slots[k].state) {
+            s_pf.slots[k].state = SP2D_PF_LOADING;
+            s_pf.next = (uint8_t)((k + 1) % SP2D_PF_SLOTS);
+            return &s_pf.slots[k];
+        }
+    }
+    return NULL;                              /* 全是 RENDER：等下一轮 */
+}
+
+/** 渲染路径取帧（锁内完成 want 更新 + 扫槽 + 统计）。
+ * @return 拿到的槽（已置 RENDER，画完必须 prv_pf_release）；NULL = 没取到 */
+static sp2d_pf_slot_t *prv_pf_acquire(uint32_t idx, const sp2d_clip_t *c)
+{
+    sp2d_pf_slot_t *exact = NULL;
+    sp2d_pf_slot_t *back  = NULL;
+
+    prv_pf_lock();
+
+    s_pf.want      = idx;
+    s_pf.want_clip = (uint32_t)(c - sg_data.file.clips);
+
+    for (uint8_t i = 0; i < SP2D_PF_SLOTS; i++) {
+        sp2d_pf_slot_t *s = &s_pf.slots[i];
+
+        if (SP2D_PF_READY != s->state) {
+            continue;
+        }
+        if (s->idx == idx) {
+            exact = s;
+            break;
+        }
+        /* 同组里更早的一帧：槽没好时复读它（不动 SD）。取最新的那块。 */
+        if (s->idx < idx && prv_clip_of(s->idx) == c &&
+            (NULL == back || s->idx > back->idx)) {
+            back = s;
+        }
+    }
+
+    if (NULL != exact) {
+        s_pf.hit++;
+    } else {
+        s_pf.miss++;
+    }
+
+    sp2d_pf_slot_t *got = (NULL != exact) ? exact : back;
+
+    if (NULL != got) {
+        got->state = SP2D_PF_RENDER;
+    }
+    prv_pf_unlock();
+
+    return got;
+}
+
+/** 渲染用完放回（EMPTY，回池子）。 */
+static void prv_pf_release(sp2d_pf_slot_t *s)
+{
+    if (NULL == s) {
+        return;
+    }
+    prv_pf_lock();
+    s->state = SP2D_PF_EMPTY;
+    if (s_pf.held == s) {
+        s_pf.held = NULL;
+    }
+    prv_pf_unlock();
+}
+
+/** 放掉上一次 frame_at 拿着的槽（每次新取用前 / 重置时调）。 */
+static void prv_pf_release_held(void)
+{
+    prv_pf_release(s_pf.held);
+}
+
+/** 想要的帧已经在槽里？*/
+static BOOL_T prv_pf_has(uint32_t idx)
+{
+    BOOL_T has = FALSE;
+
+    prv_pf_lock();
+    for (uint8_t i = 0; i < SP2D_PF_SLOTS; i++) {
+        if (SP2D_PF_READY == s_pf.slots[i].state &&
+            s_pf.slots[i].idx == idx) {
+            has = TRUE;
+            break;
+        }
+    }
+    prv_pf_unlock();
+
+    return has;
+}
+
+/** loader 专用：连读 [a, a+len) 到批量暂存。
+ *
+ * 失败策略与 prv_read_frame 完全一致（卡不在静默退回 idle / 卡在位连续读坏
+ * SP2D_READ_RECOVER_AFTER 次重建链路），只是整套搬到了 loader 线程。 */
+static BOOL_T prv_pf_read_run(uint32_t a, uint32_t len)
+{
+    if (TRUE != prv_read_at(a, len, s_pf.rle)) {
+        if (!app_storage_card_present()) {
+            sg_data.bad_run = 0;
+            return FALSE;
+        }
+        if (++sg_data.bad_run >= SP2D_READ_RECOVER_AFTER) {
+            sg_data.bad_run = 0;
+            PR_ERR("[sp2d] 预取连续 %u 批读坏（卡在位），重建 SD 链路",
+                   (unsigned)SP2D_READ_RECOVER_AFTER);
+            if (APP_SD_OK == app_storage_recover_reopen(&sg_data.file.f,
+                                                        SP2D_PATH_SPF)) {
+                return prv_read_at(a, len, s_pf.rle);
+            }
+        }
+        return FALSE;
+    }
+
+    sg_data.bad_run = 0;
+    return TRUE;
+}
+
+/** 每 2 秒一条预取统计（限流，闲着不打）。
+ *  和桌宠页的 [pet] 刷新统计对起来看，就能分清"SD 慢 / 刷新慢 / 被抢占"。 */
+static void prv_pf_stats(void)
+{
+    uint32_t now = (uint32_t)tal_system_get_millisecond();
+
+    if (now - s_pf.stat_at < 2000u) {
+        return;
+    }
+    s_pf.stat_at = now;
+
+    prv_pf_lock();
+    uint32_t rd_n = s_pf.rd_n, rd_frames = s_pf.rd_frames;
+    uint32_t rd_sum = s_pf.rd_sum, rd_max = s_pf.rd_max;
+    uint32_t rd_bytes = s_pf.rd_bytes;
+    uint32_t hit = s_pf.hit, miss = s_pf.miss;
+
+    s_pf.rd_n = s_pf.rd_frames = s_pf.rd_sum = s_pf.rd_max = 0;
+    s_pf.rd_bytes = 0;
+    s_pf.hit = s_pf.miss = 0;
+    prv_pf_unlock();
+
+    if (0 == rd_n && 0 == (hit + miss)) {
+        return;
+    }
+
+    uint32_t avg = rd_n ? (rd_sum / rd_n) : 0;
+    uint32_t kbs = rd_sum ? (uint32_t)(((uint64_t)rd_bytes * 1000u) /
+                                       rd_sum / 1024u) : 0;
+
+    PR_DEBUG("[sp2d] 预取：%u 批 / %u 帧，平均 %u ms 最大 %u ms，%u KB/s；命中 %u 缺失 %u",
+             (unsigned)rd_n, (unsigned)rd_frames, (unsigned)avg,
+             (unsigned)rd_max, (unsigned)kbs, (unsigned)hit, (unsigned)miss);
+}
+
+static void prv_pf_task(void *args)
+{
+    (void)args;
+
+    s_pf.stat_at = (uint32_t)tal_system_get_millisecond();
+
+    while (!s_pf.stop) {
+        uint32_t want, want_clip;
+
+        prv_pf_lock();
+        want      = s_pf.want;
+        want_clip = s_pf.want_clip;
+        prv_pf_unlock();
+
+        if (SP2D_NO_FRAME == want) {
+            tal_system_sleep(SP2D_PF_IDLE_SLEEP);
+            continue;
+        }
+
+        /* 想要的帧已经在槽里：什么都别做（顺序播放时大部分拍数如此）*/
+        if (prv_pf_has(want)) {
+            prv_pf_stats();
+            tal_system_sleep(SP2D_PF_IDLE_SLEEP);
+            continue;
+        }
+
+        const sp2d_clip_t *c = prv_clip_of(want);
+
+        if (NULL == c) {
+            tal_system_sleep(SP2D_PF_IDLE_SLEEP);
+            continue;
+        }
+
+        /* ---- 换代：作废旧组的就绪槽 ----
+         * 只有 want 跳到别的组才算换代。顺序播下一帧**不**换代 —— 不然
+         * loader 正读的那一批会被误判成过期。 */
+        if (want_clip != s_pf.loader_clip) {
+            prv_pf_lock();
+            for (uint8_t i = 0; i < SP2D_PF_SLOTS; i++) {
+                sp2d_pf_slot_t *s = &s_pf.slots[i];
+
+                if (SP2D_PF_READY == s->state && prv_clip_of(s->idx) != c) {
+                    s->state = SP2D_PF_EMPTY;
+                }
+            }
+            s_pf.loader_clip = want_clip;
+            prv_pf_unlock();
+        }
+
+        /* ---- 算一批：同组内最多 BATCH 帧；连读字节数不超预算 ---- */
+        uint32_t first = want;
+        uint32_t end   = c->first + c->frames;      /* 组尾（不含）*/
+        uint32_t n     = 1;
+
+        while (n < SP2D_PF_BATCH && (first + n) < end &&
+               (sg_data.file.offs[first + n + 1u] -
+                sg_data.file.offs[first]) <= SP2D_PF_BATCH_BYTES) {
+            n++;
+        }
+
+        uint32_t a   = sg_data.file.offs[first];
+        uint32_t len = sg_data.file.offs[first + n] - a;
+
+        /* ---- 连读（LVGL 线程里那次 26~61ms 的读，现在在这儿）---- */
+        uint32_t t0 = (uint32_t)tal_system_get_millisecond();
+        BOOL_T   ok = prv_pf_read_run(a, len);
+        uint32_t dt = (uint32_t)tal_system_get_millisecond() - t0;
+
+        s_pf.rd_n++;
+        s_pf.rd_frames += n;
+        s_pf.rd_bytes  += len;
+        s_pf.rd_sum    += dt;
+        if (dt > s_pf.rd_max) {
+            s_pf.rd_max = dt;
+        }
+
+        if (!ok) {
+            prv_pf_stats();
+            tal_system_sleep(SP2D_PF_IDLE_SLEEP);
+            continue;
+        }
+
+        /* ---- 逐帧解压进槽 ---- */
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t idx = first + i;
+
+            /* want 跳到别的组了：这一批不再往后解（读都读了，通常第一帧
+             * 已经吃上，后面的不白解）。 */
+            prv_pf_lock();
+            uint32_t cur = s_pf.want;
+            prv_pf_unlock();
+            if (prv_clip_of(cur) != c) {
+                break;
+            }
+
+            sp2d_pf_slot_t *slot;
+
+            prv_pf_lock();
+            slot = prv_pf_pick_slot();
+            prv_pf_unlock();
+            if (NULL == slot) {
+                break;                          /* 全是 RENDER：等下一轮 */
+            }
+
+            uint32_t sa = sg_data.file.offs[idx] - a;
+            uint32_t sb = sg_data.file.offs[idx + 1u] - a;
+
+            spf6_inflate(s_pf.rle + sa, sb - sa, slot->px,
+                         (uint32_t)c->w * c->h);
+            spf6_build_spans(slot->px, slot->spans, 1, c->w, c->h);
+
+            prv_pf_lock();
+            slot->idx  = idx;
+            slot->w    = c->w;
+            slot->h    = c->h;
+            slot->dx   = c->dx;
+            slot->dy   = c->dy;
+            slot->state = SP2D_PF_READY;
+            prv_pf_unlock();
+        }
+
+        prv_pf_stats();
+    }
+}
+
+/** 放掉槽与暂存（线程退出后 / 启动失败回滚时调）。 */
+static void prv_pf_free(void)
+{
+    for (uint8_t i = 0; i < SP2D_PF_SLOTS; i++) {
+        if (NULL != s_pf.slots[i].px) {
+            tal_psram_free(s_pf.slots[i].px);
+            s_pf.slots[i].px = NULL;
+        }
+        if (NULL != s_pf.slots[i].spans) {
+            tal_psram_free(s_pf.slots[i].spans);
+            s_pf.slots[i].spans = NULL;
+        }
+        s_pf.slots[i].state = SP2D_PF_EMPTY;
+        s_pf.slots[i].idx   = SP2D_NO_FRAME;
+    }
+    if (NULL != s_pf.rle) {
+        tal_psram_free(s_pf.rle);
+        s_pf.rle = NULL;
+    }
+    s_pf.rle_cap = 0;
+    s_pf.want    = SP2D_NO_FRAME;
+    s_pf.held    = NULL;
+    s_pf.on      = FALSE;
+}
+
+/** 起预取线程。起不来不报错到调用方 —— 同步读老路照常能用。 */
+static void prv_pf_start(void)
+{
+    THREAD_CFG_T cfg;
+
+    if (NULL != s_pf.thrd) {
+        return;                                 /* 幂等 */
+    }
+
+    /* 暂存按**最坏单帧**分配（spf6_rle_worst），连读预算才是 64KB ——
+     * 个别大帧超过预算时一批只读它一帧，也绝不会截断。 */
+    s_pf.rle_cap = spf6_rle_worst((uint32_t)sg_data.file.max_w *
+                                  sg_data.file.max_h);
+    s_pf.rle = (uint8_t *)tal_psram_malloc(s_pf.rle_cap);
+
+    for (uint8_t i = 0; i < SP2D_PF_SLOTS; i++) {
+        s_pf.slots[i].px = (uint16_t *)tal_psram_malloc(
+            (size_t)sg_data.file.max_w * sg_data.file.max_h * 2u);
+        s_pf.slots[i].spans = (sp2d_span_t *)tal_psram_malloc(
+            spf6_spans_bytes(sg_data.file.max_h));
+
+        if (NULL == s_pf.slots[i].px || NULL == s_pf.slots[i].spans) {
+            PR_WARN("[sp2d] 预取槽 %u 分配失败，退回同步读", (unsigned)i);
+            goto failed;
+        }
+        s_pf.slots[i].idx = SP2D_NO_FRAME;
+    }
+
+    if (OPRT_OK != tal_mutex_create_init(&s_pf.lock)) {
+        PR_WARN("[sp2d] 预取互斥锁创建失败，退回同步读");
+        goto failed;
+    }
+
+    s_pf.want        = SP2D_NO_FRAME;
+    s_pf.want_clip   = 0;
+    s_pf.loader_clip = 0xFFFFFFFFu;             /* 逼第一拍就换代 */
+    s_pf.stop        = FALSE;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.stackDepth = SP2D_PF_STACK;
+    cfg.priority   = SP2D_PF_PRIO;
+    cfg.thrdname   = SP2D_PF_NAME;
+    cfg.psram_mode = 1;
+
+    if (OPRT_OK != tal_thread_create_and_start(&s_pf.thrd, NULL, NULL,
+                                               prv_pf_task, NULL, &cfg)) {
+        PR_WARN("[sp2d] 预取线程创建失败，退回同步读");
+        s_pf.thrd = NULL;
+        goto failed;
+    }
+
+    s_pf.on = TRUE;
+    PR_NOTICE("[sp2d] 预取线程就绪：%d 槽 + %u KB 暂存，SD 读移出 LVGL 线程",
+              SP2D_PF_SLOTS, (unsigned)(s_pf.rle_cap / 1024u));
+    return;
+
+failed:
+    prv_pf_free();
+    if (NULL != s_pf.lock) {
+        (void)tal_mutex_release(s_pf.lock);
+        s_pf.lock = NULL;
+    }
+}
+
+/** 停预取线程并放掉全部缓冲（deinit 用）。最多等 500ms。 */
+static void prv_pf_stop(void)
+{
+    if (NULL != s_pf.thrd) {
+        s_pf.stop = TRUE;
+        for (uint32_t i = 0; i < 500; i++) {
+            if (THREAD_STATE_DELETE == tal_thread_get_state(s_pf.thrd) ||
+                THREAD_STATE_STOP == tal_thread_get_state(s_pf.thrd)) {
+                break;
+            }
+            tal_system_sleep(1);
+        }
+        (void)tal_thread_delete(s_pf.thrd);
+        s_pf.thrd = NULL;
+    }
+    if (NULL != s_pf.lock) {
+        (void)tal_mutex_release(s_pf.lock);
+        s_pf.lock = NULL;
+    }
+    prv_pf_free();
+}
+
 /** 把 sg_data.fr 填成"常驻 idle 里的第 ii 帧"（按需解压）。 */
 static void prv_fr_set_idle(uint32_t ii)
 {
@@ -676,6 +1140,62 @@ static const sp2d_fr_t *prv_frame_at(uint32_t idx)
             sg_data.fr.dy    = c->dy;
             return &sg_data.fr;
         }
+    }
+
+    /* ---- 预取线程开着：只从解码槽里取，绝不在 LVGL 线程里读卡 ---- */
+    if (s_pf.on) {
+        /* 上一次取用的槽先放回（上一帧已经画完了）。放锁在 take 之前，
+         * 一次渲染只占一块槽，loader 那边永远偷不到正在画的那块。 */
+        prv_pf_release_held();
+
+        sp2d_pf_slot_t *slot = prv_pf_acquire(idx, c);
+
+        if (NULL != slot) {
+            sg_data.fr.px    = slot->px;
+            sg_data.fr.spans = slot->spans;
+            sg_data.fr.w     = slot->w;
+            sg_data.fr.h     = slot->h;
+            sg_data.fr.dx    = slot->dx;
+            sg_data.fr.dy    = slot->dy;
+            s_pf.held        = slot;
+            return &sg_data.fr;
+        }
+
+        /* 槽没好。**卡不在位** → 常驻 idle 兜底：掉线期间角色照样在动，
+         * 这是本模块一贯的策略（见 prv_read_frame 上面的注释）。 */
+        if (!app_storage_card_present()) {
+            sg_stat.fallback = 1;
+            if (NULL != sg_data.idle_px) {
+                prv_fr_set_idle(idx % sg_data.idle_frames);
+                return &sg_data.fr;
+            }
+            return NULL;
+        }
+
+        /* 卡在位（loader 只是还没解到）：本组首帧常驻顶上。切组第一拍
+         * 就指望它 —— 不读卡、不等解压。 */
+        {
+            uint32_t gi = (uint32_t)(c - sg_data.file.clips);
+
+            if (NULL != sg_data.head_px && NULL != sg_data.head_px[gi]) {
+                sg_data.fr.px    = sg_data.head_px[gi];
+                sg_data.fr.spans = sg_data.head_spans[gi];
+                sg_data.fr.w     = c->w;
+                sg_data.fr.h     = c->h;
+                sg_data.fr.dx    = c->dx;
+                sg_data.fr.dy    = c->dy;
+                sg_stat.fallback = 1;
+                return &sg_data.fr;
+            }
+        }
+
+        /* 首帧也没常驻：常驻 idle；再没有就这一帧不画（画布保持原样）。 */
+        if (NULL != sg_data.idle_px) {
+            sg_stat.fallback = 1;
+            prv_fr_set_idle(idx % sg_data.idle_frames);
+            return &sg_data.fr;
+        }
+        return NULL;
     }
 
     if (idx != sg_data.cur_frame) {
@@ -922,12 +1442,20 @@ OPERATE_RET app_sprite2d_init(void)
                   (unsigned)sg_data.idle_frames, ic->w, ic->h, ch_h,
                   (unsigned)(rle_len / 1024u),
                   (unsigned)sg_data.file.max_w, (unsigned)sg_data.file.max_h);
+
+        /* 预取线程放最后起：要的东西（偏移表 / 动作表 / 最坏帧尺寸）都齐了。
+         * 起不来不致命 —— 同步读老路照常。 */
+        prv_pf_start();
     }
     return OPRT_OK;
 }
 
 void app_sprite2d_deinit(void)
 {
+    /* 预取线程必须**最先**停：它还拿着 sg_data.file 的偏移表和动作表，
+     * 后面 spf6_close 会把它们一起收掉。 */
+    prv_pf_stop();
+
     /* 首帧常驻必须**先于** spf6_close 释放：要按 clip_count 逐项 free，
      * 而 spf6_close 会把那张动作表一起收掉。 */
     if (NULL != sg_data.head_px || NULL != sg_data.head_spans) {
@@ -1170,6 +1698,167 @@ void app_sprite2d_render_clip(uint16_t *dst, int w, int h,
     }
 
     app_sprite2d_blit_clip(dst, w, h, clip, frame);
+}
+
+/* ======================= 脏矩形渲染（只动角色那一块） =======================
+ *
+ * 原来每拍把整块画布（193×199 ≈ 150KB）memset 一遍、再整块标脏，而角色真正
+ * 画到的只有 ~129×152 ≈ 40KB。这里改成：只把**上一帧实际画过的矩形**铺回
+ * 背景色，画当前帧，输出两帧并集 —— 页面只标这一块脏。
+ *
+ * "实际画过"从 spans 表算（每行只覆盖 alpha 非 0 的像素），不是裁剪框：
+ * 框里有 pad 和起跳余量，比角色大一圈。路径仍然是"预取槽 → blit"，
+ * SD 读与 RLE 解压都不在这儿（见上面的 sp2d_pf）。 */
+static SP2D_RECT_T s_dirty_last;   /**< 上一帧实际画过的矩形（画布坐标）*/
+static BOOL_T      s_dirty_ok;     /**< s_dirty_last 有效吗 */
+
+/** 把"上一帧"重置成整块画布：下一次从全铺开始（新画布是黑的，得铺一次底）。 */
+static void prv_dirty_reset_full(void)
+{
+    if (!sg_data.loaded) {
+        s_dirty_ok = FALSE;
+        return;
+    }
+    s_dirty_last.x0 = 0;
+    s_dirty_last.y0 = 0;
+    s_dirty_last.x1 = (int16_t)(sg_data.bx1 - sg_data.bx0);
+    s_dirty_last.y1 = (int16_t)(sg_data.by1 - sg_data.by0);
+    s_dirty_ok = TRUE;
+}
+
+void app_sprite2d_dirty_reset(void)
+{
+    prv_pf_release_held();                   /* 放掉预取槽占用 */
+    prv_dirty_reset_full();
+}
+
+/** 把矩形铺成背景色（已夹到画布内）。 */
+static void prv_rect_fill_bg(uint16_t *dst, int w, int h,
+                             const SP2D_RECT_T *r, uint16_t bg)
+{
+    int x0 = r->x0, y0 = r->y0, x1 = r->x1, y1 = r->y1;
+
+    if (x1 < 0 || y1 < 0 || x0 >= w || y0 >= h) {
+        return;
+    }
+    if (x0 < 0)  x0 = 0;
+    if (y0 < 0)  y0 = 0;
+    if (x1 >= w) x1 = w - 1;
+    if (y1 >= h) y1 = h - 1;
+
+    for (int y = y0; y <= y1; y++) {
+        uint16_t *row = dst + (size_t)y * w;
+
+        for (int x = x0; x <= x1; x++) {
+            row[x] = bg;
+        }
+    }
+}
+
+/** 一帧**实际画到**的矩形：spans 包围盒 + 本帧 dx/dy，夹到画布内。
+ *  全透明帧返回 FALSE（矩形无效）。 */
+static BOOL_T prv_frame_rect(const sp2d_fr_t *fr, int w, int h,
+                             SP2D_RECT_T *out)
+{
+    int minx = fr->w, maxx = -1, miny = fr->h, maxy = -1;
+
+    for (int y = 0; y < fr->h; y++) {
+        /* spans 是帧坐标下的 [x0, x1)：空行是 0,0，x1 > x0 才有内容 */
+        if (fr->spans[y].x1 > fr->spans[y].x0) {
+            if ((int)fr->spans[y].x0 < minx) minx = fr->spans[y].x0;
+            if ((int)fr->spans[y].x1 > maxx) maxx = fr->spans[y].x1;
+            if (y < miny) miny = y;
+            if (y > maxy) maxy = y;
+        }
+    }
+
+    if (maxx < minx || maxy < miny) {
+        return FALSE;
+    }
+
+    /* x1/y1 是闭区间：spans 的 x1 是开区间端点，减 1 */
+    int x0 = fr->dx + minx;
+    int y0 = fr->dy + miny;
+    int x1 = fr->dx + maxx - 1;
+    int y1 = fr->dy + maxy;
+
+    if (x0 < 0)    x0 = 0;
+    if (y0 < 0)    y0 = 0;
+    if (x1 > w - 1) x1 = w - 1;
+    if (y1 > h - 1) y1 = h - 1;
+
+    out->x0 = (int16_t)x0;
+    out->y0 = (int16_t)y0;
+    out->x1 = (int16_t)x1;
+    out->y1 = (int16_t)y1;
+
+    return (x0 <= x1 && y0 <= y1);
+}
+
+BOOL_T app_sprite2d_render_clip_dirty(uint16_t *dst, int w, int h,
+                                      int clip, int frame, uint16_t bg,
+                                      SP2D_RECT_T *dirty)
+{
+    if (NULL == dst || w <= 0 || h <= 0) {
+        return FALSE;
+    }
+    if (!sg_data.loaded || clip < 0 ||
+        clip >= (int)sg_data.file.clip_count) {
+        return FALSE;
+    }
+
+    const sp2d_clip_t *c = &sg_data.file.clips[clip];
+
+    if (0 == c->frames) {
+        return FALSE;
+    }
+
+    uint32_t t0 = (uint32_t)tal_system_get_millisecond();
+    uint32_t fi = c->first + (uint32_t)(frame % (int)c->frames);
+
+    const sp2d_fr_t *fr = prv_frame_at(fi);
+
+    if (NULL == fr) {
+        /* 什么都取不到（SD 不在且没有常驻可退）：画布保持原样、别标脏 */
+        return FALSE;
+    }
+
+    SP2D_RECT_T cur;
+
+    if (!prv_frame_rect(fr, w, h, &cur)) {
+        return FALSE;                         /* 全透明帧：没什么可画的 */
+    }
+
+    if (s_dirty_ok) {
+        prv_rect_fill_bg(dst, w, h, &s_dirty_last, bg);
+    }
+
+    uint32_t px = prv_blit_anchor(dst, w, w, h, 0, 0, fr);
+
+    if (NULL != dirty) {
+        if (s_dirty_ok) {
+            dirty->x0 = (int16_t)((cur.x0 < s_dirty_last.x0) ?
+                                  cur.x0 : s_dirty_last.x0);
+            dirty->y0 = (int16_t)((cur.y0 < s_dirty_last.y0) ?
+                                  cur.y0 : s_dirty_last.y0);
+            dirty->x1 = (int16_t)((cur.x1 > s_dirty_last.x1) ?
+                                  cur.x1 : s_dirty_last.x1);
+            dirty->y1 = (int16_t)((cur.y1 > s_dirty_last.y1) ?
+                                  cur.y1 : s_dirty_last.y1);
+        } else {
+            *dirty = cur;
+        }
+    }
+    s_dirty_last = cur;
+    s_dirty_ok   = TRUE;
+
+    sg_stat.us_total  = ((uint32_t)tal_system_get_millisecond() - t0) * 1000u;
+    sg_stat.px        = px;
+    sg_stat.clip_idx  = (uint16_t)clip;
+    sg_stat.clip_cnt  = sg_data.file.clip_count;
+    sg_stat.frame_idx = (uint16_t)(frame % (int)c->frames);
+    sg_stat.frame_cnt = c->frames;
+    return TRUE;
 }
 
 void app_sprite2d_stat(SP2D_STAT_T *out)

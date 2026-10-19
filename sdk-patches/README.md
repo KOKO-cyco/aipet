@@ -11,7 +11,7 @@
 
 | 仓库 | 路径 | 基线 commit | 上游 remote |
 |---|---|---|---|
-| 外层 | `TuyaOpenSDK/` | `4e3147b3241ae15a171f284c3d812b20a26fe398`（master） | `https://gitee.com/tuya-open/TuyaOpen` |
+| 外层 | `TuyaOpenSDK/` | `b1d3aecc9a8399a436e123d06b081d705b109a65`（master，2026-10-19 起重生成） | `https://gitee.com/tuya-open/TuyaOpen` |
 | 嵌套 | `TuyaOpenSDK/platform/T5AI/` | `e4286054eccbfb136faa0f857861aaa3592fac0e` | `https://github.com/tuya/TuyaOpen-T5AI` |
 
 `platform/T5AI` 是个 **gitlink**（嵌套仓库，外层没有 `.gitmodules`），所以它的改动
@@ -21,7 +21,7 @@
 
 | 文件 | 是什么 |
 |---|---|
-| `tuyaopensdk.diff` | **外层** `TuyaOpenSDK/` 的改动，21 个文件（`boards/` + `src/`），`git apply -p1` 可重放 |
+| `tuyaopensdk.diff` | **外层** `TuyaOpenSDK/` 的改动，42 个文件（`boards/` + `src/`），`git apply -p1` 可重放 |
 | `tuyaopensdk.diff.stat` | 上面那份的 `--stat`，一眼看改了哪些文件 |
 | `platform-T5AI.diff` | **嵌套** `platform/T5AI/` 的改动，11 个文件，`git apply -p1` 可重放 |
 | `platform-T5AI.diff.stat` | 同上 |
@@ -35,7 +35,7 @@
 ```bash
 # 1) 外层
 cd <你的 TuyaOpenIDE>/TuyaOpenSDK
-git checkout 4e3147b3241ae15a171f284c3d812b20a26fe398
+git checkout b1d3aecc9a8399a436e123d06b081d705b109a65
 git apply -p1 <aipet>/sdk-patches/tuyaopensdk.diff
 cp -r <aipet>/sdk-patches/新文件/* .
 
@@ -45,7 +45,7 @@ git checkout e4286054eccbfb136faa0f857861aaa3592fac0e
 git apply -p1 <aipet>/sdk-patches/platform-T5AI.diff
 ```
 
-> 打完补丁 `git status` 应该正好显示 21 + 11 个 `M`，以及 `新文件/` 里那几个 `??`。
+> 打完补丁 `git status` 应该正好显示 42 + 11 个 `M`，以及 `新文件/` 里那几个 `??`。
 > 对不上就是基线不对。
 
 ## 改动大致是什么

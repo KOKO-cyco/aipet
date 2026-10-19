@@ -300,9 +300,12 @@ static lv_obj_t   *sg_info;         /* 顶部信息带（换内容只动它） *
 static lv_timer_t *sg_tick;
 static uint16_t   *sg_cbuf;         /* 画布像素缓冲（PSRAM） */
 static int         sg_cw, sg_ch;    /* 画布尺寸 = 精灵锚点框 */
+static int         sg_stage_x, sg_stage_y;  /* 画布在屏幕上的位置（标脏要加它）*/
 static PET_VIEW_E  sg_view;
 static uint32_t    sg_view_at;      /* 进当前视图的时刻 */
 static BOOL_T      sg_recalled;     /* 这一轮待机里"想起"演过了没有 */
+static int         sg_painted_clip;  /**< 上一拍真正画过的组号；-1 = 没画过 */
+static int         sg_painted_frame; /**< 上一拍真正画过的帧号（同帧跳过用）*/
 
 /* ---- 动作状态机 ----
  *
@@ -1014,6 +1017,47 @@ static int prv_seq_len(int clip)
 }
 #endif
 
+/* ---- 调试统计开关 ----------------------------------------------------------
+ * 置 1 时每 2 秒打一条 [pet] 刷新统计（次数 / 平均 / 最大耗时）。配合
+ * app_sprite2d.c 的 [sp2d] 预取统计，能把"刷新本身慢 / SD 慢 / 线程被抢占"
+ * 三者分开。定位完置 0。 */
+#define PET_DBG_STAT     1
+
+/** 刷新统计窗口：次数、累计耗时、最大耗时、窗口起点。 */
+static uint32_t sg_refr_n;
+static uint32_t sg_refr_sum;
+static uint32_t sg_refr_max;
+static uint32_t sg_refr_at;
+
+/** @brief 记一次 lv_refr_now 的耗时，满 2 秒打一条。 */
+static void prv_dbg_refr(uint32_t dt, uint32_t now)
+{
+#if PET_DBG_STAT
+    if (0 == sg_refr_at) {
+        sg_refr_at = now;                     /* 第一拍只当窗口起点 */
+        return;
+    }
+    sg_refr_n++;
+    sg_refr_sum += dt;
+    if (dt > sg_refr_max) {
+        sg_refr_max = dt;
+    }
+    if (now - sg_refr_at >= 2000u) {
+        PR_DEBUG("[pet] 刷新 %u 次/2s：平均 %u ms 最大 %u ms",
+                 (unsigned)sg_refr_n,
+                 (unsigned)(sg_refr_n ? sg_refr_sum / sg_refr_n : 0),
+                 (unsigned)sg_refr_max);
+        sg_refr_n   = 0;
+        sg_refr_sum = 0;
+        sg_refr_max = 0;
+        sg_refr_at  = now;
+    }
+#else
+    (void)dt;
+    (void)now;
+#endif
+}
+
 static void prv_tick_cb(lv_timer_t *t){
     uint32_t now = (uint32_t)tal_system_get_millisecond();
     int      n   = app_sprite2d_clip_count();
@@ -1105,7 +1149,7 @@ static void prv_tick_cb(lv_timer_t *t){
          * 眼睛看到的"卡"。计数器只在换组、或同一组被重新点名（sg_clip_at 变了）
          * 时归零，节奏恒定 24fps。
          *
-         * 帧号超出本组帧数不用管：app_sprite2d_blit_clip 内部按组帧数取模。 */
+         * 帧号超出本组帧数不用管：blit 内部按组帧数取模。 */
         if (sg_clip != sg_frame_clip || sg_clip_at != sg_frame_at) {
             sg_frame_clip = sg_clip;
             sg_frame_at   = sg_clip_at;
@@ -1114,11 +1158,36 @@ static void prv_tick_cb(lv_timer_t *t){
             sg_frame_idx++;
         }
 
-        app_sprite2d_render_clip(sg_cbuf, sg_cw, sg_ch, sg_clip,
-                                 prv_loop_frame(sg_clip, (int)sg_frame_idx),
-                                 PET_COL_BG565);
-        if (NULL != sg_stage) {
-            lv_obj_invalidate(sg_stage);
+        {
+            int lf = prv_loop_frame(sg_clip, (int)sg_frame_idx);
+
+            /* 同一帧不重画：待机组 / 单帧组这一拍算出的（组, 帧）和上一拍
+             * 真正画过的相同，画布内容就没变 —— 重绘 + 标脏都是白工
+             * （待机 16fps、tick 42ms，三拍里有一拍会撞上）。 */
+            if (sg_clip != sg_painted_clip || lf != sg_painted_frame) {
+                SP2D_RECT_T dirty;
+
+                /* 只把上一帧画过的那块铺回底色、只画当前帧、只标两帧并集：
+                 * 角色 ~129×152 ≈ 40KB，画布 193×199 ≈ 150KB。SD 读和 RLE
+                 * 解压都在预取线程里（见 app_sprite2d.c 的 sp2d_pf），这里
+                 * 只做"从槽里取 + 混合"。 */
+                if (app_sprite2d_render_clip_dirty(sg_cbuf, sg_cw, sg_ch,
+                                                   sg_clip, lf,
+                                                   PET_COL_BG565, &dirty) &&
+                    NULL != sg_stage) {
+                    /* invalidate_area 吃的是**屏幕坐标**：要加上画布位置 */
+                    lv_area_t inv;
+
+                    inv.x1 = sg_stage_x + dirty.x0;
+                    inv.y1 = sg_stage_y + dirty.y0;
+                    inv.x2 = sg_stage_x + dirty.x1;
+                    inv.y2 = sg_stage_y + dirty.y1;
+                    lv_obj_invalidate_area(sg_stage, &inv);
+
+                    sg_painted_clip  = sg_clip;
+                    sg_painted_frame = lf;
+                }
+            }
         }
     }
 
@@ -1132,6 +1201,17 @@ static void prv_tick_cb(lv_timer_t *t){
         prv_set_view(PET_VIEW_RECALL);
     }
 #endif
+
+    /* ---- 拍末立刻刷一次 ----
+     * LVGL 自带的刷新定时器是 32ms、宠物 tick 是 42ms，两个周期不同步，相位
+     * 每拍漂 10ms；漂到"刷新压在下一拍上"，就把 42ms 顶成 50~60ms。渲染完
+     * 当拍刷掉，节奏就只由 tick 决定。 */
+    {
+        uint32_t t0 = (uint32_t)tal_system_get_millisecond();
+
+        lv_refr_now(NULL);
+        prv_dbg_refr((uint32_t)tal_system_get_millisecond() - t0, now);
+    }
 }
 
 /***********************************************************
@@ -1199,6 +1279,8 @@ static OPERATE_RET prv_pet_enter(void *arg)
                              LV_COLOR_FORMAT_RGB565);
         lv_obj_set_pos(sg_stage, PET_ORIGIN_X - origin_x,
                        PET_ORIGIN_Y - origin_y);
+        sg_stage_x = PET_ORIGIN_X - origin_x;
+        sg_stage_y = PET_ORIGIN_Y - origin_y;
         lv_obj_set_style_border_width(sg_stage, 0, 0);
         lv_obj_set_style_pad_all(sg_stage, 0, 0);
         lv_obj_set_style_radius(sg_stage, 0, 0);
@@ -1209,6 +1291,12 @@ static OPERATE_RET prv_pet_enter(void *arg)
         PR_NOTICE("[pet] 画布 %dx%d 居中摆在 (%d,%d)（几何全由打包决定）",
                   sg_cw, sg_ch,
                   PET_ORIGIN_X - origin_x, PET_ORIGIN_Y - origin_y);
+
+        /* 画布是新的：清掉"上一帧画过哪"（下一次从整块重新铺底），同帧跳过
+         * 的记账也归零，别把上一次进页面的状态串到这一次。 */
+        app_sprite2d_dirty_reset();
+        sg_painted_clip  = -1;
+        sg_painted_frame = -1;
     } else {
         PR_WARN("[pet] 精灵没起来（SD 上没有 %s？），只有信息带", SP2D_PATH_SPF);
     }
@@ -1290,6 +1378,9 @@ static void prv_pet_exit(void)
         tal_psram_free(sg_cbuf);
         sg_cbuf = NULL;
     }
+
+    /* 放掉预取槽的占用、清掉"上一帧"状态 —— 别串到下一次进页面。 */
+    app_sprite2d_dirty_reset();
 
     /* **不要把旋转调回 0** —— 横屏是全产品的（开机画面、SD 门页都在这个坐标系
      * 里），这一页离开不该把整个产品的方向掰回去。 */
