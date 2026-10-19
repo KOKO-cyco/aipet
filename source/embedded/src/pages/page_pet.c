@@ -151,6 +151,17 @@
  *  就在这个节奏量化上。） */
 #define PET_TICK_MS           42
 
+/** 供给不足时的降帧档（2026-10-20）。
+ *
+ * AI 播报期 SD IO 掉到 ~1MB/s：loader 每 2s 只供 29 帧，贴着 24fps 的 45 拍
+ * 在跑、裕度≈0 —— 批间稍有抖动（105~216ms 的坏批）就整拍 miss 复读旧帧，
+ * 下一批到达又 exact 命中切回新帧，相邻拍在"已播帧↔下一帧"间弹跳（抽搐）。
+ * 拍子拉到 84ms 后同样供给有 ~100% 裕度，坏批也够覆盖 2.5 拍，复读消失。
+ * 只由 miss 率触发/恢复，待机不受影响。 */
+#define PET_TICK_SLOW_MS      84
+#define PET_MISS_DN_PCT       25        /* miss 率 ≥25% -> 降 */
+#define PET_MISS_UP_PCT       8         /* miss 率 <8%  -> 升（滞回带防抖）*/
+
 /** 待机组的组号。素材约定第 0 组必须是 idle（见 tools/build_fish.sh 的 --order）。 */
 #define PET_CLIP_IDLE         0
 
@@ -1058,11 +1069,105 @@ static void prv_dbg_refr(uint32_t dt, uint32_t now)
 #endif
 }
 
+/* ---- 帧率自适应：供不上就降拍（2026-10-20）-----------------------------
+ * miss 率 = 复读+落空 / 总取帧。SD 被网络/音频 DMA 挤占时（AI 播报期实测
+ * 25~50%）按慢档跑，恢复后自动升回 24fps。判定信号来自预取线程的**累计**
+ * hit/miss（app_sprite2d_pf_get，永不清零；uint32 回绕时重建基线）。
+ *
+ * 防抖三件套（2026-10-20 第二轮，治 42/84 反复横跳）：
+ *   ① 1s 一个评估窗口（原 500ms 太碎 —— 供货是脉冲式的，窗口间 miss 率
+ *      能差出 30%+，采样本身就在制造抖动）；
+ *   ② 连续 2 个坏窗口才降、连续 4 个好窗口才升（滞回带里两不沾）；
+ *   ③ 换挡后 3s 冷静期，期间只累计不计分。
+ * 空窗口（没有取帧需求 —— idle 常驻帧不碰计数器）算"好"：没 miss 可犯。 */
+static uint32_t sg_ad_at;                 /* 上次评估时刻 */
+static uint32_t sg_ad_sw_at;              /* 上次换挡时刻 */
+static uint32_t sg_ad_hit, sg_ad_miss;    /* 上次读到的累计计数 */
+static uint8_t  sg_ad_bad, sg_ad_good;    /* 连续坏 / 好窗口数 */
+static BOOL_T   sg_ad_slow;               /* 当前是不是慢档 */
+
+static void prv_adapt_ticks(uint32_t now, lv_timer_t *tick)
+{
+    uint32_t hit, miss, dh, dm, tol;
+
+    if (0 == sg_ad_at) {                  /* 首拍只建基线 */
+        sg_ad_at   = now;
+        sg_ad_sw_at = now;
+        (void)app_sprite2d_pf_get(&sg_ad_hit, &sg_ad_miss);
+        return;
+    }
+    if (now - sg_ad_at < 1000u) {
+        return;                           /* 1s 评估一次 */
+    }
+    sg_ad_at = now;
+
+    (void)app_sprite2d_pf_get(&hit, &miss);
+
+    if (hit < sg_ad_hit || miss < sg_ad_miss) {
+        sg_ad_hit  = hit;                 /* 累计计数回绕：重建基线 */
+        sg_ad_miss = miss;
+        sg_ad_bad = sg_ad_good = 0;
+        return;
+    }
+    dh = hit - sg_ad_hit;
+    dm = miss - sg_ad_miss;
+    sg_ad_hit  = hit;
+    sg_ad_miss = miss;
+    tol = dh + dm;
+
+    if (0 == tol) {
+        if (sg_ad_good < 200u) {
+            sg_ad_good++;
+        }
+        sg_ad_bad = 0;                    /* 没需求 = 没 miss 可犯 */
+    } else if (dm * 100u >= (uint32_t)PET_MISS_DN_PCT * tol) {
+        if (sg_ad_bad < 200u) {
+            sg_ad_bad++;
+        }
+        sg_ad_good = 0;
+    } else if (dm * 100u < (uint32_t)PET_MISS_UP_PCT * tol) {
+        if (sg_ad_good < 200u) {
+            sg_ad_good++;
+        }
+        sg_ad_bad = 0;
+    } else {
+        sg_ad_bad = sg_ad_good = 0;       /* 滞回带里：两不沾 */
+    }
+
+    if (now - sg_ad_sw_at < 3000u) {
+        return;                           /* 换挡冷静期：只累计不换挡 */
+    }
+
+    if (!sg_ad_slow && sg_ad_bad >= 2u) {
+        sg_ad_slow  = TRUE;
+        sg_ad_sw_at = now;
+        sg_ad_bad   = 0;
+        sg_ad_good  = 0;
+        lv_timer_set_period(tick, PET_TICK_SLOW_MS);
+        PR_NOTICE("[pet] 预取缺帧 %u/%u -> 拍子 %u -> %u ms（供给不足，降帧保流畅）",
+                  (unsigned)dm, (unsigned)tol,
+                  (unsigned)PET_TICK_MS, (unsigned)PET_TICK_SLOW_MS);
+    } else if (sg_ad_slow && sg_ad_good >= 4u) {
+        sg_ad_slow  = FALSE;
+        sg_ad_sw_at = now;
+        sg_ad_bad   = 0;
+        sg_ad_good  = 0;
+        lv_timer_set_period(tick, PET_TICK_MS);
+        PR_NOTICE("[pet] 预取缺帧 %u/%u -> 拍子 %u -> %u ms（供给恢复，升回）",
+                  (unsigned)dm, (unsigned)tol,
+                  (unsigned)PET_TICK_SLOW_MS, (unsigned)PET_TICK_MS);
+    }
+}
+
 static void prv_tick_cb(lv_timer_t *t){
     uint32_t now = (uint32_t)tal_system_get_millisecond();
     int      n   = app_sprite2d_clip_count();
 
     (void)t;
+
+    /* 供给不足时降拍（见 PET_TICK_SLOW_MS 注释）：1s 评一次，内部只在越档时
+     * 调 lv_timer_set_period —— 常态零开销。 */
+    prv_adapt_ticks(now, t);
 
     /* ---- 动作状态机 ------------------------------------------------------
      * 优先级（从高到低）：

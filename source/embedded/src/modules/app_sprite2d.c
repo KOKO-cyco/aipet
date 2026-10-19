@@ -613,7 +613,7 @@ static BOOL_T prv_read_frame(uint32_t idx)
  *
  * 为什么要有它：LVGL 线程里**同步**读一帧实测 26~61ms（20KB 的 RLE），比
  * 42ms 的拍子还长 —— 动作一顿一顿的直接原因。所以把唯一的 SD 读者挪到这个
- * 最低优先级线程：
+ * 独立线程（优先级与音频/路由平级，见 SP2D_PF_PRIO 的注释）：
  *
  *   - 它按"一批最多 4 帧、一次 fseek + fread 连读"摊薄每次 SD 调用的固定
  *     开销，inflate / build_spans 也在这里做；
@@ -629,7 +629,12 @@ static BOOL_T prv_read_frame(uint32_t idx)
  *   就绪→取用中 状态的槽 —— 同一块槽永不并发读写。 */
 
 #define SP2D_PF_NAME        "sp2d_pf"
-#define SP2D_PF_PRIO        THREAD_PRIO_4     /* 最低档：谁也不许被它挤到 */
+#define SP2D_PF_PRIO        THREAD_PRIO_3     /* 与音频/路由平级（2026-10-20）：
+                                                * AI 播报时前台网络(4)/音频(2)全在跑，
+                                                * PRIO_4 垫底被饿死 —— 实测批读 282ms、
+                                                * 槽永远填不上，动作只能复读旧帧（=卡顿
+                                                * 循环某段）。升到 2 仍低于 LVGL(3)和
+                                                * 网络(4)，不抢 UI。 */
 #define SP2D_PF_STACK       4096              /* PSRAM 栈 */
 #define SP2D_PF_SLOTS       4                 /* 解码槽数 */
 #define SP2D_PF_BATCH       4                 /* 一次连读最多几帧 */
@@ -665,7 +670,8 @@ static struct {
 
     sp2d_pf_slot_t *held;         /**< 渲染线程正拿着的那块槽（上次取用）*/
 
-    uint32_t     hit, miss;       /**< 槽命中 / 缺失（渲染线程计数）*/
+    uint32_t     hit, miss;       /**< 槽命中 / 缺失（渲染线程计数，2s 统计打印后清零）*/
+    uint32_t     hit_all, miss_all; /**< 累计命中 / 缺失（永不清零，喂页面帧率自适应）*/
     uint32_t     rd_n, rd_frames, rd_sum, rd_max, rd_bytes;
     uint32_t     stat_at;
 } s_pf;
@@ -673,29 +679,72 @@ static struct {
 static void prv_pf_lock(void)   { (void)tal_mutex_lock(s_pf.lock); }
 static void prv_pf_unlock(void) { (void)tal_mutex_unlock(s_pf.lock); }
 
-/** 取一块可写的槽（调用方持锁）。优先空的；没有就按轮转偷就绪的；
- *  渲染正在用的（RENDER）不偷。拿到的置 LOADING。 */
-static sp2d_pf_slot_t *prv_pf_pick_slot(void)
+/** 取一块可写的槽（调用方持锁）。没有空闲槽时**按播放头精确回收**就绪帧：
+ *   1. 空槽直接拿；
+ *   2. 别的组的就绪帧 —— 播放头走了，不会再要；
+ *   3. 同组里播放头**后面**的就绪帧（idx < want，顺序播放已用过）——
+ *      偷其中最旧的那块：最新的那块要留给渲染路径复读；
+ *   4. 全在播放头**前面**（循环回绕 / 跳帧）：偷离播放头最远的那块（idx 最大）。
+ *  RENDER 永不回收（渲染正在用）；LOADING 不碰（loader 自己写了一半的）。
+ *  2026-10-20：旧实现是"从 next 起轮转偷第一个非 RENDER 的"，会误偷播放头
+ *  前面正要播的帧（want=104 时偷走 102）——渲染到那一拍反而 miss 复读，
+ *  越急越偷错。 */
+static sp2d_pf_slot_t *prv_pf_pick_slot(uint32_t want)
 {
-    for (uint8_t i = 0; i < SP2D_PF_SLOTS; i++) {
-        uint8_t k = (uint8_t)((s_pf.next + i) % SP2D_PF_SLOTS);
+    const sp2d_clip_t *wc = prv_clip_of(want);
+    sp2d_pf_slot_t     *other = NULL;   /* 别的组 */
+    sp2d_pf_slot_t     *older = NULL;   /* 同组、播放头后面：最旧 */
+    sp2d_pf_slot_t     *far   = NULL;   /* 同组、播放头前面：最远 */
 
-        if (SP2D_PF_EMPTY == s_pf.slots[k].state ||
-            SP2D_PF_READY == s_pf.slots[k].state) {
-            s_pf.slots[k].state = SP2D_PF_LOADING;
-            s_pf.next = (uint8_t)((k + 1) % SP2D_PF_SLOTS);
-            return &s_pf.slots[k];
+    for (uint8_t i = 0; i < SP2D_PF_SLOTS; i++) {
+        sp2d_pf_slot_t *s = &s_pf.slots[i];
+
+        if (SP2D_PF_EMPTY == s->state) {
+            s->state = SP2D_PF_LOADING;
+            s_pf.next = (uint8_t)((i + 1) % SP2D_PF_SLOTS);
+            return s;
+        }
+        if (SP2D_PF_READY != s->state) {
+            continue;                   /* BUSY / loader 自己写一半的：不碰 */
+        }
+        if (NULL == wc || prv_clip_of(s->idx) != wc) {
+            if (NULL == other) {
+                other = s;
+            }
+        } else if (s->idx < want) {
+            if (NULL == older || s->idx < older->idx) {
+                older = s;
+            }
+        } else {
+            if (NULL == far || s->idx > far->idx) {
+                far = s;
+            }
         }
     }
-    return NULL;                              /* 全是 RENDER：等下一轮 */
+
+    {
+        sp2d_pf_slot_t *pick = (NULL != other) ? other :
+                               (NULL != older) ? older : far;
+
+        if (NULL != pick) {
+            pick->state = SP2D_PF_LOADING;
+        }
+        return pick;                    /* NULL：全是 RENDER，等下一轮 */
+    }
 }
 
 /** 渲染路径取帧（锁内完成 want 更新 + 扫槽 + 统计）。
- * @return 拿到的槽（已置 RENDER，画完必须 prv_pf_release）；NULL = 没取到 */
+ *
+ * **只认 exact**（2026-10-20）：miss 时不再回退到"同组更旧的帧"。
+ * AI 播报期供给是脉冲式的（一批 2~3 帧、间隔 60~130ms），每 miss 一次就
+ * 回跳一帧旧画面，观感就是"已播帧和下一帧来回抽插"（用户实锤的抽搐）。
+ * 现在 miss 直接返回 NULL，由 prv_frame_at 复读上一帧（held 槽）——
+ * 宁可定住半拍，也不回退。want 照常更新：loader 的回收判定要跟着播放头走。
+ *
+ * @return want 对应的槽（已置 RENDER，画完必须 prv_pf_release）；NULL = 没取到 */
 static sp2d_pf_slot_t *prv_pf_acquire(uint32_t idx, const sp2d_clip_t *c)
 {
     sp2d_pf_slot_t *exact = NULL;
-    sp2d_pf_slot_t *back  = NULL;
 
     prv_pf_lock();
 
@@ -705,34 +754,23 @@ static sp2d_pf_slot_t *prv_pf_acquire(uint32_t idx, const sp2d_clip_t *c)
     for (uint8_t i = 0; i < SP2D_PF_SLOTS; i++) {
         sp2d_pf_slot_t *s = &s_pf.slots[i];
 
-        if (SP2D_PF_READY != s->state) {
-            continue;
-        }
-        if (s->idx == idx) {
+        if (SP2D_PF_READY == s->state && s->idx == idx) {
             exact = s;
             break;
-        }
-        /* 同组里更早的一帧：槽没好时复读它（不动 SD）。取最新的那块。 */
-        if (s->idx < idx && prv_clip_of(s->idx) == c &&
-            (NULL == back || s->idx > back->idx)) {
-            back = s;
         }
     }
 
     if (NULL != exact) {
+        exact->state = SP2D_PF_RENDER;
         s_pf.hit++;
+        s_pf.hit_all++;
     } else {
         s_pf.miss++;
-    }
-
-    sp2d_pf_slot_t *got = (NULL != exact) ? exact : back;
-
-    if (NULL != got) {
-        got->state = SP2D_PF_RENDER;
+        s_pf.miss_all++;
     }
     prv_pf_unlock();
 
-    return got;
+    return exact;
 }
 
 /** 渲染用完放回（EMPTY，回池子）。 */
@@ -835,6 +873,24 @@ static void prv_pf_stats(void)
              (unsigned)rd_max, (unsigned)kbs, (unsigned)hit, (unsigned)miss);
 }
 
+/** 命中/缺失**累计**的只读快照（锁内取，不为 NULL 的参数才写）。
+ *  页面的帧率自适应用：miss 率高说明 SD 供给跟不上 24fps 的消耗。
+ *  取的是 hit_all/miss_all（永不清零）而不是 s_pf.hit/miss —— 后者每 2s
+ *  被统计打印清零，拿它算增量会撞上一堆"清零后的假窗口"（2026-10-20
+ *  实测：自适应因此 42/84 每 2~4s 翻一次）。调用方只需处理 uint32 回绕
+ *  （后值小于前值时重建基线）。 */
+void app_sprite2d_pf_get(uint32_t *hit, uint32_t *miss)
+{
+    prv_pf_lock();
+    if (NULL != hit) {
+        *hit = s_pf.hit_all;
+    }
+    if (NULL != miss) {
+        *miss = s_pf.miss_all;
+    }
+    prv_pf_unlock();
+}
+
 static void prv_pf_task(void *args)
 {
     (void)args;
@@ -932,8 +988,10 @@ static void prv_pf_task(void *args)
 
             sp2d_pf_slot_t *slot;
 
+            /* 按**当前**播放头回收：读这批的 282ms 里 want 可能已经前移，
+             * 回收判定必须相对渲染此刻想要的帧，不是本批起点。 */
             prv_pf_lock();
-            slot = prv_pf_pick_slot();
+            slot = prv_pf_pick_slot(cur);
             prv_pf_unlock();
             if (NULL == slot) {
                 break;                          /* 全是 RENDER：等下一轮 */
@@ -1144,25 +1202,48 @@ static const sp2d_fr_t *prv_frame_at(uint32_t idx)
 
     /* ---- 预取线程开着：只从解码槽里取，绝不在 LVGL 线程里读卡 ---- */
     if (s_pf.on) {
-        /* 上一次取用的槽先放回（上一帧已经画完了）。放锁在 take 之前，
-         * 一次渲染只占一块槽，loader 那边永远偷不到正在画的那块。 */
-        prv_pf_release_held();
-
+        /* 先拿 exact 槽（锁内完成 want 更新 + 状态转换 + 统计）。
+         *
+         * 拿不到时**复读上一帧，不回退旧帧/组内首帧**（2026-10-20）：
+         * AI 播报期 SD 供给是脉冲式的，miss 时若回退到"同组更旧的帧"
+         * （prv_pf_acquire 的 back）甚至组内首帧（head_px 常驻），画面
+         * 就会在"新播的帧 ↔ 旧帧/开场 pose"之间来回跳 —— 用户实锤的
+         * "抽搐"。held 槽此刻仍是 RENDER，loader 偷不到、像素不会被
+         * 覆盖，复读它零竞争风险：宁可定住半拍，也不回退。 */
         sp2d_pf_slot_t *slot = prv_pf_acquire(idx, c);
 
         if (NULL != slot) {
+            /* 上一帧画完了，放它回池子。旧 held 是 RENDER、新槽刚从 READY
+             * 转来，不可能是同一块；先 take 后放，不会误伤新槽。 */
+            prv_pf_release_held();
+            s_pf.held        = slot;
             sg_data.fr.px    = slot->px;
             sg_data.fr.spans = slot->spans;
             sg_data.fr.w     = slot->w;
             sg_data.fr.h     = slot->h;
             sg_data.fr.dx    = slot->dx;
             sg_data.fr.dy    = slot->dy;
-            s_pf.held        = slot;
             return &sg_data.fr;
         }
 
-        /* 槽没好。**卡不在位** → 常驻 idle 兜底：掉线期间角色照样在动，
-         * 这是本模块一贯的策略（见 prv_read_frame 上面的注释）。 */
+        /* 没拿到 exact：保持上一帧不动。卡不在位时除外 —— 那时 loader 已经
+         * 停了，复读会把角色冻死，按老策略退常驻 idle，掉线期间照样在动。 */
+        if (NULL != s_pf.held && app_storage_card_present()) {
+            sp2d_pf_slot_t *h = s_pf.held;
+
+            sg_data.fr.px    = h->px;
+            sg_data.fr.spans = h->spans;
+            sg_data.fr.w     = h->w;
+            sg_data.fr.h     = h->h;
+            sg_data.fr.dx    = h->dx;
+            sg_data.fr.dy    = h->dy;
+            sg_stat.fallback = 1;
+            return &sg_data.fr;
+        }
+
+        /* 槽没好且没有上一帧可复读（本组第一帧 / 刚重置）。**卡不在位** →
+         * 常驻 idle 兜底：掉线期间角色照样在动，这是本模块一贯的策略
+         * （见 prv_read_frame 上面的注释）。 */
         if (!app_storage_card_present()) {
             sg_stat.fallback = 1;
             if (NULL != sg_data.idle_px) {

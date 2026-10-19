@@ -163,6 +163,15 @@ int app_sprite2d_clip_frames(int clip);
 const char *app_sprite2d_clip_name(int clip);
 
 /**
+ * @brief 读预取线程的命中/缺失累计（**只读，不清零** —— 清零归 2s 统计窗口）。
+ *
+ * 桌宠页的帧率自适用它算 miss 率：复读也算 miss，miss 率高 = SD 供不上，
+ * 该把拍子拉长保流畅。调用方自己算差量；计数为累计值（永不清零），
+ * 只有 uint32 回绕时后值会小于前值，遇到就重建基线。
+ */
+void app_sprite2d_pf_get(uint32_t *hit, uint32_t *miss);
+
+/**
  * @brief 取第 @a clip 组的**裁剪框**（相对锚点框左上角）。
  *
  * 角色在画布里的位置由它决定，而**原点 = 脚底中点 = `(dx + w/2, dy + h)`**
