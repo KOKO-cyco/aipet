@@ -13,6 +13,7 @@
 #include "tkl_fs.h"
 
 #include "app_spf6.h"
+#include "app_storage.h"                /* app_storage_busy_enter：与写卡互斥 */
 
 #define SPF6_MAGIC      "SPF7"
 #define SPF6_HDR_LEN    12u     /**< magic + nc + rsv + gw + gh */
@@ -69,13 +70,29 @@ void spf6_close(SPF6_FILE_T *pf)
 
 BOOL_T spf6_read_at(SPF6_FILE_T *pf, uint32_t off, uint32_t len, void *buf)
 {
+    BOOL_T ok;
+
     if (NULL == pf || NULL == pf->f) {
         return FALSE;
     }
+
+    /* SD 只有一组数据线，读和写**物理上不能同时进行**。这里是全部精灵读卡
+     * 的唯一入口（预取线程每批 40~64KB 都走它，实测 1~2.7MB/s），所以临界区
+     * 放在这一层最省事：拍照落盘时它会让路，落盘就不会被读到一半的块打断。
+     * 2026-10-20：照片写卡成批失败（`write data error, wr_status = 0x7`）
+     * 正是叠在预取读卡上发生的。锁不可重入，本函数内部不再套第二层。 */
+    app_storage_busy_enter();
+
     if (tkl_fseek(pf->f, (int64_t)off, SEEK_SET) != 0) {
+        app_storage_busy_leave();
         return FALSE;
     }
-    return ((int32_t)len == tkl_fread(buf, (int32_t)len, pf->f)) ? TRUE : FALSE;
+
+    ok = ((int32_t)len == tkl_fread(buf, (int32_t)len, pf->f)) ? TRUE : FALSE;
+
+    app_storage_busy_leave();
+
+    return ok;
 }
 
 int spf6_frame_span(const SPF6_FILE_T *pf, uint32_t idx, uint32_t *off, uint32_t *len)

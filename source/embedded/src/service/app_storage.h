@@ -108,6 +108,35 @@ OPERATE_RET app_storage_sdio_setup(void);
  *         `APP_STORAGE_SDIO_4BIT == 0` 时恒返回 1（SDK 默认）。 */
 int32_t app_storage_sdio_lines(void);
 
+/**
+ * @brief 把卡切成"能写"的那一档。**写卡前必须调，写完必须调 write_end 切回来。**
+ *
+ * 为什么需要它（2026-10-20 实测，方案 B）：这块板 **4 线每一档时钟都写不进**
+ * （`wr_status = 0x7`，13M/6.5M/3.2M/1.6M 全败），只有 **1 线 @13M 一次通过**；
+ * 可 1 线的读带宽只有 4 线的 1/6~1/10，常驻 1 线会让精灵预取从 22~60ms/批 掉到
+ * 150~320ms/批，桌宠肉眼可见掉帧。两件事本来只能二选一。
+ *
+ * 所以改成**分时使用**：平时停在 4 线（读最快）跑动画，只在按快门那一刻切到写档，
+ * 写完立刻切回 4 线。切档 = unmount -> 换线宽重起卡 -> mount，约 1~1.5 秒，而抓
+ * 图本身就要等 2 秒左右，用户感知不到。
+ *
+ * 线宽只在 `bk_sd_card_init()` 里生效一次，运行期改不了，所以只能整条重起 ——
+ * 切档期间本函数会占住 SD 临界区（见 app_storage_busy_enter），读者一律排队等着，
+ * 不会有人在卷消失的瞬间去读它。
+ *
+ * @note **锁不可重入**：本函数内部自己取放临界区，调用方别再包一层。
+ * @note 开机扫描没找到任何能写的档时返回 OPRT_COM_ERROR（那时 write_end 是空操作）。
+ *
+ * @return OPRT_OK 现在可以写；其它值：这张卡没有能写的档位 / 切档失败。
+ */
+OPERATE_RET app_storage_write_begin(void);
+
+/** @brief 切回读最快的那一档。必须与 `app_storage_write_begin()` 成对调用。 */
+void app_storage_write_end(void);
+
+/** @brief 开机扫到的"能写"线宽；**0 = 这张卡写不进**（照片一定存不上）。 */
+int32_t app_storage_write_lines(void);
+
 /** @brief 挂载 SD 卡（幂等，已挂载时直接成功）。 */
 OPERATE_RET app_storage_init(void);
 

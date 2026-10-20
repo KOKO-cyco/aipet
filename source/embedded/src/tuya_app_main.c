@@ -54,6 +54,7 @@
 #include "app_font.h"
 #include "app_key.h"
 #include "app_net.h"
+#include "app_perf.h"
 #include "app_pages.h"
 #include "app_preload.h"
 #include "app_splash.h"
@@ -286,6 +287,7 @@ static void user_main(void)
     app_net_init();             /* netmgr + AP/BLE 配网 + 状态巡检 */
     app_mem_sram("boot: net");
     app_weather_init();         /* 连上 WiFi 后拉取 3 日天气（订阅 APP_EVT_NET_STATUS） */
+    app_perf_init();            /* 串口诊断命令 cpuload / tasklist（抢占排查用） */
 
     /* 卡在位检测（CD 引脚 P8）。**必须在 board_register_hardware() 之前** ——
      * 开机画面要显示"正在识别存储卡"的状态，得先知道卡在不在。P8 是裸 GPIO 输入，

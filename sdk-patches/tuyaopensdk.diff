@@ -1,5 +1,5 @@
 diff --git a/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_board.c b/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_board.c
-index 1da60cf..9d37603 100755
+index 1da60cf8..9d37603d 100755
 --- a/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_board.c
 +++ b/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_board.c
 @@ -74,7 +74,20 @@ static OPERATE_RET __board_register_button(void)
@@ -25,7 +25,7 @@ index 1da60cf..9d37603 100755
          .pin   = BOARD_BUTTON_PIN,
          .level = BOARD_BUTTON_ACTIVE_LV,
 diff --git a/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_ex_module.c b/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_ex_module.c
-index b95880c..bcd39b8 100644
+index b95880c2..bcd39b89 100644
 --- a/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_ex_module.c
 +++ b/boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_ex_module.c
 @@ -253,11 +253,36 @@ static OPERATE_RET __board_register_printer(void)
@@ -65,8 +65,41 @@ index b95880c..bcd39b8 100644
  
      TUYA_CALL_ERR_RETURN(__board_register_camera());
  
+diff --git a/platform/platform_config.yaml b/platform/platform_config.yaml
+index f82d9926..38135b99 100755
+--- a/platform/platform_config.yaml
++++ b/platform/platform_config.yaml
+@@ -42,7 +42,7 @@ platforms:
+ - name: SIWX917
+   repo: https://github.com/tuya/TuyaOpen-SiliconLabs
+   branch: master
+-  commit: 7d70ea68ca7da24778ef9760355a92644046ffa2
++  commit: c4894d98c120c1e7d973b53b5d78ed83205ed37b
+ 
+ - name: L511G
+   repo: https://github.com/tuya/TuyaOpen-LYNQ
+diff --git a/src/ai_components/Kconfig b/src/ai_components/Kconfig
+index 79b93704..e30d9000 100755
+--- a/src/ai_components/Kconfig
++++ b/src/ai_components/Kconfig
+@@ -19,15 +19,6 @@ menu "configure ai components"
+             bool "English"
+     endchoice
+ 
+-    config ENABLE_AI_ALERT_TONE
+-        bool "use language-neutral alert tones instead of speech"
+-        default y
+-        help
+-            Play short language-neutral tones for all local alerts instead of
+-            the localized voice pack (Chinese/English speech). While enabled,
+-            the localized speech packs are excluded from the build entirely.
+-            Set to n to restore the voice prompts.
+-
+     rsource "ai_mode/Kconfig"
+     rsource "ai_audio/Kconfig"
+     rsource "ai_mcp/Kconfig"
 diff --git a/src/ai_components/ai_agent/src/ai_agent.c b/src/ai_components/ai_agent/src/ai_agent.c
-index 529ebec..f444b75 100755
+index 529ebecc..f444b75e 100755
 --- a/src/ai_components/ai_agent/src/ai_agent.c
 +++ b/src/ai_components/ai_agent/src/ai_agent.c
 @@ -62,6 +62,24 @@ OPERATE_RET __ai_agent_event_cb(AI_EVENT_TYPE type, AI_PACKET_PT ptype, AI_EVENT
@@ -95,7 +128,7 @@ index 529ebec..f444b75 100755
          if (AI_PT_AUDIO == ptype) {
  #if defined(ENABLE_COMP_AI_AUDIO) && (ENABLE_COMP_AI_AUDIO == 1)
 diff --git a/src/ai_components/ai_audio/src/ai_audio_input.c b/src/ai_components/ai_audio/src/ai_audio_input.c
-index d80da7b..5ac409c 100755
+index d80da7b2..5ac409c7 100755
 --- a/src/ai_components/ai_audio/src/ai_audio_input.c
 +++ b/src/ai_components/ai_audio/src/ai_audio_input.c
 @@ -100,6 +100,19 @@ static OPERATE_RET __audio_slice_check_and_send(bool *more_data)
@@ -193,7 +226,7 @@ index d80da7b..5ac409c 100755
  @brief Set wake-up state
  @param is_wakeup Wake-up flag
 diff --git a/src/ai_components/ai_audio/src/ai_audio_player.c b/src/ai_components/ai_audio/src/ai_audio_player.c
-index 01e6a0e..56959f8 100755
+index 01e6a0e2..56959f86 100755
 --- a/src/ai_components/ai_audio/src/ai_audio_player.c
 +++ b/src/ai_components/ai_audio/src/ai_audio_player.c
 @@ -49,6 +49,30 @@ static AI_PLAYLIST_HANDLE __s_tone_playlist = NULL;
@@ -325,7 +358,7 @@ index 01e6a0e..56959f8 100755
      switch (type)
      {
 diff --git a/src/ai_components/ai_main/include/ai_chat_main.h b/src/ai_components/ai_main/include/ai_chat_main.h
-index 96a9e53..e25608b 100755
+index 96a9e535..e25608b1 100755
 --- a/src/ai_components/ai_main/include/ai_chat_main.h
 +++ b/src/ai_components/ai_main/include/ai_chat_main.h
 @@ -87,6 +87,12 @@ typedef struct {
@@ -342,7 +375,7 @@ index 96a9e53..e25608b 100755
  @brief Set chat volume
  @param volume Volume value (0-100)
 diff --git a/src/ai_components/ai_main/src/ai_chat_main.c b/src/ai_components/ai_main/src/ai_chat_main.c
-index fd759e0..70d5704 100755
+index fd759e0d..70d57042 100755
 --- a/src/ai_components/ai_main/src/ai_chat_main.c
 +++ b/src/ai_components/ai_main/src/ai_chat_main.c
 @@ -31,6 +31,7 @@
@@ -687,8 +720,167 @@ index fd759e0..70d5704 100755
 +    return OPRT_OK;
 +}
 +
+diff --git a/src/ai_components/ai_main/src/ai_chat_ui.c b/src/ai_components/ai_main/src/ai_chat_ui.c
+index d30cb47a..f97617ef 100644
+--- a/src/ai_components/ai_main/src/ai_chat_ui.c
++++ b/src/ai_components/ai_main/src/ai_chat_ui.c
+@@ -16,18 +16,10 @@
+ #include "ai_ui_chat_chatbot.h"
+ #elif defined(ENABLE_AI_CHAT_GUI_OLED) && (ENABLE_AI_CHAT_GUI_OLED == 1)
+ #include "ai_ui_chat_oled.h"
+-#elif defined(ENABLE_AI_CHAT_GUI_GUIDED_WECHAT) && (ENABLE_AI_CHAT_GUI_GUIDED_WECHAT == 1)
+-#include "ai_ui_chat_guided_wechat.h"
+-#include "ai_ui_locale.h"
+ #endif
+ 
+ #include "ai_chat_main.h"
+ 
+-static AI_MODE_STATE_E sg_last_mode_state = AI_MODE_STATE_INIT;
+-static AI_CHAT_MODE_E  sg_last_chat_mode;
+-static bool            sg_last_mode_state_valid = false;
+-static bool            sg_last_chat_mode_valid = false;
+-
+ /***********************************************************
+ ************************macro define************************
+ ***********************************************************/
+@@ -45,45 +37,20 @@ static bool            sg_last_chat_mode_valid = false;
+ ***********************************************************/
+ static void __ai_chat_disp_mode_state(AI_MODE_STATE_E state)
+ {
+-    const char *status;
+-
+-    sg_last_mode_state = state;
+-    sg_last_mode_state_valid = true;
+-
+     switch (state) {
+     case AI_MODE_STATE_INIT:
+     case AI_MODE_STATE_IDLE:
+         ai_ui_disp_msg(AI_UI_DISP_EMOTION, (uint8_t *)EMOJI_NEUTRAL, strlen(EMOJI_NEUTRAL));
+-#if defined(ENABLE_AI_CHAT_GUI_GUIDED_WECHAT) && (ENABLE_AI_CHAT_GUI_GUIDED_WECHAT == 1)
+-        status = ai_ui_locale_tr(STANDBY, "Standby");
+-#else
+-        status = STANDBY;
+-#endif
+-        ai_ui_disp_msg(AI_UI_DISP_STATUS, (uint8_t *)status, strlen(status));
++        ai_ui_disp_msg(AI_UI_DISP_STATUS, (uint8_t *)STANDBY, strlen(STANDBY));
+         break;
+     case AI_MODE_STATE_LISTEN:
+-#if defined(ENABLE_AI_CHAT_GUI_GUIDED_WECHAT) && (ENABLE_AI_CHAT_GUI_GUIDED_WECHAT == 1)
+-        status = ai_ui_locale_tr(LISTENING, "Listening");
+-#else
+-        status = LISTENING;
+-#endif
+-        ai_ui_disp_msg(AI_UI_DISP_STATUS, (uint8_t *)status, strlen(status));
++        ai_ui_disp_msg(AI_UI_DISP_STATUS, (uint8_t *)LISTENING, strlen(LISTENING));
+         break;
+     case AI_MODE_STATE_SPEAK:
+-#if defined(ENABLE_AI_CHAT_GUI_GUIDED_WECHAT) && (ENABLE_AI_CHAT_GUI_GUIDED_WECHAT == 1)
+-        status = ai_ui_locale_tr(SPEAKING, "Speaking");
+-#else
+-        status = SPEAKING;
+-#endif
+-        ai_ui_disp_msg(AI_UI_DISP_STATUS, (uint8_t *)status, strlen(status));
++        ai_ui_disp_msg(AI_UI_DISP_STATUS, (uint8_t *)SPEAKING, strlen(SPEAKING));
+         break;
+     case AI_MODE_STATE_UPLOAD:
+-#if defined(ENABLE_AI_CHAT_GUI_GUIDED_WECHAT) && (ENABLE_AI_CHAT_GUI_GUIDED_WECHAT == 1)
+-        status = ai_ui_locale_tr(UPLOADING, "Uploading");
+-#else
+-        status = UPLOADING;
+-#endif
+-        ai_ui_disp_msg(AI_UI_DISP_STATUS, (uint8_t *)status, strlen(status));
++        ai_ui_disp_msg(AI_UI_DISP_STATUS, (uint8_t *)UPLOADING, strlen(UPLOADING));
+         break;
+     default:
+         break;
+@@ -147,36 +114,12 @@ void ai_chat_ui_handle_event(AI_NOTIFY_EVENT_T *event)
+     case AI_USER_EVT_MODE_SWITCH: {
+         AI_CHAT_MODE_E mode = (AI_CHAT_MODE_E)(event->data);
+         char          *name = ai_get_mode_name_str(mode);
+-        const char    *localized_name = name;
+-
+-        sg_last_chat_mode = mode;
+-        sg_last_chat_mode_valid = true;
+         if (NULL == name) {
+             PR_NOTICE("mode name str is null");
+             break;
+         }
+ 
+-#if defined(ENABLE_AI_CHAT_GUI_GUIDED_WECHAT) && (ENABLE_AI_CHAT_GUI_GUIDED_WECHAT == 1)
+-        if (ai_ui_locale_is_english()) {
+-            switch (mode) {
+-            case AI_CHAT_MODE_HOLD:
+-                localized_name = "Hold to talk";
+-                break;
+-            case AI_CHAT_MODE_ONE_SHOT:
+-                localized_name = "Push to talk";
+-                break;
+-            case AI_CHAT_MODE_WAKEUP:
+-                localized_name = "Wake word";
+-                break;
+-            case AI_CHAT_MODE_FREE:
+-                localized_name = "Free talk";
+-                break;
+-            default:
+-                break;
+-            }
+-        }
+-#endif
+-        ai_ui_disp_msg(AI_UI_DISP_CHAT_MODE, (uint8_t *)localized_name, strlen(localized_name));
++        ai_ui_disp_msg(AI_UI_DISP_CHAT_MODE, (uint8_t *)name, strlen(name));
+     } break;
+ 
+ #if defined(ENABLE_COMP_AI_PICTURE) && (ENABLE_COMP_AI_PICTURE == 1)
+@@ -195,21 +138,6 @@ void ai_chat_ui_handle_event(AI_NOTIFY_EVENT_T *event)
+     }
+ }
+ 
+-void ai_chat_ui_refresh_locale(void)
+-{
+-    if (sg_last_mode_state_valid) {
+-        __ai_chat_disp_mode_state(sg_last_mode_state);
+-    }
+-
+-    if (sg_last_chat_mode_valid) {
+-        AI_NOTIFY_EVENT_T mode_event = {
+-            .type = AI_USER_EVT_MODE_SWITCH,
+-            .data = (void *)(uintptr_t)sg_last_chat_mode,
+-        };
+-        ai_chat_ui_handle_event(&mode_event);
+-    }
+-}
+-
+ OPERATE_RET ai_chat_ui_init(void)
+ {
+     OPERATE_RET rt = OPRT_OK;
+@@ -218,18 +146,12 @@ OPERATE_RET ai_chat_ui_init(void)
+     PR_NOTICE("use custom ai chat ui, need register ui by user");
+ #else
+ 
+-#if defined(ENABLE_AI_CHAT_GUI_GUIDED_WECHAT) && (ENABLE_AI_CHAT_GUI_GUIDED_WECHAT == 1)
+-    ai_ui_locale_load();
+-#endif
+-
+ #if defined(ENABLE_AI_CHAT_GUI_WECHAT) && (ENABLE_AI_CHAT_GUI_WECHAT == 1)
+     TUYA_CALL_ERR_RETURN(ai_ui_chat_wechat_register());
+ #elif defined(ENABLE_AI_CHAT_GUI_CHATBOT) && (ENABLE_AI_CHAT_GUI_CHATBOT == 1)
+     TUYA_CALL_ERR_RETURN(ai_ui_chat_chatbot_register());
+ #elif defined(ENABLE_AI_CHAT_GUI_OLED) && (ENABLE_AI_CHAT_GUI_OLED == 1)
+     TUYA_CALL_ERR_RETURN(ai_ui_chat_oled_register());
+-#elif defined(ENABLE_AI_CHAT_GUI_GUIDED_WECHAT) && (ENABLE_AI_CHAT_GUI_GUIDED_WECHAT == 1)
+-    TUYA_CALL_ERR_RETURN(ai_ui_chat_guided_wechat_register());
+ #else
+ #error "please select ai chat present ui"
+ #endif
+@@ -239,4 +161,4 @@ OPERATE_RET ai_chat_ui_init(void)
+ 
+     return rt;
+ }
+-#endif
++#endif
+\ No newline at end of file
 diff --git a/src/ai_components/ai_mode/src/ai_mode_free.c b/src/ai_components/ai_mode/src/ai_mode_free.c
-index 2671284..5d7002e 100755
+index 26712846..5d7002e0 100755
 --- a/src/ai_components/ai_mode/src/ai_mode_free.c
 +++ b/src/ai_components/ai_mode/src/ai_mode_free.c
 @@ -86,7 +86,24 @@ static void __ai_mode_enter_idle(void)
@@ -821,8 +1013,190 @@ index 2671284..5d7002e 100755
          tuya_ai_input_stop();
      }
  
+diff --git a/src/ai_components/ai_ui/CMakeLists.txt b/src/ai_components/ai_ui/CMakeLists.txt
+index fafcf2e9..c3b44fd9 100755
+--- a/src/ai_components/ai_ui/CMakeLists.txt
++++ b/src/ai_components/ai_ui/CMakeLists.txt
+@@ -22,9 +22,6 @@ elseif (CONFIG_ENABLE_AI_CHAT_GUI_CHATBOT STREQUAL "y")
+ elseif (CONFIG_ENABLE_AI_CHAT_GUI_OLED STREQUAL "y")
+     file(GLOB OLED_SRCS ${MODULE_PATH}/src/oled/*.c)
+     list(APPEND LIB_SRCS ${OLED_SRCS})
+-elseif (CONFIG_ENABLE_AI_CHAT_GUI_GUIDED_WECHAT STREQUAL "y")
+-    file(GLOB GUIDED_WECHAT_SRCS CONFIGURE_DEPENDS ${MODULE_PATH}/src/guided_wechat/*.c)
+-    list(APPEND LIB_SRCS ${GUIDED_WECHAT_SRCS})
+ endif()
+ 
+ # Font sources
+@@ -52,8 +49,6 @@ set(LIB_PUBLIC_INC
+ 
+ if (CONFIG_ENABLE_AI_CHAT_GUI_WECHAT STREQUAL "y")
+     list(APPEND LIB_PUBLIC_INC ${MODULE_PATH}/src/wechat)
+-elseif (CONFIG_ENABLE_AI_CHAT_GUI_GUIDED_WECHAT STREQUAL "y")
+-    list(APPEND LIB_PUBLIC_INC ${MODULE_PATH}/src/guided_wechat)
+ endif()
+ 
+ ########################################
+diff --git a/src/ai_components/ai_ui/Kconfig b/src/ai_components/ai_ui/Kconfig
+index 3739e70a..2b311d43 100644
+--- a/src/ai_components/ai_ui/Kconfig
++++ b/src/ai_components/ai_ui/Kconfig
+@@ -24,15 +24,6 @@ if(!ENABLE_AI_CHAT_CUSTOM_UI)
+         config ENABLE_AI_CHAT_GUI_OLED
+             select ENABLE_LIBLVGL
+             bool "Use OLED ui"
+-
+-        config ENABLE_AI_CHAT_GUI_GUIDED_WECHAT
+-            select ENABLE_LIBLVGL
+-            select LV_USE_QRCODE
+-            bool "Use guided full WeChat-like ui"
+-            help
+-                Keep the complete WeChat chat/camera/album UI and add a
+-                first-run language, authorization and network guide together
+-                with device settings and about pages.
+     endchoice
+ 
+     config ENABLE_CIRCLE_UI_STYLE
+@@ -41,7 +32,7 @@ if(!ENABLE_AI_CHAT_CUSTOM_UI)
+         default n
+ 
+     config AI_UI_WECHAT_SCREEN_CORNER_RADIUS
+-        depends on ENABLE_AI_CHAT_GUI_WECHAT || ENABLE_AI_CHAT_GUI_GUIDED_WECHAT
++        depends on ENABLE_AI_CHAT_GUI_WECHAT
+         int "WeChat UI rounded-screen corner radius in pixels (NOT degrees)"
+         range 0 120
+         default 0
+@@ -133,7 +124,7 @@ if(ENABLE_AI_UI_ICON_FONT)
+ 
+     choice 
+         prompt "choose emo font type"
+-        default FONT_EMOJI_SIZE_32 if(ENABLE_AI_CHAT_GUI_WECHAT || ENABLE_AI_CHAT_GUI_GUIDED_WECHAT)
++        default FONT_EMOJI_SIZE_32 if(ENABLE_AI_CHAT_GUI_WECHAT)
+         default FONT_EMOJI_SIZE_64 if(ENABLE_AI_CHAT_GUI_CHATBOT)
+         default FONT_EMO_AWESOME   if(ENABLE_AI_CHAT_GUI_OLED)
+ 
+@@ -149,4 +140,4 @@ if(ENABLE_AI_UI_ICON_FONT)
+ 
+ endif
+ 
+-endif
++endif
+\ No newline at end of file
+diff --git a/src/ai_components/ai_ui/include/ai_ui_manage.h b/src/ai_components/ai_ui/include/ai_ui_manage.h
+index e6925fac..4dbe8ee7 100644
+--- a/src/ai_components/ai_ui/include/ai_ui_manage.h
++++ b/src/ai_components/ai_ui/include/ai_ui_manage.h
+@@ -50,11 +50,6 @@ typedef enum {
+     AI_UI_DISP_NETWORK,
+     AI_UI_DISP_CHAT_MODE,
+ 
+-    AI_UI_DISP_NETCFG_BEGIN,
+-    AI_UI_DISP_NETCFG_TOKEN_RECEIVED,
+-    AI_UI_DISP_NETCFG_COMPLETE,
+-    AI_UI_DISP_NETCFG_RESET,
+-
+     AI_UI_DISP_CAMERA_OPEN,
+     AI_UI_DISP_CAMERA_FLUSH,
+     AI_UI_DISP_CAMERA_THUMB,
+diff --git a/src/ai_components/assets/include/local_alert_src.h b/src/ai_components/assets/include/local_alert_src.h
+index 16c88b1b..c23419d2 100644
+--- a/src/ai_components/assets/include/local_alert_src.h
++++ b/src/ai_components/assets/include/local_alert_src.h
+@@ -23,8 +23,7 @@ extern "C" {
+ /***********************************************************
+ ***********************extern define***********************
+ ***********************************************************/
+-#if defined(ENABLE_AI_LANGUAGE_CHINESE) && (ENABLE_AI_LANGUAGE_CHINESE == 1) && \
+-    !(defined(ENABLE_AI_ALERT_TONE) && (ENABLE_AI_ALERT_TONE == 1))
++#if defined(ENABLE_AI_LANGUAGE_CHINESE) && (ENABLE_AI_LANGUAGE_CHINESE == 1)
+ 
+ extern const char media_src_ai_zh[4257];
+ extern const char media_src_free_chat_zh[10413];
+@@ -42,8 +41,7 @@ extern const char media_src_wakeup_chat_zh[11277];
+ extern const char media_src_wakeup_zh[3933];
+ #endif
+ 
+-#if defined(ENABLE_AI_LANGUAGE_ENGLISH) && (ENABLE_AI_LANGUAGE_ENGLISH == 1) && \
+-    !(defined(ENABLE_AI_ALERT_TONE) && (ENABLE_AI_ALERT_TONE == 1))
++#if defined(ENABLE_AI_LANGUAGE_ENGLISH) && (ENABLE_AI_LANGUAGE_ENGLISH == 1)
+ 
+ extern const char media_src_ai_en[7605];
+ extern const char media_src_free_chat_en[8469];
+@@ -61,15 +59,6 @@ extern const char media_src_wakeup_chat_en[8685];
+ 
+ #endif
+ 
+-#if defined(ENABLE_AI_ALERT_TONE) && (ENABLE_AI_ALERT_TONE == 1)
+-
+-extern const uint8_t media_src_tone_success[3780];
+-extern const uint8_t media_src_tone_wait[2520];
+-extern const uint8_t media_src_tone_fail[4032];
+-extern const uint8_t media_src_tone_wake[4032];
+-
+-#endif
+-
+ /***********************************************************
+ ********************function declaration********************
+ ***********************************************************/
+diff --git a/src/ai_components/assets/include/media_src.h b/src/ai_components/assets/include/media_src.h
+index af78ae8c..2b04c6db 100644
+--- a/src/ai_components/assets/include/media_src.h
++++ b/src/ai_components/assets/include/media_src.h
+@@ -22,24 +22,7 @@ extern "C" {
+ ***********************************************************/
+ #if defined(AI_PLAYER_ALERT_SOURCE_LOCAL) && (AI_PLAYER_ALERT_SOURCE_LOCAL == 1)
+ 
+-#if defined(ENABLE_AI_ALERT_TONE) && (ENABLE_AI_ALERT_TONE == 1)
+-/* Language-neutral tones, grouped by semantics:
+- * success (rising) / wait (single) / fail (falling) / wake (arpeggio) */
+-#define LOCAL_ALERT_SRC_POWER_ON                media_src_tone_wake
+-#define LOCAL_ALERT_SRC_NOT_ACTIVE              media_src_tone_wait
+-#define LOCAL_ALERT_SRC_NET_CFG                 media_src_tone_wait
+-#define LOCAL_ALERT_SRC_NET_CONNECTED           media_src_tone_success
+-#define LOCAL_ALERT_SRC_NET_FAILED              media_src_tone_fail
+-#define LOCAL_ALERT_SRC_NET_DISCONNECT          media_src_tone_fail
+-#define LOCAL_ALERT_SRC_LOW_BATTERY             media_src_tone_fail
+-#define LOCAL_ALERT_SRC_PLEASE_AGAIN            media_src_tone_wait
+-#define LOCAL_ALERT_SRC_LONG_KEY_TALK           media_src_tone_wake
+-#define LOCAL_ALERT_SRC_KEY_TALK                media_src_tone_wake
+-#define LOCAL_ALERT_SRC_WAKEUP_TALK             media_src_tone_wake
+-#define LOCAL_ALERT_SRC_FREE_TALK               media_src_tone_wake
+-#define LOCAL_ALERT_SRC_WAKEUP                  media_src_tone_wake
+-
+-#elif defined(ENABLE_AI_LANGUAGE_CHINESE) && (ENABLE_AI_LANGUAGE_CHINESE == 1)
++#if defined(ENABLE_AI_LANGUAGE_CHINESE) && (ENABLE_AI_LANGUAGE_CHINESE == 1)
+ #define LOCAL_ALERT_SRC_POWER_ON                media_src_prologue_zh
+ #define LOCAL_ALERT_SRC_NOT_ACTIVE              media_src_network_conn_zh
+ #define LOCAL_ALERT_SRC_NET_CFG                 media_src_network_config_zh
+diff --git a/src/ai_components/assets/src/local_alert_src_en.c b/src/ai_components/assets/src/local_alert_src_en.c
+index 2daa78eb..310d1748 100755
+--- a/src/ai_components/assets/src/local_alert_src_en.c
++++ b/src/ai_components/assets/src/local_alert_src_en.c
+@@ -4,8 +4,7 @@
+ 
+ #include "local_alert_src.h"
+ 
+-#if defined(ENABLE_AI_LANGUAGE_ENGLISH) && (ENABLE_AI_LANGUAGE_ENGLISH == 1) && \
+-    !(defined(ENABLE_AI_ALERT_TONE) && (ENABLE_AI_ALERT_TONE == 1))
++#if defined(ENABLE_AI_LANGUAGE_ENGLISH) && (ENABLE_AI_LANGUAGE_ENGLISH == 1)
+ 
+ // ai_en
+ const char media_src_ai_en[7605] = {
+diff --git a/src/ai_components/assets/src/local_alert_src_zh.c b/src/ai_components/assets/src/local_alert_src_zh.c
+index c61383d4..a393cd19 100755
+--- a/src/ai_components/assets/src/local_alert_src_zh.c
++++ b/src/ai_components/assets/src/local_alert_src_zh.c
+@@ -4,8 +4,7 @@
+ 
+ #include "local_alert_src.h"
+ 
+-#if defined(ENABLE_AI_LANGUAGE_CHINESE) && (ENABLE_AI_LANGUAGE_CHINESE == 1) && \
+-    !(defined(ENABLE_AI_ALERT_TONE) && (ENABLE_AI_ALERT_TONE == 1))
++#if defined(ENABLE_AI_LANGUAGE_CHINESE) && (ENABLE_AI_LANGUAGE_CHINESE == 1)
+ // ai_zh
+ const char media_src_ai_zh[4257] = {
+     0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23, 0x54, 0x53, 0x53, 0x45, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x00, 0x03, 0x4C, 0x61, 0x76, 0x66, 0x35, 0x38, 0x2E, 0x37, 0x36, 0x2E, 0x31, 0x30, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xF3, 0x58, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x49, 0x6E, 0x66, 0x6F, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x1C, 0x00, 0x00, 0x10, 0x74, 0x00, 0x13, 0x13, 0x13, 0x1C, 0x1C, 0x1C, 0x1C, 0x25, 0x25, 0x25, 0x2D, 0x2D, 0x2D, 0x2D, 0x36, 0x36, 0x36, 0x3F, 0x3F, 0x3F, 0x3F, 0x48, 0x48, 0x48, 0x50, 0x50, 0x50, 0x50, 0x59, 0x59, 0x59, 0x59, 0x62, 0x62, 0x62, 0x6B, 0x6B, 0x6B, 0x6B, 0x73, 0x73, 0x73, 0x7C, 0x7C, 0x7C, 0x7C, 0x85, 0x85, 0x85, 0x8E, 0x8E, 0x8E, 0x8E, 0x96, 0x96, 0x96, 0x96, 0x9F, 0x9F, 0x9F, 0xA8, 0xA8, 0xA8, 0xA8, 0xB1, 0xB1, 0xB1, 0xB9, 0xB9, 0xB9, 0xB9, 0xC2, 0xC2, 0xC2, 0xCB, 0xCB, 0xCB, 0xCB, 0xD4, 0xD4, 0xD4, 0xD4, 0xDC, 0xDC, 0xDC, 0xE5, 0xE5, 0xE5, 0xE5, 0xEE, 0xEE, 0xEE, 0xF7, 0xF7, 0xF7, 0xF7, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x4C, 0x61, 0x76, 0x63, 0x35, 0x38, 0x2E, 0x31, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x24, 0x02, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x74, 0x8C, 0x48, 0xEA, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xF3, 0x48, 0xC4, 0x00, 0x00, 0x00, 0x03, 0x48, 0x00, 0x00, 0x00, 0x00, 0x12, 0x14, 0xFE, 0xBF, 0x4F, 0xCC, 0x0C, 0xFC, 0xBB, 0xCD, 0x65, 0x4D, 0x91, 0x60, 0x48, 0x88, 0x2E, 0xC3, 0x20, 0xBA, 0x0A, 0xB6, 0x9E, 0x71, 0xB8, 0x21, 0x69, 0x93, 0xA2, 0x68, 0xCC, 0x3F, 0x12, 0x13, 0xC1, 0xB0, 0x21, 0x9D, 0x1A, 0x13, 0x0E, 0xDA, 0x76, 0x3E, 0xBD, 0x26, 0x7A, 0xF4, 0xDC, 0xDB, 0x44, 0xE5, 0xF3, 0x73, 0x60, 0x39, 0x41, 0x1F, 0xCB, 0x0B, 0xDC, 0xBD, 0x2F, 0xBB, 0x3F, 0xB3, 0xFF, 0xB3, 0x3F, 0xA5, 0xCE, 0x9E, 0xA6, 0x62, 0x1D, 0x3D, 0x15, 0x9D, 0x9F, 0xFF, 0xF7, 0x67, 0x6E, 0xCF, 0xFF, 0xF5, 0x42, 0x98, 0x70, 0x20, 0x7C, 0x22, 0xCF, 0xFC, 0xC1, 0xAF, 0xE3, 0x1A, 0x67, 0x34, 0x2C, 0x2C, 0x1B, 0x00, 0x1F, 0x18, 0x40, 0xE3, 0x18, 0xA4, 0x70, 0x12, 0x0E, 0x35, 0xD6, 0xCE, 0xEE, 0x3D, 0x65, 0xB3, 0x54, 0xA5, 0xE3, 0x73, 0xDD, 0xC9, 0xB7, 0xDD, 0x21, 0xD2, 0x2D, 0xFF, 0xF3, 0x48, 0xC4, 0x83, 0x1A, 0x42, 0x91, 0x58, 0x2A, 0xC3, 0x0A, 0x9C, 0x83, 0xCE, 0xBE, 0xF1, 0xA9, 0x0C, 0x5E, 0x18, 0xAA, 0xFF, 0xC7, 0x80, 0x79, 0xB9, 0x21, 0x68, 0x96, 0xFF, 0xD2, 0x05, 0x48, 0x91, 0x98, 0x37, 0x67, 0x2F, 0x86, 0x62, 0x58, 0x96, 0xF3, 0x97, 0x60, 0x90, 0x4C, 0x8F, 0x60, 0x76, 0x33, 0x8A, 0xFD, 0x12, 0x45, 0xF7, 0x99, 0xBC, 0x06, 0x0A, 0xE6, 0xEC, 0x2C, 0xDF, 0x9C, 0xB5, 0x28, 0xE5, 0xF3, 0xB1, 0x83, 0xFC, 0xA9, 0x9B, 0x4E, 0x51, 0xCB, 0xB0, 0xB1, 0x67, 0x3E, 0xC5, 0x6F, 0x7D, 0xDB, 0x9C, 0x28, 0x5E, 0xBD, 0xFC, 0xC5, 0x8B, 0x0C, 0x1C, 0xEB, 0xDF, 0xF6, 0xF3, 0x87, 0x06, 0x06, 0x11, 0x7D, 0xE1, 0x5E, 0xBF, 0xF7, 0xF9, 0xB7, 0x37, 0x3A, 0xEC, 0x2C, 0x72, 0x67, 0x29, 0x3F, 0x37, 0x61, 0xCF, 0xA5, 0x7D, 0x85, 0x8E, 0x30, 0x79, 0x6A, 0x24, 0x12, 0x19, 0x56, 0xE3, 0x7F, 0x8B, 0x3A, 0xF9, 0x4C, 0x84, 0xFD, 0xB8, 0x1C, 0xF5, 0x91, 0xFF, 0xF3, 0x48, 0xC4, 0x9D, 0x31, 0xAC, 0x15, 0xB4, 0x0D, 0x58, 0x60, 0x00, 0x7D, 0x2F, 0xB7, 0x63, 0xBD, 0x85, 0x8B, 0x3A, 0x66, 0x94, 0x38, 0x3C, 0xDC, 0x58, 0xBC, 0xEC, 0xCD, 0xF9, 0xCE, 0x9B, 0xD3, 0xB6, 0xEC, 0x39, 0x39, 0xD3, 0x7C, 0xA4, 0xCE, 0x75, 0xE9, 0x38, 0xC2, 0xC7, 0x26, 0x93, 0xAD, 0xAF, 0xF9, 0x9A, 0x71, 0xDA, 0x02, 0x01, 0x10, 0x10, 0x06, 0x44, 0x42, 0x21, 0x10, 0x9B, 0xCE, 0x2D, 0xE7, 0x67, 0x32, 0x6D, 0xE7, 0xFA, 0xC7, 0x0B, 0xA2, 0x43, 0xE6, 0x2E, 0x2B, 0xBC, 0x73, 0xCC, 0x58, 0x18, 0x04, 0x20, 0xA4, 0x26, 0xEA, 0x58, 0x3E, 0xC0, 0x10, 0x82, 0xD3, 0x2F, 0x41, 0xD4, 0xCC, 0x17, 0xC0, 0x38, 0xC1, 0x29, 0x86, 0xC0, 0xDE, 0xD6, 0x5C, 0x36, 0x70, 0xC6, 0x62, 0xF4, 0x4E, 0x63, 0x99, 0x42, 0xDF, 0x7C, 0x3A, 0x71, 0x5C, 0x11, 0xE0, 0xE5, 0x08, 0x20, 0x6A, 0xA5, 0xE9, 0xFD, 0xB8, 0x9D, 0x08, 0x68, 0xB8, 0xC8, 0x28, 0xB2, 0xCB, 0x62, 0xE7, 0xFF, 0xF3, 0x48, 0xC4, 0x59, 0x2E, 0x6C, 0x16, 0x18, 0xDF, 0x9B, 0x90, 0x00, 0x7D, 0x7F, 0xFD, 0x56, 0x2F, 0x0C, 0xC1, 0x12, 0x17, 0x21, 0x10, 0x17, 0x21, 0x54, 0x83, 0x8F, 0x0F, 0xED, 0xDF, 0xEB, 0xA7, 0xF9, 0x03, 0x22, 0x64, 0x3C, 0xB6, 0x41, 0x07, 0x79, 0x0C, 0x22, 0x04, 0x61, 0x04, 0x2F, 0x90, 0x4A, 0xFD, 0x7E, 0xDA, 0xB6, 0xEB, 0xBF, 0xB3, 0x14, 0xC8, 0x39, 0x3A, 0x45, 0xD4, 0x41, 0xCB, 0x04, 0x10, 0x9E, 0x20, 0x87, 0x86, 0x60, 0xAA, 0x45, 0xC9, 0xD5, 0xEE, 0xB6, 0xEF, 0xFF, 0x5F, 0xD7, 0xFF, 0xF5, 0x8E, 0x79, 0x5C, 0x8B, 0x96, 0xC9, 0xC2, 0x5C, 0x80, 0x11, 0x02, 0x60, 0x9C, 0x2F, 0x91, 0x02, 0x99, 0x3E, 0x62, 0x4F, 0xA8, 0x89, 0x94, 0x08, 0x85, 0x04, 0x02, 0x01, 0x47, 0x36, 0x4C, 0x44, 0x14, 0x45, 0x85, 0x3A, 0x02, 0x6E, 0x87, 0x4B, 0xAB, 0x29, 0xCB, 0x7A, 0xEB, 0x59, 0x81, 0x75, 0xAD, 0x68, 0x1D, 0x11, 0x40, 0x4A, 0xEA, 0x19, 0x3B, 0x10, 0x81, 0xFF, 0xF3, 0x48, 0xC4, 0x22, 0x21, 0xFA, 0x76, 0x30, 0x2B, 0x9B, 0x40, 0x01, 0xB1, 0x49, 0x1C, 0x7A, 0xE7, 0x13, 0x12, 0x2A, 0x31, 0x29, 0x2A, 0x6F, 0xE8, 0x91, 0x52, 0x95, 0x05, 0xA2, 0xE3, 0x9F, 0x9C, 0x65, 0x63, 0x0E, 0x78, 0xC9, 0x5B, 0x9E, 0xAA, 0xA6, 0x11, 0x26, 0x3B, 0x92, 0x17, 0x3A, 0x59, 0xA2, 0xE3, 0x48, 0xAE, 0x39, 0xF9, 0x83, 0x7A, 0xA3, 0xC9, 0x89, 0x5A, 0x56, 0x8B, 0x68, 0xFE, 0xFA, 0xE5, 0xA6, 0xAA, 0xAA, 0x3A, 0x9F, 0x58, 0x78, 0x39, 0x9A, 0xE6, 0x83, 0x0A, 0x58, 0x43, 0x3F, 0x32, 0x52, 0x36, 0xC4, 0x3D, 0xBF, 0x97, 0x40, 0x26, 0x3A, 0x54, 0x37, 0xAB, 0x26, 0x92, 0xA1, 0x17, 0xF2, 0x8F, 0xFB, 0x35, 0x43, 0x75, 0x0B, 0x70, 0xFF, 0xAB, 0x53, 0xAA, 0xDB, 0x23, 0x3A, 0x42, 0x15, 0x6A, 0x68, 0x20, 0x87, 0xE0, 0x10, 0x0C, 0x97, 0x3D, 0x66, 0x7C, 0x6D, 0xFE, 0x2F, 0x7B, 0xBF, 0x8F, 0xBD, 0xE6, 0xDB, 0xDE, 0x33, 0x3E, 0xCF, 0xB5, 0xFD, 0xDD, 0xFF, 0xF3, 0x48, 0xC4, 0x1D, 0x1D, 0xDB, 0xF2, 0x2C, 0x55, 0xCF, 0x18, 0x01, 0x80, 0x62, 0xE6, 0x70, 0xA5, 0x3C, 0xFB, 0x4A, 0x11, 0xA7, 0x15, 0xCE, 0xE9, 0xCC, 0xD6, 0xFC, 0xF6, 0xA6, 0x50, 0x8F, 0x4E, 0x7F, 0x4D, 0x2E, 0x84, 0x9A, 0xBC, 0x23, 0xB5, 0x66, 0xDC, 0x2A, 0x69, 0xE9, 0x74, 0xC9, 0xC9, 0xA7, 0x4D, 0xDA, 0xC7, 0xFB, 0x96, 0x45, 0xFA, 0x58, 0x4F, 0x3D, 0x0B, 0x99, 0x4E, 0x6C, 0x27, 0x2A, 0xE7, 0x39, 0x74, 0xF8, 0xA6, 0x9C, 0x39, 0x7A, 0x44, 0x57, 0x86, 0xBE, 0x48, 0x23, 0xB2, 0x6A, 0x44, 0x7C, 0x39, 0xBD, 0xDE, 0x44, 0x33, 0xF2, 0x75, 0xBA, 0x13, 0x16, 0xC5, 0xCD, 0xCF, 0xAC, 0x11, 0xAF, 0x81, 0x14, 0x95, 0x08, 0x10, 0x1F, 0xD4, 0xD7, 0x20, 0x88, 0xB2, 0xE1, 0x9A, 0x70, 0xF7, 0x64, 0x51, 0x22, 0x05, 0xE9, 0xB4, 0x83, 0x6E, 0x40, 0xCA, 0xD1, 0x62, 0x0D, 0x1C, 0x94, 0xE0, 0x8B, 0x6A, 0x72, 0x4A, 0x97, 0x3A, 0x73, 0x82, 0x34, 0x8E, 0x13, 0xBF, 0xFF, 0xF3, 0x48, 0xC4, 0x28, 0x23, 0x93, 0xFE, 0x18, 0x42, 0xC2, 0x46, 0x3D, 0x5A, 0x8C, 0xA9, 0x44, 0x83, 0x22, 0x31, 0x05, 0xAB, 0x45, 0x61, 0x44, 0x32, 0x3C, 0x0A, 0x78, 0x4A, 0x6D, 0xE7, 0x1F, 0x38, 0x17, 0x66, 0x4A, 0xFE, 0x83, 0xF4, 0xA0, 0xB2, 0x21, 0x19, 0xD6, 0x0C, 0x5E, 0xF1, 0x9C, 0xF1, 0x0A, 0xF1, 0xD1, 0xD8, 0xA1, 0x4D, 0xE4, 0x28, 0x1C, 0x46, 0x2F, 0x13, 0x04, 0xA0, 0xF1, 0x49, 0xE9, 0x07, 0x4A, 0x15, 0xC5, 0x11, 0xD1, 0x23, 0xD4, 0x89, 0xCE, 0x44, 0x17, 0x19, 0xE1, 0xD3, 0x06, 0x24, 0x11, 0xC2, 0x7D, 0xE5, 0xF2, 0xA6, 0xCF, 0x10, 0x41, 0x43, 0xE5, 0x24, 0x70, 0x87, 0x2F, 0x67, 0xD7, 0x66, 0x69, 0x0C, 0x89, 0xF8, 0x6A, 0x47, 0x96, 0x56, 0x39, 0x46, 0xC3, 0xF5, 0xE8, 0xD5, 0x09, 0x10, 0x04, 0xC4, 0x30, 0x22, 0x01, 0x03, 0xA3, 0xA7, 0xE0, 0x8C, 0x58, 0xA2, 0xB0, 0xE5, 0xCD, 0x56, 0xBA, 0xE3, 0x77, 0x9D, 0xA5, 0x35, 0xCE, 0xD3, 0x81, 0xEB, 0xFF, 0xF3, 0x48, 0xC4, 0x1C, 0x19, 0xF0, 0x6A, 0x28, 0x2A, 0xCA, 0x4C, 0x01, 0xA5, 0x56, 0x49, 0xBE, 0x2E, 0x37, 0x13, 0xF9, 0x53, 0x64, 0x2C, 0x61, 0x23, 0xC7, 0x32, 0xD0, 0x5B, 0x93, 0xDB, 0xC4, 0xF4, 0x42, 0xFF, 0xE6, 0x30, 0xD5, 0xBE, 0xF7, 0xD5, 0x92, 0xD1, 0xCF, 0xFF, 0x31, 0xDA, 0xF6, 0xD7, 0x43, 0x4D, 0xE1, 0xA1, 0x9C, 0xFC, 0xD4, 0x98, 0x97, 0xFA, 0x26, 0xD8, 0x35, 0xC3, 0x37, 0x5E, 0xB5, 0x2F, 0xDE, 0x1F, 0xD5, 0x6F, 0x6A, 0x8F, 0x52, 0x93, 0x22, 0xB9, 0xDB, 0x2B, 0x91, 0xC5, 0xEC, 0xE9, 0xBD, 0xEE, 0xBB, 0xCE, 0x99, 0x20, 0x52, 0xB2, 0xCA, 0x8F, 0x60, 0xCE, 0x1E, 0xEA, 0xD7, 0x6F, 0x76, 0xF5, 0xFC, 0x7B, 0x7F, 0xBF, 0xBD, 0xDB, 0xBB, 0xCC, 0x7F, 0x7A, 0xD7, 0x08, 0xD1, 0x6F, 0xFE, 0x64, 0xB1, 0xD7, 0xA2, 0x2E, 0x64, 0x45, 0x13, 0xC9, 0x6C, 0x43, 0x87, 0xE9, 0x77, 0xA5, 0x2B, 0xEC, 0x2C, 0xC9, 0x30, 0x4D, 0x2D, 0x2E, 0x16, 0x0C, 0xBD, 0x86, 0xFF, 0xF3, 0x48, 0xC4, 0x37, 0x1A, 0x71, 0x3A, 0x28, 0x09, 0x59, 0x18, 0x00, 0x92, 0x08, 0x4F, 0x0B, 0xA9, 0xCD, 0x4B, 0x0F, 0x0F, 0x16, 0x09, 0x38, 0xC9, 0x69, 0xC6, 0x38, 0x5E, 0x59, 0xD3, 0xE6, 0x00, 0xE5, 0x2E, 0x72, 0xD6, 0x23, 0x8B, 0x0B, 0x34, 0x8B, 0x43, 0x05, 0x2D, 0x54, 0xFE, 0xDC, 0x6A, 0x5E, 0x52, 0x1C, 0x63, 0xC7, 0x22, 0x61, 0xFC, 0x5C, 0x2A, 0x72, 0xB4, 0x1C, 0xB1, 0x95, 0x80, 0x68, 0x06, 0x61, 0xF8, 0xD4, 0x5A, 0x3D, 0x16, 0x0D, 0x86, 0xC3, 0x61, 0xEA, 0x36, 0x59, 0x44, 0x7B, 0xEE, 0xA2, 0x60, 0x50, 0xE5, 0xC6, 0x0B, 0x59, 0x2F, 0xC4, 0x60, 0x8C, 0x39, 0xC3, 0xD8, 0xE5, 0x18, 0x0F, 0x1C, 0x01, 0x34, 0x0D, 0xC0, 0x1E, 0x02, 0xE0, 0x53, 0x1A, 0x41, 0xF7, 0xE3, 0x8C, 0xA6, 0x27, 0x03, 0x8C, 0xA6, 0x38, 0x08, 0x02, 0x4A, 0x66, 0x4B, 0x7E, 0x01, 0xAC, 0x15, 0xF1, 0x2B, 0x19, 0xC1, 0x5F, 0x36, 0x28, 0x15, 0x09, 0x80, 0x9F, 0x8F, 0x71, 0x3B, 0xFF, 0xF3, 0x48, 0xC4, 0x50, 0x31, 0x7C, 0x0F, 0x1E, 0xFF, 0x8D, 0x68, 0x47, 0xFE, 0x23, 0x63, 0xCD, 0x43, 0x2C, 0x90, 0x34, 0x29, 0x8F, 0x03, 0x73, 0x71, 0x96, 0x6F, 0xFF, 0xC6, 0x20, 0xF0, 0x18, 0x42, 0x51, 0x8B, 0x86, 0x93, 0x40, 0xE3, 0x1E, 0x25, 0xC2, 0xEA, 0xC4, 0xEC, 0xAC, 0xBE, 0x6B, 0xFF, 0xE8, 0x1A, 0x20, 0x5C, 0x62, 0xE1, 0x71, 0x8A, 0x19, 0xA1, 0x51, 0x1A, 0x91, 0x40, 0xA0, 0x5F, 0x28, 0x1E, 0x34, 0x5A, 0xFF, 0xFF, 0xB5, 0x0D, 0x06, 0xA0, 0x60, 0x81, 0x71, 0x06, 0x25, 0x36, 0x5A, 0xD0, 0x66, 0x4D, 0xD1, 0x45, 0x33, 0x34, 0xBF, 0xFF, 0xFC, 0xF1, 0xB9, 0x50, 0xC2, 0x30, 0xD4, 0x12, 0x03, 0x10, 0xBC, 0x16, 0x12, 0xE3, 0xDC, 0x9C, 0x3C, 0x0D, 0x4F, 0x9A, 0x16, 0xA2, 0x23, 0x67, 0xA6, 0xD3, 0x41, 0xD8, 0x62, 0x4A, 0x4E, 0xA4, 0x68, 0x92, 0xCD, 0xD0, 0x37, 0x36, 0x16, 0x0C, 0x3D, 0xFF, 0xF5, 0x11, 0x0E, 0x00, 0x63, 0xDB, 0xFC, 0xAD, 0x21, 0x92, 0xFF, 0xF3, 0x48, 0xC4, 0x0D, 0x1C, 0x31, 0x9A, 0xD0, 0xAB, 0xC5, 0x60, 0x00, 0x07, 0xB1, 0xDE, 0xD9, 0xF9, 0x3F, 0x3B, 0xA6, 0x2A, 0x08, 0xC5, 0x00, 0x20, 0x24, 0x15, 0x1C, 0xB4, 0xFC, 0xDA, 0x15, 0xAE, 0x19, 0x15, 0x4A, 0xC6, 0x84, 0xB3, 0x37, 0x26, 0x5D, 0xAD, 0x68, 0x74, 0x86, 0xAC, 0xF0, 0xCE, 0x03, 0xCD, 0x5F, 0x04, 0x1B, 0x96, 0xB1, 0xCB, 0x91, 0xB8, 0xFB, 0x6F, 0xB0, 0xC3, 0x14, 0x99, 0xAE, 0xBB, 0x82, 0xC1, 0xB0, 0xC0, 0x20, 0x70, 0x90, 0x54, 0xC0, 0x10, 0x3E, 0x18, 0xAC, 0x88, 0xC3, 0xA1, 0x22, 0xEA, 0x08, 0x20, 0x63, 0x5B, 0xFF, 0xFF, 0xFA, 0xA9, 0x18, 0x00, 0x28, 0xBB, 0xDA, 0x7B, 0x87, 0x89, 0x0B, 0x15, 0x03, 0xDE, 0x8A, 0x63, 0x22, 0xED, 0x42, 0x52, 0x6A, 0xAC, 0xEC, 0x54, 0xF8, 0x24, 0x06, 0x8C, 0xB2, 0xC7, 0x66, 0x4B, 0x71, 0x48, 0x1C, 0xCC, 0xFD, 0x9A, 0x8B, 0x1C, 0x71, 0x6F, 0x1A, 0xEB, 0x27, 0xFE, 0x72, 0xF4, 0x38, 0x28, 0x80, 0xA6, 0xFF, 0xF3, 0x48, 0xC4, 0x1F, 0x1C, 0x89, 0x8A, 0xEF, 0x1E, 0x1B, 0xD4, 0x84, 0x05, 0xE5, 0xD6, 0xE8, 0xBE, 0xE8, 0x2B, 0x0D, 0x81, 0x04, 0x06, 0xC7, 0x56, 0xCB, 0x66, 0xB1, 0xCE, 0x50, 0x55, 0x1E, 0x29, 0xFF, 0xD7, 0x38, 0x7C, 0x3E, 0x1F, 0x8F, 0xCF, 0xA5, 0x33, 0x54, 0x86, 0x75, 0x48, 0x48, 0x81, 0x3A, 0x20, 0x92, 0x84, 0xA0, 0x98, 0x81, 0x5A, 0x81, 0xA0, 0xD0, 0x54, 0x3C, 0x8B, 0xE5, 0x41, 0x50, 0x58, 0x13, 0x0F, 0xFC, 0xF7, 0xFF, 0xF4, 0x01, 0x16, 0xE9, 0x6B, 0x8C, 0xAD, 0x86, 0x0F, 0x80, 0x49, 0x1E, 0x72, 0x07, 0x45, 0xC4, 0x44, 0x51, 0x41, 0x91, 0x41, 0x3B, 0x75, 0xD5, 0x0B, 0xDC, 0x46, 0xD8, 0x04, 0x10, 0x9D, 0xD7, 0x39, 0x7A, 0x29, 0x2D, 0x1E, 0x02, 0x4C, 0x36, 0x08, 0xE2, 0x7E, 0x1E, 0x47, 0x01, 0xA5, 0xD9, 0x6A, 0xF3, 0x03, 0x10, 0xBD, 0x1F, 0xEB, 0xFD, 0x66, 0x65, 0xF2, 0x5C, 0xA8, 0xFF, 0xFE, 0x9D, 0x33, 0x86, 0x84, 0xB7, 0xEF, 0xBA, 0x9C, 0xFF, 0xF3, 0x48, 0xC4, 0x2F, 0x1C, 0x4B, 0xAA, 0xEF, 0x1E, 0x0B, 0x44, 0x9C, 0x0C, 0x38, 0x19, 0x05, 0x2D, 0xB7, 0x91, 0x1A, 0x80, 0x00, 0x2E, 0x18, 0xED, 0xFA, 0x10, 0x20, 0x03, 0x07, 0x20, 0x51, 0x3F, 0x66, 0x66, 0x39, 0xCE, 0x85, 0x50, 0x16, 0xEE, 0xAD, 0x21, 0x04, 0x38, 0x82, 0x8A, 0x63, 0x3F, 0xFF, 0x4C, 0xBF, 0xFF, 0xFF, 0xFF, 0x53, 0x55, 0xBB, 0x50, 0x8B, 0x23, 0x1D, 0x15, 0x1C, 0xDB, 0x32, 0x6A, 0x8A, 0xEC, 0xAC, 0xA2, 0x5B, 0x68, 0x90, 0xA3, 0x4E, 0xFA, 0x09, 0xAA, 0x0D, 0xFA, 0x64, 0xE8, 0xC2, 0xDB, 0x76, 0xE9, 0x2F, 0xEC, 0x6A, 0x8A, 0x13, 0x4B, 0xB9, 0x4A, 0x83, 0x30, 0x68, 0x09, 0x49, 0xBC, 0x3B, 0xFF, 0xE4, 0x81, 0x00, 0x31, 0x40, 0x24, 0x93, 0x66, 0xAF, 0xC8, 0x3D, 0xE9, 0x86, 0x91, 0x40, 0xE4, 0xF1, 0xFF, 0xB8, 0x83, 0x10, 0x3C, 0xE3, 0x60, 0x18, 0x8A, 0x3D, 0xBF, 0xFA, 0x1A, 0x38, 0x99, 0x4B, 0xB0, 0x8B, 0xAF, 0x08, 0x70, 0x2B, 0xE2, 0xFF, 0xF3, 0x48, 0xC4, 0x40, 0x1D, 0x52, 0x56, 0xEE, 0xFE, 0x59, 0x86, 0xF0, 0x54, 0xBD, 0xCC, 0x20, 0xC2, 0xC2, 0x18, 0x9D, 0x24, 0x93, 0xA7, 0x21, 0x1A, 0xB7, 0xFB, 0x1F, 0xC7, 0x85, 0x4C, 0x4A, 0x34, 0x93, 0x32, 0x76, 0x11, 0x56, 0x9F, 0xD5, 0xFF, 0xF7, 0x16, 0x72, 0x42, 0x97, 0x38, 0xC8, 0xC5, 0x0E, 0x7B, 0x07, 0x3C, 0x46, 0x66, 0xB2, 0x6C, 0x1C, 0x84, 0x0C, 0x8A, 0x28, 0x81, 0x86, 0x85, 0x6A, 0x0B, 0x99, 0x37, 0xB1, 0xC0, 0x93, 0x31, 0xEB, 0x37, 0xB2, 0x96, 0x34, 0xC7, 0xB8, 0xB9, 0x8F, 0xB4, 0x3D, 0x09, 0x7A, 0xE3, 0x6D, 0x7F, 0x8A, 0x52, 0x03, 0xD4, 0xD9, 0x93, 0x99, 0x1C, 0xB5, 0x88, 0x6F, 0xD5, 0xE8, 0x7A, 0xC9, 0x3B, 0x24, 0x07, 0x38, 0x09, 0x4A, 0xDD, 0xDC, 0x22, 0x86, 0x06, 0xC5, 0x2B, 0x27, 0x74, 0x45, 0x47, 0x29, 0x4A, 0x56, 0x5A, 0x6C, 0x92, 0x9B, 0xFD, 0xD5, 0x1C, 0xA5, 0x2D, 0x95, 0x94, 0xC7, 0x8B, 0x5E, 0xD7, 0x37, 0x5B, 0xD8, 0xB6, 0xFF, 0xF3, 0x48, 0xC4, 0x4D, 0x1C, 0x02, 0x3E, 0xE6, 0xFE, 0x0B, 0xC4, 0x3C, 0xFF, 0xF5, 0xAB, 0xC7, 0x1A, 0x20, 0x17, 0x28, 0x50, 0xDB, 0x37, 0x21, 0x1F, 0xFF, 0x59, 0xD6, 0x82, 0xBD, 0x64, 0xD4, 0xC2, 0xD1, 0xCA, 0x45, 0xF5, 0xB6, 0xF0, 0x90, 0xFB, 0xDA, 0x0C, 0xCB, 0x05, 0x16, 0x1A, 0x58, 0x80, 0x04, 0xC0, 0x5E, 0x02, 0x53, 0x9F, 0x3B, 0x79, 0x46, 0x38, 0x31, 0xC4, 0x20, 0x91, 0x98, 0x47, 0x16, 0xC7, 0xDC, 0x6E, 0xA2, 0x4C, 0x87, 0x2A, 0x5B, 0x55, 0x05, 0x4D, 0x12, 0xAB, 0x8B, 0x88, 0x48, 0x8B, 0x95, 0xD3, 0x2B, 0x4D, 0x58, 0xAD, 0xB8, 0x15, 0xAA, 0xDD, 0xB7, 0x76, 0x4A, 0xB2, 0x3B, 0xD4, 0xBA, 0x27, 0xBD, 0x69, 0xED, 0xCC, 0x6D, 0xA5, 0x04, 0xC3, 0x85, 0x82, 0xA1, 0xF5, 0xAF, 0x20, 0x29, 0x1E, 0xCD, 0x72, 0xCA, 0x24, 0x25, 0x13, 0x86, 0xC6, 0xA1, 0x6C, 0xBD, 0x4B, 0x10, 0xA1, 0x36, 0xB3, 0xFD, 0xF9, 0x30, 0x3C, 0x26, 0x13, 0x07, 0x58, 0x3C, 0xE1, 0xFF, 0xF3, 0x48, 0xC4, 0x60, 0x1B, 0xE1, 0x9E, 0xC2, 0xD6, 0x7A, 0x44, 0x78, 0xD3, 0xC1, 0xA6, 0x3C, 0x95, 0x2F, 0x2A, 0xAD, 0x61, 0x42, 0x24, 0x62, 0x64, 0x44, 0x22, 0x5A, 0xDE, 0x19, 0x7C, 0x29, 0x59, 0x04, 0xB9, 0x91, 0x90, 0x18, 0x1E, 0x55, 0x88, 0xA3, 0x04, 0x00, 0xCB, 0xA9, 0xC6, 0xA6, 0x70, 0x30, 0xE3, 0xC5, 0x4E, 0x86, 0x8C, 0x05, 0xAA, 0x33, 0x05, 0x30, 0x63, 0x03, 0x01, 0x82, 0x96, 0x86, 0x3C, 0x96, 0x1A, 0xD0, 0x62, 0x66, 0xA1, 0x81, 0xA8, 0x2A, 0xB6, 0x26, 0xFC, 0x7C, 0x25, 0xFE, 0x6F, 0xBA, 0xCF, 0xE4, 0x5C, 0x53, 0x0D, 0xE4, 0xBE, 0xB4, 0x2F, 0x02, 0x55, 0xCB, 0x49, 0x5E, 0xBE, 0xE6, 0xF5, 0x2B, 0xBE, 0x7E, 0x52, 0xE9, 0x77, 0xFF, 0xFC, 0xFF, 0xFE, 0xB8, 0xA7, 0xCA, 0xE7, 0x3A, 0x99, 0xAB, 0xF6, 0xB9, 0x8B, 0x5E, 0x94, 0xD5, 0xFB, 0x4F, 0x0E, 0x8D, 0xED, 0xFF, 0xFD, 0x1C, 0x5C, 0x27, 0xF6, 0xA1, 0x5C, 0xB6, 0x6E, 0x28, 0xB6, 0xDA, 0x95, 0xFF, 0xF3, 0x48, 0xC4, 0x73, 0x1C, 0x98, 0xF6, 0xBA, 0x3E, 0x48, 0xC6, 0x71, 0x04, 0xA8, 0x90, 0x27, 0x10, 0x00, 0x3D, 0x04, 0x3C, 0xAA, 0x4F, 0x11, 0x9A, 0x1D, 0xC8, 0x2A, 0x8B, 0x63, 0x94, 0xD5, 0xC2, 0x29, 0x6E, 0x7C, 0xC5, 0xB6, 0xBA, 0x29, 0xB2, 0xB9, 0x0F, 0x13, 0x05, 0x64, 0xC1, 0x95, 0xA2, 0x07, 0xCE, 0x19, 0x9C, 0x43, 0x72, 0x9A, 0xCC, 0x97, 0x9D, 0xEA, 0x95, 0xD9, 0x88, 0xC8, 0xBE, 0xFE, 0x5C, 0x6E, 0x6C, 0xCB, 0xD5, 0x04, 0xD0, 0x82, 0xE1, 0x50, 0xF2, 0x12, 0xB9, 0xAC, 0x35, 0x10, 0x7B, 0x26, 0xD9, 0x38, 0x92, 0xA2, 0x51, 0x10, 0x70, 0x32, 0x32, 0x22, 0x50, 0x8C, 0x1B, 0x3A, 0x5A, 0x89, 0x30, 0x55, 0xD8, 0x96, 0x8A, 0x67, 0x5E, 0x12, 0x7F, 0x92, 0x0F, 0x08, 0x82, 0xB2, 0xCD, 0xAD, 0x35, 0xAD, 0xD2, 0xD2, 0x51, 0x12, 0xA7, 0x84, 0xB5, 0x2A, 0x08, 0xFA, 0x6A, 0x58, 0x80, 0x05, 0xD7, 0x06, 0x5A, 0x5D, 0x0D, 0x80, 0x59, 0x81, 0xC8, 0xF5, 0xCA, 0xFF, 0xF3, 0x48, 0xC4, 0x83, 0x1C, 0x4A, 0x16, 0x92, 0x3C, 0x42, 0x46, 0x3C, 0x26, 0x79, 0x22, 0x85, 0xFE, 0x31, 0x07, 0x3B, 0xDC, 0x1C, 0x72, 0x65, 0xD6, 0xCA, 0x40, 0xC6, 0xAD, 0x41, 0x1E, 0x2A, 0xAE, 0xD2, 0x6D, 0x76, 0x62, 0xBD, 0x55, 0x3B, 0x3E, 0x52, 0x38, 0x64, 0x4E, 0x6B, 0x3F, 0xBF, 0xB2, 0xEA, 0xB5, 0x54, 0x88, 0xB6, 0x56, 0x61, 0xCD, 0x76, 0x0C, 0x3A, 0x9E, 0x19, 0x3A, 0x0C, 0x24, 0x58, 0x02, 0x48, 0x28, 0x82, 0xE5, 0x4B, 0x3A, 0x25, 0x9D, 0x1E, 0xB1, 0x50, 0xD4, 0x7B, 0xA6, 0xB2, 0x48, 0x2D, 0xD3, 0xF3, 0x22, 0x56, 0x05, 0xCE, 0xB8, 0xF2, 0x5C, 0x55, 0x22, 0xA8, 0x14, 0x7E, 0xF0, 0xA2, 0xC2, 0x74, 0x91, 0x80, 0x42, 0x2C, 0x2D, 0x24, 0xEA, 0x0F, 0xE8, 0x04, 0x1B, 0xA2, 0x15, 0x26, 0x92, 0x36, 0x4A, 0xAA, 0x92, 0x1F, 0x55, 0x06, 0xFB, 0xAF, 0x73, 0x38, 0xA1, 0x4B, 0xD4, 0x95, 0xB9, 0x64, 0x51, 0x57, 0x09, 0xA2, 0x4F, 0x9A, 0x4A, 0x55, 0x59, 0xFF, 0xF3, 0x48, 0xC4, 0x94, 0x1C, 0x61, 0xCA, 0x85, 0x9E, 0x41, 0x86, 0x3C, 0x93, 0x5B, 0xDC, 0x8E, 0x7B, 0x94, 0x7C, 0xF7, 0x96, 0xFF, 0x6A, 0x3D, 0xF9, 0xFB, 0xD1, 0xA6, 0xCA, 0x99, 0xBC, 0x6F, 0xDF, 0x67, 0x1B, 0xCF, 0xC6, 0xDE, 0xC9, 0x5C, 0x25, 0xAF, 0x13, 0x8B, 0x92, 0x26, 0x91, 0x48, 0x93, 0xA3, 0xC9, 0x0E, 0x66, 0x22, 0xE5, 0xA9, 0xB2, 0xD5, 0x1B, 0x53, 0xCD, 0x36, 0x3A, 0x2F, 0x6E, 0x70, 0x34, 0x68, 0x3A, 0xF0, 0x6A, 0x0D, 0x3C, 0x78, 0x88, 0xF1, 0x23, 0xCA, 0xF7, 0xD6, 0x76, 0xCC, 0x2A, 0x3C, 0xC8, 0x97, 0x2C, 0x15, 0x4D, 0x68, 0xBC, 0x5E, 0x19, 0x00, 0x6A, 0x07, 0xD8, 0xA4, 0xAE, 0xD5, 0x4D, 0x31, 0xB4, 0xDA, 0xF3, 0x97, 0x27, 0x17, 0x5B, 0xEE, 0xAE, 0xEB, 0x9D, 0x43, 0x01, 0x18, 0x34, 0xC6, 0x38, 0x40, 0xC5, 0x02, 0x73, 0x14, 0xA8, 0x8D, 0xFD, 0xBA, 0xFF, 0xD1, 0x3E, 0x66, 0x5F, 0x1B, 0x6F, 0x94, 0xB2, 0x6F, 0xE7, 0x0E, 0xFA, 0xB9, 0x1C, 0xFF, 0xF3, 0x48, 0xC4, 0xA5, 0x1C, 0x72, 0x4A, 0x64, 0x34, 0x7A, 0x4C, 0x08, 0x63, 0x25, 0xA6, 0xB3, 0x8F, 0x15, 0x54, 0xB8, 0x24, 0xAC, 0x33, 0x56, 0xED, 0x3C, 0xE1, 0x92, 0x8D, 0xCE, 0x9B, 0x17, 0xAF, 0xAC, 0x55, 0x2F, 0x2D, 0x4C, 0xAF, 0xE6, 0x75, 0x8F, 0xC5, 0x8C, 0x25, 0x42, 0x50, 0x14, 0x60, 0x69, 0x47, 0xB5, 0x73, 0xD4, 0xFD, 0x3B, 0x6F, 0x43, 0xAF, 0xE7, 0xAA, 0x4C, 0x41, 0x4D, 0x45, 0x33, 0x2E, 0x31, 0x30, 0x30, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x9A, 0x4B, 0x4E, 0x2C, 0x93, 0x53, 0xAB, 0x2B, 0x4D, 0x71, 0x24, 0xDB, 0x7C, 0x5B, 0x04, 0xDA, 0x9E, 0xCB, 0x46, 0x77, 0xA9, 0x3A, 0x42, 0x9A, 0xF0, 0xD3, 0xBE, 0xFF, 0x5F, 0xFF, 0xFA, 0xFE, 0xFD, 0x97, 0x6E, 0xBA, 0x3D, 0x4A, 0xCF, 0x52, 0xDE, 0x96, 0x4F, 0x28, 0xDD, 0x5B, 0xCA, 0xCA, 0xCB, 0xA0, 0xEF, 0x4A, 0x09, 0x6B, 0xA1, 0x56, 0xEF, 0xE8, 0xFF, 0xFF, 0xF3, 0x48, 0xC4, 0xB6, 0x19, 0x02, 0xC2, 0x58, 0x16, 0x78, 0x86, 0x9C, 0xF5, 0x29, 0x3F, 0xF7, 0x5B, 0x7D, 0x15, 0x11, 0x94, 0x09, 0x81, 0x40, 0x73, 0x49, 0xDC, 0x92, 0x4E, 0xE3, 0x0D, 0x56, 0xD6, 0x9E, 0xAA, 0xD5, 0xD4, 0x04, 0x31, 0x12, 0x22, 0x55, 0x5F, 0x12, 0x63, 0x64, 0x45, 0x50, 0xE2, 0xEB, 0x2E, 0x86, 0x89, 0x79, 0x16, 0x91, 0x6A, 0xF7, 0x5A, 0x1F, 0x72, 0x49, 0xC7, 0x6E, 0x82, 0xBC, 0x37, 0x76, 0xAD, 0x32, 0x4C, 0xB3, 0x39, 0x9B, 0x4D, 0x94, 0xD8, 0xB3, 0xA5, 0x99, 0x9F, 0x86, 0xAF, 0x5B, 0xB9, 0x57, 0x6A, 0x5E, 0x86, 0xAB, 0xB0, 0x71, 0x06, 0x2D, 0x4D, 0x60, 0x90, 0x18, 0xD5, 0xA3, 0x56, 0xD0, 0xAF, 0x03, 0x70, 0x38, 0x26, 0x31, 0x27, 0x9D, 0x07, 0x70, 0xA5, 0x48, 0x66, 0xB8, 0x2A, 0x0D, 0x4C, 0xB2, 0xF9, 0xEA, 0xD0, 0xA5, 0x52, 0xDF, 0xD4, 0xE1, 0xB9, 0x9E, 0xF9, 0x5F, 0x30, 0x4B, 0x9C, 0xB5, 0x4E, 0xD0, 0x46, 0x18, 0x50, 0xD4, 0xDB, 0xFF, 0xF3, 0x48, 0xC4, 0xBE, 0x10, 0x5A, 0x42, 0x54, 0x16, 0x78, 0x44, 0x7C, 0x40, 0x9E, 0x22, 0xFE, 0xA0, 0x32, 0x86, 0x03, 0xF9, 0xF6, 0xAF, 0xE4, 0xEA, 0x3F, 0x03, 0x97, 0x35, 0x4C, 0x41, 0x21, 0xAD, 0x35, 0x01, 0x0A, 0xC3, 0xC3, 0x50, 0xB4, 0x59, 0xEC, 0x24, 0x95, 0x18, 0x2C, 0x98, 0xFD, 0x17, 0x76, 0x10, 0xF7, 0x9B, 0x46, 0x33, 0x3D, 0xD7, 0x0A, 0xAB, 0x49, 0xF3, 0x99, 0x17, 0xBA, 0x27, 0xDC, 0x9F, 0x9B, 0x47, 0xEC, 0x7E, 0x91, 0x99, 0xF4, 0xC9, 0xCA, 0x99, 0x37, 0x24, 0x72, 0xFE, 0x22, 0x68, 0x52, 0x65, 0x7C, 0xEB, 0xAC, 0x65, 0x7B, 0x7E, 0x43, 0x33, 0x45, 0x68, 0x55, 0x0A, 0x91, 0x65, 0x44, 0x59, 0x70, 0x46, 0xC7, 0x9B, 0x65, 0x21, 0x3F, 0x39, 0x91, 0x77, 0xCC, 0xA1, 0x57, 0xAC, 0xC6, 0xA6, 0xF7, 0xE0, 0x44, 0xF4, 0xF8, 0x79, 0xC8, 0xDF, 0x33, 0x33, 0xE8, 0xC6, 0x14, 0x07, 0x12, 0x7B, 0x66, 0x32, 0xFA, 0x47, 0xBB, 0x2F, 0xC1, 0xD0, 0x92, 0xD0, 0xFF, 0xF3, 0x48, 0xC4, 0xFF, 0x23, 0x23, 0x4E, 0x24, 0x02, 0xCA, 0x46, 0x79, 0xD7, 0xDE, 0x45, 0xEF, 0xCC, 0xDB, 0xAD, 0x17, 0x94, 0xDB, 0x9C, 0xE2, 0x88, 0xD3, 0x05, 0x89, 0x49, 0xDB, 0x01, 0x77, 0xDA, 0x69, 0x20, 0x0C, 0xC6, 0x05, 0xC2, 0xAB, 0x8E, 0xF5, 0x58, 0x84, 0x0A, 0x86, 0x8A, 0x48, 0xE3, 0x60, 0xD8, 0x3E, 0xDD, 0xBB, 0xAC, 0x54, 0xF1, 0x63, 0x13, 0x5F, 0x49, 0x62, 0x55, 0xF3, 0x7C, 0xAA, 0x2F, 0x94, 0x77, 0xB5, 0x63, 0x72, 0x2F, 0x6A, 0xFB, 0x7D, 0xED, 0x70, 0xD1, 0xFC, 0xAC, 0xC5, 0x3B, 0x51, 0xD6, 0x58, 0xD7, 0x21, 0xCE, 0x2A, 0xF4, 0x91, 0x78, 0xE0, 0xB3, 0xAD, 0xD5, 0xBB, 0xF5, 0xEC, 0xBD, 0xDA, 0x6E, 0xC4, 0x15, 0x48, 0x0F, 0x8C, 0x21, 0x79, 0xE2, 0x36, 0x0A, 0xAC, 0xD5, 0x0F, 0x84, 0xDE, 0x35, 0xC7, 0x32, 0x14, 0xB9, 0xD2, 0xF5, 0xD3, 0xAD, 0x6B, 0x4C, 0x8B, 0x19, 0x89, 0xB7, 0x47, 0x58, 0xD5, 0xC3, 0xB4, 0x6E, 0x5B, 0xC4, 0xF7, 0xC4, 0xFF, 0xF3, 0x48, 0xC4, 0xF3, 0x1D, 0xB3, 0x32, 0x30, 0x34, 0xC2, 0x46, 0x29, 0xCF, 0x47, 0xB3, 0x64, 0x10, 0xE4, 0x8B, 0x62, 0x75, 0x32, 0x5B, 0xE6, 0x4C, 0x36, 0x9B, 0xE1, 0x48, 0x19, 0xEB, 0x0E, 0x94, 0xBC, 0x90, 0x64, 0x22, 0x4C, 0x7A, 0xB7, 0x67, 0xD7, 0x7C, 0xB7, 0x39, 0x44, 0x71, 0x31, 0x7A, 0x99, 0xEF, 0x79, 0x18, 0xD2, 0x55, 0x32, 0x45, 0xE2, 0xEA, 0x08, 0xA5, 0x55, 0x17, 0x25, 0x37, 0x4D, 0xB7, 0x64, 0x6B, 0x1E, 0x0E, 0x0D, 0x57, 0xBA, 0x20, 0x99, 0x14, 0x48, 0xAE, 0x76, 0x87, 0xAC, 0x4C, 0x8B, 0x74, 0x08, 0x32, 0x2F, 0x7E, 0xBD, 0xEB, 0xBA, 0x2B, 0x64, 0x60, 0x9F, 0x65, 0x32, 0xAA, 0xD2, 0x86, 0x7D, 0x76, 0x7A, 0x7C, 0xBA, 0x3F, 0x1F, 0x75, 0x0F, 0xEB, 0x3B, 0xD1, 0x96, 0x9E, 0x4B, 0xE4, 0xEF, 0x67, 0xB3, 0xDB, 0x2F, 0xC6, 0x3B, 0x35, 0xE2, 0x77, 0xA8, 0x45, 0x31, 0x8B, 0x3C, 0xCE, 0xE3, 0xB2, 0x17, 0x96, 0x7A, 0xCE, 0x2A, 0x69, 0x09, 0x97, 0xFF, 0xF3, 0x48, 0xC4, 0xFF, 0x2A, 0x9C, 0x0E, 0x10, 0x00, 0xCA, 0x4C, 0xB5, 0xF0, 0x42, 0xE4, 0xBD, 0xB3, 0x23, 0x72, 0xDB, 0xB3, 0xB1, 0x22, 0x99, 0x45, 0x6A, 0xAD, 0x1A, 0xC9, 0x8F, 0x05, 0x66, 0xA1, 0xF5, 0xB3, 0x4C, 0xBD, 0xAE, 0x40, 0x8F, 0x6D, 0x59, 0x4A, 0x8D, 0xD4, 0x53, 0xAE, 0x86, 0x21, 0xBB, 0x99, 0x4B, 0xBE, 0x54, 0x6C, 0xEE, 0x61, 0x56, 0x4D, 0xE5, 0xEF, 0x25, 0xB5, 0x0A, 0x57, 0x62, 0xAC, 0xE5, 0xF3, 0xD5, 0x9A, 0x82, 0x1D, 0xF5, 0xDC, 0xC4, 0x32, 0xBE, 0xEF, 0x9E, 0x59, 0x76, 0xDD, 0x5D, 0xCD, 0xAA, 0x01, 0xA5, 0xAA, 0x6D, 0x3A, 0x40, 0x80, 0x36, 0x00, 0x54, 0x11, 0xA5, 0xB2, 0x26, 0x00, 0x8A, 0x24, 0x58, 0x2A, 0x89, 0x24, 0x69, 0x17, 0x23, 0x04, 0xB6, 0x58, 0xEA, 0x6D, 0x34, 0x8E, 0x50, 0xA3, 0xFE, 0x37, 0xC0, 0xCD, 0x0F, 0xFE, 0xAF, 0xC0, 0x23, 0x52, 0xEA, 0xB1, 0xA9, 0x43, 0xA4, 0xCB, 0xB7, 0x55, 0x7F, 0x52, 0xCE, 0xAA, 0xAB, 0x37, 0xFF, 0xF3, 0x48, 0xC4, 0xD7, 0x27, 0x64, 0x16, 0x24, 0x34, 0xC3, 0x0C, 0x24, 0xC6, 0x6F, 0xEE, 0xCC, 0x7F, 0x15, 0x54, 0xBD, 0x57, 0xBB, 0x36, 0xBE, 0x70, 0x09, 0xB8, 0xCD, 0xFF, 0x1B, 0xF8, 0xDE, 0xCC, 0xC7, 0x76, 0x2D, 0xB5, 0x55, 0x55, 0xF5, 0xCE, 0x93, 0x01, 0x2C, 0x66, 0xE3, 0x7E, 0xA4, 0xC6, 0xA4, 0xCD, 0xFA, 0xC6, 0x3A, 0xA7, 0xC6, 0x35, 0x58, 0xC5, 0x35, 0x52, 0xFF, 0x5D, 0x9A, 0xAF, 0xFF, 0xC6, 0xF8, 0x14, 0x05, 0x45, 0x7F, 0xFB, 0x01, 0x51, 0x49, 0x05, 0x36, 0x48, 0xAD, 0x5D, 0x04, 0x38, 0x3A, 0x93, 0x38, 0x91, 0x24, 0x8E, 0x23, 0x26, 0x91, 0x80, 0x61, 0xC4, 0x4E, 0x41, 0x4D, 0x97, 0x18, 0xEA, 0xA9, 0x6B, 0xD5, 0x3B, 0x00, 0x80, 0x8F, 0x6F, 0x55, 0x5D, 0x8D, 0xBF, 0xFE, 0x1F, 0xF5, 0x7F, 0x55, 0x01, 0x35, 0x55, 0x55, 0x5E, 0x2A, 0xA9, 0x7E, 0xB2, 0x35, 0x26, 0x63, 0xFE, 0xAA, 0xFC, 0x0C, 0x04, 0x4C, 0x7A, 0xAC, 0x3D, 0x99, 0x9B, 0x2F, 0x56, 0xFF, 0xF3, 0x48, 0xC4, 0xBC, 0x1F, 0x2B, 0xB6, 0x24, 0x54, 0x79, 0x86, 0x39, 0xCB, 0xE3, 0x36, 0xCC, 0x7C, 0x3F, 0x6F, 0x52, 0x3D, 0xAA, 0xE1, 0x44, 0xAA, 0xAF, 0x1A, 0x1D, 0xFA, 0x51, 0xA3, 0x71, 0x99, 0xAA, 0xB3, 0x6B, 0xEA, 0x5F, 0xFE, 0xDA, 0xF0, 0xE1, 0xAF, 0xD5, 0xA5, 0x54, 0xBB, 0xFB, 0x1F, 0x35, 0xAB, 0x97, 0x54, 0xA9, 0x42, 0x8D, 0xF9, 0x33, 0x79, 0x46, 0x66, 0xF8, 0xC0, 0x42, 0x8E, 0x94, 0x02, 0x4C, 0x41, 0x4D, 0x45, 0x33, 0x2E, 0x31, 0x30, 0x30, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0xFF, 0xF3, 0x48, 0xC4, 0xC2, 0x1D, 0x84, 0x15, 0xB4, 0x00, 0x79, 0x86, 0x10, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55
 diff --git a/src/audio_player/src/svc_ai_player.c b/src/audio_player/src/svc_ai_player.c
-index ab9ee72..bf806a2 100755
+index ab9ee728..bf806a2e 100755
 --- a/src/audio_player/src/svc_ai_player.c
 +++ b/src/audio_player/src/svc_ai_player.c
 @@ -560,7 +560,10 @@ OPERATE_RET tuya_ai_player_service_init(AI_PLAYER_CFG_T *cfg)
@@ -931,8 +1305,80 @@ index ab9ee72..bf806a2 100755
  }
  
  /**
+diff --git a/src/liblvgl/Kconfig b/src/liblvgl/Kconfig
+index daeb35f7..2a7fef60 100755
+--- a/src/liblvgl/Kconfig
++++ b/src/liblvgl/Kconfig
+@@ -47,11 +47,6 @@ menuconfig ENABLE_LIBLVGL
+             select ENABLE_TP
+             default n
+ 
+-        config LV_USE_QRCODE
+-            bool "enable lvgl QR code library"
+-            default y if LVGL_VERSION_8
+-            default n
+-
+         config ENABLE_LVGL_DEMO
+             bool "enable lvgl demo"
+             default n
+@@ -113,4 +108,4 @@ menuconfig ENABLE_LIBLVGL
+ 
+         # PC Simulator
+         rsource "simulator/Kconfig"
+-    endif
++    endif
+\ No newline at end of file
+diff --git a/src/liblvgl/v8/CMakeLists.txt b/src/liblvgl/v8/CMakeLists.txt
+index 13e87399..e538b6e5 100755
+--- a/src/liblvgl/v8/CMakeLists.txt
++++ b/src/liblvgl/v8/CMakeLists.txt
+@@ -56,10 +56,6 @@ target_compile_options(${MODULE_NAME}
+         ${LIB_OPTIONS}
+         -Wno-error=format=
+     )
+-
+-if (CONFIG_LV_USE_QRCODE STREQUAL "y")
+-    target_compile_definitions(${MODULE_NAME} PRIVATE LV_USE_QRCODE=1)
+-endif()
+ ########################################
+ # Layer Configure
+ ########################################
+diff --git a/src/liblvgl/v8/conf/lv_conf.h b/src/liblvgl/v8/conf/lv_conf.h
+index 64f08863..68bd8ea8 100755
+--- a/src/liblvgl/v8/conf/lv_conf.h
++++ b/src/liblvgl/v8/conf/lv_conf.h
+@@ -758,13 +758,7 @@
+ #define LV_USE_GIF 1
+ 
+ /*QR code library*/
+-#ifndef LV_USE_QRCODE
+-    #ifdef CONFIG_LV_USE_QRCODE
+-        #define LV_USE_QRCODE CONFIG_LV_USE_QRCODE
+-    #else
+-        #define LV_USE_QRCODE 0
+-    #endif
+-#endif
++#define LV_USE_QRCODE 1
+ 
+ /*FreeType library*/
+ #define LV_USE_FREETYPE 0
+diff --git a/src/liblvgl/v9/CMakeLists.txt b/src/liblvgl/v9/CMakeLists.txt
+index ed1cc744..06d675be 100755
+--- a/src/liblvgl/v9/CMakeLists.txt
++++ b/src/liblvgl/v9/CMakeLists.txt
+@@ -55,10 +55,6 @@ target_compile_options(${MODULE_NAME}
+     PRIVATE
+         ${LIB_OPTIONS}
+     )
+-
+-if (CONFIG_LV_USE_QRCODE STREQUAL "y")
+-    target_compile_definitions(${MODULE_NAME} PRIVATE LV_USE_QRCODE=1)
+-endif()
+ ########################################
+ # Layer Configure
+ ########################################
 diff --git a/src/liblvgl/v9/conf/lv_conf.h b/src/liblvgl/v9/conf/lv_conf.h
-index c9bb4af..df6c1b5 100755
+index bf929063..30adea65 100755
 --- a/src/liblvgl/v9/conf/lv_conf.h
 +++ b/src/liblvgl/v9/conf/lv_conf.h
 @@ -85,9 +85,9 @@
@@ -947,30 +1393,7 @@ index c9bb4af..df6c1b5 100755
  
  /*Default Dot Per Inch. Used to initialize default sizes such as widgets sized, style paddings.
   *(Not so important, you can adjust it to modify default sizes and spaces)*/
-@@ -158,7 +158,12 @@
-         /*Allow buffering some shadow calculation.
-         *LV_DRAW_SW_SHADOW_CACHE_SIZE is the max. shadow size to buffer, where shadow size is `shadow_width + radius`
-         *Caching has LV_DRAW_SW_SHADOW_CACHE_SIZE^2 RAM cost*/
--        #define LV_DRAW_SW_SHADOW_CACHE_SIZE 0
-+        /* aipet（2026-10-19）：0 -> 32。卡片阴影是 PET_SHADOW_W 8 + PET_RADIUS_CARD 20
-+         * = 28 的角，32 刚好装得下（32x32 = 1KB）。不缓存时每次重画阴影都要跑两遍
-+         * 高斯模糊（SHADOW_UPSCALE_SHIFT 6 = 64 倍上采样再降采样），而卡片阴影实测
-+         * 占绘制量 22%。缓存只认"同一组 (corner_size, radius)"，本项目所有卡片共用
-+         * PET_RADIUS_CARD，命中率很高；换尺寸时自动重算，不会画错。 */
-+        #define LV_DRAW_SW_SHADOW_CACHE_SIZE 32
- 
-         /* Set number of maximally cached circle data.
-         * The circumference of 1/4 circle are saved for anti-aliasing
-@@ -335,7 +340,7 @@
- #define LV_COLOR_MIX_ROUND_OFS  0
- 
- /* Add 2 x 32 bit variables to each lv_obj_t to speed up getting style properties */
--#define LV_OBJ_STYLE_CACHE      0
-+#define LV_OBJ_STYLE_CACHE      1
- 
- /* Add `id` field to `lv_obj_t` */
- #define LV_USE_OBJ_ID           0
-@@ -427,11 +432,11 @@
+@@ -427,11 +427,11 @@
  #endif
  
  #ifndef LV_FONT_MONTSERRAT_14
@@ -984,7 +1407,7 @@ index c9bb4af..df6c1b5 100755
  #endif
  
  #ifndef LV_FONT_MONTSERRAT_18
-@@ -527,7 +532,7 @@
+@@ -527,7 +527,7 @@
  #define LV_FONT_CUSTOM_DECLARE
  
  /*Always set a default font*/
@@ -993,7 +1416,22 @@ index c9bb4af..df6c1b5 100755
  
  /*Enable handling large font and/or fonts with a lot of characters.
   *The limit depends on the font size, font face and bpp.
-@@ -878,7 +883,7 @@
+@@ -812,13 +812,7 @@
+ #define LV_USE_RLE 0
+ 
+ /*QR code library*/
+-#ifndef LV_USE_QRCODE
+-    #ifdef CONFIG_LV_USE_QRCODE
+-        #define LV_USE_QRCODE CONFIG_LV_USE_QRCODE
+-    #else
+-        #define LV_USE_QRCODE 0
+-    #endif
+-#endif
++#define LV_USE_QRCODE 0
+ 
+ /*Barcode code library*/
+ #define LV_USE_BARCODE 0
+@@ -884,7 +878,7 @@
  #define LV_USE_SYSMON   1
  #define LV_USE_PERF_MONITOR   1
  #else 
@@ -1002,7 +1440,7 @@ index c9bb4af..df6c1b5 100755
  #endif
  
  #if LV_USE_SYSMON
-@@ -888,11 +893,12 @@
+@@ -894,7 +888,7 @@
      /*1: Show CPU usage and FPS count
       * Requires `LV_USE_SYSMON = 1`*/
      #ifndef LV_USE_PERF_MONITOR
@@ -1011,309 +1449,280 @@ index c9bb4af..df6c1b5 100755
      #endif
      #if LV_USE_PERF_MONITOR
          #define LV_USE_PERF_MONITOR_POS LV_ALIGN_BOTTOM_RIGHT
- 
-+        /*0: Displays performance data on the screen, 1: Prints performance data using log.*/
-         /*0: Displays performance data on the screen, 1: Prints performance data using log.*/
-         #define LV_USE_PERF_MONITOR_LOG_MODE 0
+@@ -906,7 +900,7 @@
+     /*1: Show the used memory and the memory fragmentation
+      * Requires `LV_USE_STDLIB_MALLOC = LV_STDLIB_BUILTIN`
+      * Requires `LV_USE_SYSMON = 1`*/
+-    #define LV_USE_MEM_MONITOR 0
++    #define LV_USE_MEM_MONITOR 1
+     #if LV_USE_MEM_MONITOR
+         #define LV_USE_MEM_MONITOR_POS LV_ALIGN_BOTTOM_LEFT
      #endif
 diff --git a/src/liblvgl/v9/port/lv_port_disp_full_frame.c b/src/liblvgl/v9/port/lv_port_disp_full_frame.c
-index 50248ce..4fa4446 100644
+index 50248ce7..9243fd51 100644
 --- a/src/liblvgl/v9/port/lv_port_disp_full_frame.c
 +++ b/src/liblvgl/v9/port/lv_port_disp_full_frame.c
-@@ -123,6 +123,127 @@ static void __disp_framebuffer_memcpy(TDL_DISP_DEV_INFO_T *dev_info,
- #endif
+@@ -208,6 +208,138 @@ static void __disp_fill_display_framebuffer(const lv_area_t *area, uint8_t *px_m
+     }
  }
  
-+/* ---- 脏矩形同步（2026-10-19，aipet 性能治理）--------------------------------
++/* ---- 换 fb 时只同步脏矩形 ----
 + *
-+ * 问题：每次 LVGL 刷新结束时，这里会把**整块** framebuffer（320x480x2 = 307KB）
-+ * 拷进下一块 fb。哪怕这一拍只更新了状态栏一个时钟，也要付 307KB 读 + 307KB 写
-+ * 的 PSRAM 流量 —— 而面板 80Hz 扫描本身已经占掉 24.6MB/s。
++ * 原来每一次刷新结束，都会把整块 framebuffer（320×480×2 = 307KB）拷到下一块
++ * fb（读+写 614KB PSRAM），哪怕只更新了一个时钟。LVGL 是 PARTIAL 渲染模式，
++ * 每轮只把实际脏区写进 disp_fb，所以"把本轮脏区同步进下一块 fb"就够了。
 + *
-+ * 改成只拷"本次刷新真正写过的矩形"。正确性依据（tdd_display_rgb.c 的 ISR +
-+ * tdl_display_fb_manage.c）：
-+ *   tdl_disp_dev_flush() 阻塞到面板帧边界，换帧时 ISR 通过 free_cb 把
-+ *   **换帧前正在扫描的那块 fb** 还回池子 —— 那块里正是"本次绘制之前的上一帧"。
-+ *   只要 tdl_disp_get_free_fb() 拿到的就是它，把本次刷新的脏矩形从当前 fb 拷进去，
-+ *   结果就等于当前画面（对刷新次数归纳成立）。
-+ * 拿到的不是它（首次上电、池子顺序异常、脏矩形溢出、有 pre-flush 合成钩子）
-+ * 就退回整屏拷贝 —— 慢，但一定对。
++ * 关键判据：RGB 驱动的 ISR 换帧时释放的正好是"本次绘制之前的上一帧"那块 fb
++ * （next_fb == sg_last_disp_fb）。匹配 -> next_fb 里就是上一帧的完整画面，
++ * 只把本轮脏矩形拷进去即与 disp_fb 一致；不匹配（首上电、脏矩形溢出、
++ * 池子顺序异常）-> 退回整屏拷贝，保证一定对。
 + *
-+ * 只有 full-frame 路径（本文件）需要它；partial 路径直接写面板，没有中间 fb。 */
-+#define FB_DIRTY_MAX    32
++ * 显示释放 / 恢复（on_enable / release）时清状态，避免悬空指针。 */
++#define LV_PORT_DIRTY_MAX   32
 +
-+static lv_area_t              sg_dirty[FB_DIRTY_MAX];
-+static uint8_t                sg_dirty_cnt;
-+static bool                   sg_dirty_overflow;
-+static TDL_DISP_FRAME_BUFF_T *sg_last_disp_fb;      /* 上一次交给驱动的 fb */
++static struct {
++    lv_area_t               rect[LV_PORT_DIRTY_MAX];
++    uint8_t                 n;
++    bool                    overflow;
++    bool                    first;                     /**< 首上电：没上一帧可对 */
++    TDL_DISP_FRAME_BUFF_T  *last_disp_fb;              /**< 上一轮送显的那块 */
++} s_fb_dirty;
 +
-+/* aipet: 刷屏耗时统计（每 2 秒一条 PR_DEBUG）。
-+ * flush 是 LVGL 刷新里最贵的一段（软件旋转 + 写 fb + 换缓冲拷贝），
-+ * 和渲染耗时分开统计才能定位 80ms 花在哪。 */
-+static uint32_t sg_fl_cnt;          /* 2 秒窗口内 flush 次数（每 chunk 一次）*/
-+static uint32_t sg_fl_full;         /* 其中走整屏拷贝的次数 */
-+static uint32_t sg_fl_rect;         /* 其中走脏区拷贝的次数 */
-+static uint32_t sg_fl_ms_sum;
-+static uint32_t sg_fl_ms_max;
-+static uint32_t sg_fl_at;
-+
-+/** 把 @a a 记进本次刷新的脏矩形表：相交就合并，满了就置溢出标记（调用方退回整屏拷贝）。 */
-+static void __disp_dirty_add(const lv_area_t *a)
++/** 记一块脏区（面板坐标）。相交的自动并起来；超过 32 块置溢出标志。 */
++static void __disp_dirty_add(const lv_area_t *area, TDL_DISP_FRAME_BUFF_T *fb)
 +{
-+    if (sg_dirty_overflow) {
++    lv_area_t a = *area;
++
++    if (NULL == fb) {
 +        return;
 +    }
++    if (a.x2 < 0 || a.y2 < 0 ||
++        a.x1 >= (int)fb->width || a.y1 >= (int)fb->height) {
++        return;
++    }
++    if (a.x1 < 0)                a.x1 = 0;
++    if (a.y1 < 0)                a.y1 = 0;
++    if (a.x2 >= (int)fb->width)  a.x2 = fb->width - 1;
++    if (a.y2 >= (int)fb->height) a.y2 = fb->height - 1;
 +
-+    for (uint8_t i = 0; i < sg_dirty_cnt; i++) {
-+        lv_area_t *d = &sg_dirty[i];
++    for (uint8_t i = 0; i < s_fb_dirty.n; i++) {
++        lv_area_t hit;
 +
-+        if (d->x1 <= a->x2 && a->x1 <= d->x2 && d->y1 <= a->y2 && a->y1 <= d->y2) {
-+            if (a->x1 < d->x1) { d->x1 = a->x1; }
-+            if (a->y1 < d->y1) { d->y1 = a->y1; }
-+            if (a->x2 > d->x2) { d->x2 = a->x2; }
-+            if (a->y2 > d->y2) { d->y2 = a->y2; }
++        if (_lv_area_intersect(&hit, &s_fb_dirty.rect[i], &a)) {
++            _lv_area_join(&s_fb_dirty.rect[i], &s_fb_dirty.rect[i], &a);
 +            return;
 +        }
 +    }
 +
-+    if (sg_dirty_cnt >= FB_DIRTY_MAX) {
-+        sg_dirty_overflow = true;
-+        return;
++    if (s_fb_dirty.n < LV_PORT_DIRTY_MAX) {
++        s_fb_dirty.rect[s_fb_dirty.n++] = a;
++    } else {
++        s_fb_dirty.overflow = true;    /* 本轮改判整屏拷贝 */
 +    }
-+
-+    sg_dirty[sg_dirty_cnt++] = *a;
 +}
 +
-+/** 把 @a area 这块矩形从 @a src_frame 拷到 @a dst_frame（两块 fb 的几何相同）。 */
++/** 只把 rects[0..n) 从 src_frame 拷到 dst_frame（两块同为 fb 步距）。
++ *  DMA2D 编译进来时按矩形走 DMA2D（axis = 矩形原点，width_cp/height_cp =
++ *  矩形尺寸）；否则按行 memcpy。 */
 +static void __disp_fb_rect_copy(TDL_DISP_DEV_INFO_T *dev_info,
 +                                uint8_t *dst_frame, uint8_t *src_frame,
-+                                const lv_area_t *area)
++                                const lv_area_t *rects, uint8_t n)
 +{
-+#if defined(ENABLE_DMA2D) && (ENABLE_DMA2D == 1)
-+    if (NULL != sg_lvgl_dma2d_hdl) {
-+        TKL_DMA2D_FRAME_INFO_T in_frame  = {0};
-+        TKL_DMA2D_FRAME_INFO_T out_frame = {0};
++    uint32_t bpp    = (tdl_disp_get_fmt_bpp(dev_info->fmt) + 7) / 8;
++    uint32_t stride = dev_info->width * bpp;
 +
-+        switch (dev_info->fmt) {
-+            case TUYA_PIXEL_FMT_RGB565:
-+                in_frame.type  = TUYA_FRAME_FMT_RGB565;
-+                out_frame.type = TUYA_FRAME_FMT_RGB565;
-+                break;
-+            case TUYA_PIXEL_FMT_RGB888:
-+                in_frame.type  = TUYA_FRAME_FMT_RGB888;
-+                out_frame.type = TUYA_FRAME_FMT_RGB888;
-+                break;
-+            default:
-+                break;                      /* 其它格式（单色/I2）不走这里 */
++    for (uint8_t i = 0; i < n; i++) {
++        const lv_area_t *r = &rects[i];
++        uint32_t w, h;
++
++        if (r->x2 < r->x1 || r->y2 < r->y1) {
++            continue;
 +        }
++        w = (uint32_t)(r->x2 - r->x1 + 1);
++        h = (uint32_t)(r->y2 - r->y1 + 1);
++#if defined(ENABLE_DMA2D) && (ENABLE_DMA2D == 1)
++        if (NULL != sg_lvgl_dma2d_hdl) {
++            TKL_DMA2D_FRAME_INFO_T in_frame  = {0};
++            TKL_DMA2D_FRAME_INFO_T out_frame = {0};
 +
-+        if (TUYA_FRAME_FMT_RGB565 == in_frame.type ||
-+            TUYA_FRAME_FMT_RGB888 == in_frame.type) {
-+            in_frame.width        = dev_info->width;
-+            in_frame.height       = dev_info->height;
-+            in_frame.pbuf         = src_frame;
-+            in_frame.axis.x_axis  = area->x1;
-+            in_frame.axis.y_axis  = area->y1;
-+            in_frame.width_cp     = lv_area_get_width(area);
-+            in_frame.height_cp    = lv_area_get_height(area);
++            switch (dev_info->fmt) {
++                case TUYA_PIXEL_FMT_RGB565:
++                    in_frame.type  = TUYA_FRAME_FMT_RGB565;
++                    out_frame.type = TUYA_FRAME_FMT_RGB565;
++                    break;
++                case TUYA_PIXEL_FMT_RGB888:
++                    in_frame.type  = TUYA_FRAME_FMT_RGB888;
++                    out_frame.type = TUYA_FRAME_FMT_RGB888;
++                    break;
++                default:
++                    return;                 /* 别的格式不做矩形拷 */
++            }
 +
-+            out_frame.width       = dev_info->width;
-+            out_frame.height      = dev_info->height;
-+            out_frame.pbuf        = dst_frame;
-+            out_frame.axis.x_axis = area->x1;
-+            out_frame.axis.y_axis = area->y1;
-+            out_frame.width_cp    = in_frame.width_cp;
-+            out_frame.height_cp   = in_frame.height_cp;
++            /* 两块 fb 都是"整帧 + 轴偏移 + 拷贝区域"的描述法，见
++             * __dma2d_cfg_init：width/height 是帧步距，axis 是帧内起点，
++             * width_cp/height_cp 才是这次拷多大。 */
++            in_frame.width     = dev_info->width;
++            in_frame.height    = dev_info->height;
++            in_frame.pbuf      = src_frame;
++            in_frame.axis.x_axis = r->x1;
++            in_frame.axis.y_axis = r->y1;
++            in_frame.width_cp  = w;
++            in_frame.height_cp = h;
++
++            out_frame.width     = dev_info->width;
++            out_frame.height    = dev_info->height;
++            out_frame.pbuf      = dst_frame;
++            out_frame.axis.x_axis = r->x1;
++            out_frame.axis.y_axis = r->y1;
++            out_frame.width_cp  = w;
++            out_frame.height_cp = h;
 +
 +            tal_dma2d_memcpy(sg_lvgl_dma2d_hdl, &in_frame, &out_frame);
-+            return;
++            tal_dma2d_wait_finish(sg_lvgl_dma2d_hdl, 1000);
++            continue;
 +        }
-+    }
 +#endif
++        {
++            const uint8_t *s = src_frame + ((size_t)r->y1 * stride +
++                                            (size_t)r->x1 * bpp);
++            uint8_t       *d = dst_frame + ((size_t)r->y1 * stride +
++                                            (size_t)r->x1 * bpp);
++            uint32_t row = w * bpp;
 +
-+    /* 没有 DMA2D（或格式不支持）：按行 memcpy。 */
-+    {
-+        uint8_t  per_pixel_byte = (uint8_t)((tdl_disp_get_fmt_bpp(dev_info->fmt) + 7) / 8);
-+        int32_t  w              = lv_area_get_width(area);
-+        size_t   row_bytes      = (size_t)w * per_pixel_byte;
-+
-+        for (int32_t y = area->y1; y <= area->y2; y++) {
-+            size_t off = ((size_t)y * dev_info->width + (size_t)area->x1) * per_pixel_byte;
-+
-+            memcpy(dst_frame + off, src_frame + off, row_bytes);
++            for (uint32_t y = 0; y < h; y++) {
++                memcpy(d, s, row);
++                s += stride;
++                d += stride;
++            }
 +        }
 +    }
 +}
 +
- static void __disp_mono_write_point(uint32_t x, uint32_t y, bool enable,
-                                     TDL_DISP_FRAME_BUFF_T *fb)
- {
-@@ -246,21 +367,100 @@ void lv_port_flush_init(LV_DISP_NODE_T *node)
+ /**********************
+  *  INTERFACE IMPL
+  **********************/
+@@ -244,6 +376,10 @@ void lv_port_flush_init(LV_DISP_NODE_T *node)
+         TUYA_CALL_ERR_LOG(tal_dma2d_init(&sg_lvgl_dma2d_hdl));
+     }
  #endif
++
++    /* 脏矩形同步：首上电没有"上一帧"可对账，先置 first（第一次必然整屏拷）*/
++    memset(&s_fb_dirty, 0, sizeof(s_fb_dirty));
++    s_fb_dirty.first = true;
  }
  
-+/**
-+ * @brief 上屏前合成钩子（见 lv_port_disp_internal.h 的说明）。
-+ *
-+ * 未注册时是空指针，整条路径与改动前完全一致 —— 这个改动对不使用浮层的
-+ * 工程是零影响。
-+ */
-+static LV_PORT_PRE_FLUSH_CB sg_pre_flush_cb = NULL;
-+
-+void lv_port_set_pre_flush_cb(LV_PORT_PRE_FLUSH_CB cb)
-+{
-+    sg_pre_flush_cb = cb;
-+}
-+
  void lv_port_flush_execute(LV_DISP_NODE_T *node, lv_display_t *disp,
-                            const lv_area_t *area, uint8_t *color_ptr)
- {
-     lv_color_format_t cf = lv_display_get_color_format(disp);
-+    uint32_t          t0 = lv_tick_get();
-+    uint32_t          dt;
+@@ -253,14 +389,41 @@ void lv_port_flush_execute(LV_DISP_NODE_T *node, lv_display_t *disp,
  
      __disp_fill_display_framebuffer(area, color_ptr, cf, node->disp_fb, node->dev_info.is_swap);
-+    __disp_dirty_add(area);
  
-     if (lv_display_flush_is_last(disp)) {
-+        /* 合成必须发生在交给显示驱动**之前** —— 这一块马上就要被扫描。 */
-+        if (NULL != sg_pre_flush_cb) {
-+            /* 钩子会往 disp_fb 里写脏矩形之外的像素 —— 这块只能整屏同步。 */
-+            sg_dirty_overflow = true;
-+            sg_pre_flush_cb(node->disp_fb);
-+        }
++    /* area 已是面板坐标（disp_flush 里转过）：先记账，换 fb 时只同步这些 */
++    __disp_dirty_add(area, node->disp_fb);
 +
+     if (lv_display_flush_is_last(disp)) {
          tdl_disp_dev_flush(node->dev_hdl, node->disp_fb);
  
          TDL_DISP_FRAME_BUFF_T *next_fb = tdl_disp_get_free_fb(node->fb_mag);
          if (next_fb && next_fb != node->disp_fb) {
 -            __disp_framebuffer_memcpy(&node->dev_info, next_fb->frame,
 -                                      node->disp_fb->frame, node->disp_fb->len);
--            node->disp_fb = next_fb;
-+            bool rect_ok = (!sg_dirty_overflow &&
-+                            next_fb == sg_last_disp_fb &&
-+                            (TUYA_PIXEL_FMT_RGB565 == node->dev_info.fmt ||
-+                             TUYA_PIXEL_FMT_RGB888 == node->dev_info.fmt));
-+
-+            if (rect_ok) {
-+                /* 这块 fb 里正是"本次绘制之前的上一帧"：补上本次刷新的脏矩形即可。 */
-+                for (uint8_t i = 0; i < sg_dirty_cnt; i++) {
-+                    __disp_fb_rect_copy(&node->dev_info, next_fb->frame,
-+                                        node->disp_fb->frame, &sg_dirty[i]);
-+                }
-+                sg_fl_rect++;
-+#if defined(ENABLE_DMA2D) && (ENABLE_DMA2D == 1)
-+                /* 每笔 tal_dma2d_memcpy 只等"上一笔释放源"，这里统一等最后一笔写完。 */
-+                if (NULL != sg_lvgl_dma2d_hdl) {
-+                    tal_dma2d_wait_finish(sg_lvgl_dma2d_hdl, 1000);
-+                }
-+#endif
++            /* 池子正好把"上一帧"那块还回来（ISR 换帧时释放的）-> next_fb 里
++             * 就是上一帧的完整画面，只把本轮脏矩形同步进去即与 disp_fb 一致。
++             * 首上电 / 脏矩形溢出 / 池子顺序异常 / 非 RGB 面板 -> 整屏拷贝。 */
++            if (!s_fb_dirty.first && !s_fb_dirty.overflow &&
++                next_fb == s_fb_dirty.last_disp_fb &&
++                (TUYA_PIXEL_FMT_RGB565 == node->dev_info.fmt ||
++                 TUYA_PIXEL_FMT_RGB888 == node->dev_info.fmt)) {
++                __disp_fb_rect_copy(&node->dev_info, next_fb->frame,
++                                    node->disp_fb->frame,
++                                    s_fb_dirty.rect, s_fb_dirty.n);
 +            } else {
 +                __disp_framebuffer_memcpy(&node->dev_info, next_fb->frame,
 +                                          node->disp_fb->frame, node->disp_fb->len);
-+                sg_fl_full++;
 +            }
++            s_fb_dirty.last_disp_fb = node->disp_fb;
++            s_fb_dirty.first = false;
+             node->disp_fb = next_fb;
 +
-+            sg_last_disp_fb = node->disp_fb;
-+            node->disp_fb   = next_fb;
++            /* 一轮刷新结束：清单清空，下一轮重新累计 */
++            s_fb_dirty.n = 0;
++            s_fb_dirty.overflow = false;
 +        } else {
-+            /* 没换到 buffer（池子等超时）：这块 fb 的身份不再确定，下次整屏兜底。 */
-+            sg_last_disp_fb = NULL;
-+        }
-+
-+        sg_dirty_cnt      = 0;
-+        sg_dirty_overflow = false;
-+    }
-+
-+    /* aipet: 累计 flush 耗时，每 2 秒报一次。 */
-+    dt = lv_tick_get() - t0;
-+    sg_fl_cnt++;
-+    sg_fl_ms_sum += dt;
-+    if (dt > sg_fl_ms_max) {
-+        sg_fl_ms_max = dt;
-+    }
-+    {
-+        uint32_t now = lv_tick_get();
-+
-+        if (0 == sg_fl_at) {
-+            sg_fl_at = now;
-+        } else if ((now - sg_fl_at) >= 2000u) {
-+            PR_DEBUG("[disp] flush %u 次/2s：平均 %u ms 最大 %u ms，全屏拷 %u 脏区拷 %u",
-+                     (unsigned)sg_fl_cnt,
-+                     (unsigned)(sg_fl_ms_sum / sg_fl_cnt),
-+                     (unsigned)sg_fl_ms_max,
-+                     (unsigned)sg_fl_full, (unsigned)sg_fl_rect);
-+            sg_fl_cnt      = 0;
-+            sg_fl_ms_sum   = 0;
-+            sg_fl_ms_max   = 0;
-+            sg_fl_full     = 0;
-+            sg_fl_rect     = 0;
-+            sg_fl_at       = now;
++            /* 没换成（没有空闲 fb / 面板带 VRAM）：下一轮没有可对账的"上一帧"，
++             * 置 first 逼一次整屏拷贝，免得拿隔帧的内容当底。 */
++            s_fb_dirty.first = true;
++            s_fb_dirty.n = 0;
++            s_fb_dirty.overflow = false;
          }
      }
  
-@@ -276,8 +476,14 @@ void lv_port_flush_on_enable(LV_DISP_NODE_T *node)
-         if (next_fb && next_fb != node->disp_fb) {
-             __disp_framebuffer_memcpy(&node->dev_info, next_fb->frame,
-                                       node->disp_fb->frame, node->disp_fb->len);
-+            sg_last_disp_fb = node->disp_fb;
+@@ -279,6 +442,12 @@ void lv_port_flush_on_enable(LV_DISP_NODE_T *node)
              node->disp_fb = next_fb;
          }
-+
-+        /* 恢复显示后池子状态不可假设：下一次刷新整屏同步一次。 */
-+        sg_dirty_cnt      = 0;
-+        sg_dirty_overflow = false;
-+        sg_last_disp_fb   = NULL;
      }
++
++    /* 显示恢复：上一帧对账关系作废，下一轮从整屏拷贝重新开始 */
++    s_fb_dirty.last_disp_fb = NULL;
++    s_fb_dirty.first = true;
++    s_fb_dirty.n = 0;
++    s_fb_dirty.overflow = false;
  }
  
-@@ -287,6 +493,11 @@ void lv_port_flush_release(LV_DISP_NODE_T *node)
+ void lv_port_flush_release(LV_DISP_NODE_T *node)
+@@ -287,6 +456,11 @@ void lv_port_flush_release(LV_DISP_NODE_T *node)
          tdl_disp_fb_manage_release(&node->fb_mag);
          node->fb_mag = NULL;
      }
-+
-+    /* fb 池已经没了，上一帧的指针不能再留（显示设备重建时会被复用/释放）。 */
-+    sg_dirty_cnt      = 0;
-+    sg_dirty_overflow = false;
-+    sg_last_disp_fb   = NULL;
++    /* fb 池子没了：对账指针必须清掉，下一轮 flush_init 会重建 */
++    s_fb_dirty.last_disp_fb = NULL;
++    s_fb_dirty.first = true;
++    s_fb_dirty.n = 0;
++    s_fb_dirty.overflow = false;
  }
  
  /* Low-power hooks: tear down / rebuild the DMA2D that flush_init leaves running. flush_init
-diff --git a/src/liblvgl/v9/port/lv_port_disp_internal.h b/src/liblvgl/v9/port/lv_port_disp_internal.h
-index b88269d..97b3960 100644
---- a/src/liblvgl/v9/port/lv_port_disp_internal.h
-+++ b/src/liblvgl/v9/port/lv_port_disp_internal.h
-@@ -90,6 +90,28 @@ void lv_port_flush_on_enable(LV_DISP_NODE_T *node);
-  */
- void lv_port_flush_release(LV_DISP_NODE_T *node);
+diff --git a/src/libtls/Kconfig b/src/libtls/Kconfig
+index 210e8a7b..ab13917d 100755
+--- a/src/libtls/Kconfig
++++ b/src/libtls/Kconfig
+@@ -19,7 +19,7 @@ menu "configure mbedtls"
+   
+     config ENABLE_MBEDTLS_SSL_MAX_CONTENT_LEN
+             int "TLS maximum message content length"            
+-            default 4096
++            default 1024
+             range 512 16384        
+             help
+                 Maximum TLS message length (in bytes) supported by mbedTLS.
+@@ -35,9 +35,7 @@ menu "configure mbedtls"
  
-+/**********************
-+ * PRE-FLUSH COMPOSITE HOOK
-+ **********************
-+ *
-+ * 应用可以注册一个回调，在 framebuffer 交给显示驱动**之前**把额外的图层
-+ * （比如浮在 UI 之上的 2D 精灵）合成进去。未注册时行为与改动前完全一致。
-+ *
-+ * 为什么必须在这个位置
-+ * --------------------
-+ *  - 面板无 GRAM（has_vram=false），显示控制器持续扫描这块内存，所以任何叠加
-+ *    都只能在"上屏前"这一刻做，没有硬件 overlay 层可用。
-+ *  - LVGL 只在脏区变化时 flush，而精灵会自己动，所以**调用方要负责每帧把精灵
-+ *    覆盖的区域标脏**（lv_obj_invalidate_area），让 LVGL 重画干净底图 ——
-+ *    否则上一帧的精灵会残留在 framebuffer 里被反复叠加。
-+ *
-+ * 只有 full-frame 路径（ENABLE_LVGL_PARTIAL_FLUSH 未启用）实现了本钩子。
-+ */
-+typedef void (*LV_PORT_PRE_FLUSH_CB)(TDL_DISP_FRAME_BUFF_T *fb);
-+
-+/** @brief 注册上屏前合成回调；传 NULL 注销。 */
-+void lv_port_set_pre_flush_cb(LV_PORT_PRE_FLUSH_CB cb);
-+
- #ifdef __cplusplus
- }
- #endif
+                 If the value is set too low, symptoms are a failed TLS
+                 handshake or a return value of MBEDTLS_ERR_SSL_INVALID_RECORD
+-                (-0x7200). US-region certificate chains (e.g. *.iot-wus.com,
+-                3 certs ~2.6KB) exceed 1024, so keep >= 4096 unless the peer
+-                is known to honor max_fragment_length.
++                (-0x7200). 
+ 
+     menuconfig ENABLE_CUSTOM_CONFIG
+         bool "Enable user custom"
+diff --git a/src/libtls/port/tuya_tls_config.h b/src/libtls/port/tuya_tls_config.h
+index fd3cc0e6..a27c68a2 100644
+--- a/src/libtls/port/tuya_tls_config.h
++++ b/src/libtls/port/tuya_tls_config.h
+@@ -916,10 +916,7 @@
+ // #define MBEDTLS_ECP_DP_SECP192R1_ENABLED
+ // #define MBEDTLS_ECP_DP_SECP224R1_ENABLED
+ #define MBEDTLS_ECP_DP_SECP256R1_ENABLED
+-/* US-region cloud chains (e.g. rtc-ai*.iot-wus.com -> DigiCert Global Root G3)
+- * carry an ECDSA P-384 root; without this curve parsing fails with
+- * MBEDTLS_ERR_PK_UNKNOWN_NAMED_CURVE (-0x3a00). */
+-#define MBEDTLS_ECP_DP_SECP384R1_ENABLED
++// #define MBEDTLS_ECP_DP_SECP384R1_ENABLED
+ // #define MBEDTLS_ECP_DP_SECP521R1_ENABLED
+ // #define MBEDTLS_ECP_DP_SECP192K1_ENABLED
+ // #define MBEDTLS_ECP_DP_SECP224K1_ENABLED
 diff --git a/src/libu8g2/u8g2/tools/font/bdf/emoticons21.bdf b/src/libu8g2/u8g2/tools/font/bdf/emoticons21.bdf
-index cf642a2..202b716 100755
+index cf642a2b..202b7169 100755
 --- a/src/libu8g2/u8g2/tools/font/bdf/emoticons21.bdf
 +++ b/src/libu8g2/u8g2/tools/font/bdf/emoticons21.bdf
 @@ -1,618 +1,618 @@
@@ -2553,7 +2962,7 @@ index cf642a2..202b716 100755
 +ENDCHAR
 +ENDFONT
 diff --git a/src/libu8g2/u8g2/tools/font/emoticons/emoticons21.bdf b/src/libu8g2/u8g2/tools/font/emoticons/emoticons21.bdf
-index cf642a2..202b716 100755
+index cf642a2b..202b7169 100755
 --- a/src/libu8g2/u8g2/tools/font/emoticons/emoticons21.bdf
 +++ b/src/libu8g2/u8g2/tools/font/emoticons/emoticons21.bdf
 @@ -1,618 +1,618 @@
@@ -3793,7 +4202,7 @@ index cf642a2..202b716 100755
 +ENDCHAR
 +ENDFONT
 diff --git a/src/peripherals/audio_codecs/tdd_audio/src/tdd_audio.c b/src/peripherals/audio_codecs/tdd_audio/src/tdd_audio.c
-index 5d3b961..5581a66 100755
+index 5d3b9615..5581a66c 100755
 --- a/src/peripherals/audio_codecs/tdd_audio/src/tdd_audio.c
 +++ b/src/peripherals/audio_codecs/tdd_audio/src/tdd_audio.c
 @@ -61,6 +61,20 @@ static TDD_AUDIO_DATA_HANDLE_T *g_tdd_audio_hdl = NULL;
@@ -3818,90 +4227,361 @@ index 5d3b961..5581a66 100755
          return 0;
      }
 diff --git a/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_dvp.c b/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_dvp.c
-index ff58fb7..2db8a5e 100644
+index ff58fb7a..b8c3feb2 100644
 --- a/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_dvp.c
 +++ b/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_dvp.c
-@@ -223,10 +223,16 @@ static OPERATE_RET __tdd_camera_dvp_open(TDD_CAMERA_DEV_HANDLE_T device, TDD_CAM
-  */
- static OPERATE_RET __tdd_camera_dvp_close(TDD_CAMERA_DEV_HANDLE_T device)
- {
--    if(NULL == device) {
-+    if (NULL == device) {
-         return OPRT_INVALID_PARM;
-     }
--    /* Stop, not teardown - tkl_dvp_deinit belongs to shutting the board down. */
-+
-+    /* 只 stop，不能 deinit。
-+     *
-+     * 2026-10-20 实测：在 close 里调 tkl_dvp_deinit() 后，TDL 的帧节点还挂在
-+     * DVP 队列里没归还；下次 open 时 `__dvp_yuv_mode_init` 的
-+     * `assign idle frame` 失败，整个相机再也开不起来（ret=-4）。
-+     * 全量拆机只能放在关机流程，不能放在每次关流。 */
-     return tkl_dvp_stop();
+@@ -81,6 +81,30 @@ __EXIT:
+     return dvp_frame;
  }
  
++/**
++ * @brief Return a frame to the camera's frame pool
++ * @param dvp_frame Frame previously handed out by __tdd_dvp_frame_manage_malloc
++ * @return OPRT_OK on success, OPRT_INVALID_PARM if the frame is malformed
++ *
++ * 帧池是"有借有还"的链表：create_tdd_frame 摘节点，release_tdd_frame 挂回。
++ * tkl_dvp 在 deinit 时把 base_frame/encoded_frame 直接置 NULL 就等于永久借走，
++ * raw 池又只有 2~3 块 —— 抓一次图（YUV->JPEG->YUV 是两次 deinit）就把池耗光，
++ * 之后每次 open 都报 `assign idle frame fail`。
++ */
++static OPERATE_RET __tdd_dvp_frame_manage_free(TUYA_DVP_FRAME_MANAGE_T *dvp_frame, void *args)
++{
++    (void)args;
++
++    if(NULL == dvp_frame || NULL == dvp_frame->arg) {
++        return OPRT_INVALID_PARM;
++    }
++
++    tdl_camera_release_tdd_frame((TDD_CAMERA_DEV_HANDLE_T)sg_dvp_dev,
++                                 (TDD_CAMERA_FRAME_T *)dvp_frame->arg);
++
++    return OPRT_OK;
++}
++
+ /**
+  * @brief Frame post handler for DVP hardware interrupt
+  * @brief WARNING: This is hardware interrupt handler for T5, do not use PR_xxx here!
+@@ -149,6 +173,7 @@ static OPERATE_RET __tdd_camera_dvp_init(CAMERA_DVP_DEV_T *dev, TDD_CAMERA_OPEN_
+     dev->dvp_cfg.inter_cfg.sensor_clk = dev->sensor.usr_cfg.clk;
+     dev->dvp_cfg.inter_cfg.setup_cb = __tdd_dvp_setup_callback;
+     dev->dvp_cfg.inter_cfg.assign_cb = __tdd_dvp_frame_manage_malloc;
++    dev->dvp_cfg.inter_cfg.free_cb   = __tdd_dvp_frame_manage_free;
+     dev->dvp_cfg.inter_cfg.post_cb = __tdd_dvp_frame_post_handler;
+     dev->dvp_cfg.inter_cfg.cb_param = NULL;
+ 
+@@ -181,9 +206,31 @@ static OPERATE_RET __tdd_camera_dvp_open(TDD_CAMERA_DEV_HANDLE_T device, TDD_CAM
+     p_usr_cfg  = &(dvp_dev->sensor.usr_cfg);
+ 
+     /* Power, I2C, reset and the sensor's registers are board state, not session
+-     * state: bring them up once and let open/close be start/stop. */
++     * state: bring them up once and let open/close be start/stop.
++     *
++     * 但 output_mode（YUV422 / JPEG / H264）是**会话**状态：抓图时上层先 close
++     * 再以 JPEG 重开，若这里直接 tkl_dvp_start()，编码器仍停在 YUV_MODE，
++     * 一帧 JPEG 都不会产生 —— 现象是 encoded_flow_task 起来了却等不到回调
++     * （app_camera 侧报"抓图超时"）。所以模式变了要拆到板级重来一遍。 */
+     if(dvp_dev->is_inited) {
+-        return tkl_dvp_start();
++        TUYA_CAMERA_OUTPUT_MODE want;
++
++        switch(cfg->out_fmt) {
++            case TDL_CAMERA_FMT_YUV422:           want = TUYA_CAMERA_OUTPUT_YUV422;           break;
++            case TDL_CAMERA_FMT_JPEG:             want = TUYA_CAMERA_OUTPUT_JPEG;             break;
++            case TDL_CAMERA_FMT_H264:             want = TUYA_CAMERA_OUTPUT_H264;             break;
++            case TDL_CAMERA_FMT_JPEG_YUV422_BOTH: want = TUYA_CAMERA_OUTPUT_JPEG_YUV422_BOTH; break;
++            case TDL_CAMERA_FMT_H264_YUV422_BOTH: want = TUYA_CAMERA_OUTPUT_H264_YUV422_BOTH; break;
++            default:                              return OPRT_INVALID_PARM;
++        }
++
++        if(dvp_dev->dvp_cfg.output_mode == want) {
++            return tkl_dvp_start();
++        }
++
++        /* 重新初始化：下面的流程会重配 I2C/电源/复位/传感器寄存器/set_ppi。 */
++        (void)tkl_dvp_deinit();
++        dvp_dev->is_inited = false;
+     }
+ 
+     if(p_usr_cfg->i2c.port < TUYA_I2C_NUM_MAX) {
 diff --git a/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_dvp_gc2145.c b/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_dvp_gc2145.c
-index 5a6ad6d..79ac425 100644
+index 5a6ad6d4..49b745f2 100644
 --- a/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_dvp_gc2145.c
 +++ b/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_dvp_gc2145.c
-@@ -44,6 +44,7 @@ typedef struct {
+@@ -11,6 +11,8 @@
+  *
+  */
+ 
++#include <stdio.h>
++
+ #include "tuya_cloud_types.h"
+ #include "tal_api.h"
+ #include "tkl_gpio.h"
+@@ -44,6 +46,10 @@ typedef struct {
  
  const CAMERA_PPI_INIT_TAB_T cPPI_INIT_SEQ_LIST[] = {
      {TUYA_CAMERA_PPI_240X240, (uint8_t *)cGC2145_240_240_TAB, CNTSOF(cGC2145_240_240_TAB)},
-+    {TUYA_CAMERA_PPI_320X240, (uint8_t *)cGC2145_320_240_FULL_TAB, CNTSOF(cGC2145_320_240_FULL_TAB)},
++    /* 320×240：aipet 预览用。缺这一行时 set_ppi() 找不到表示不会写任何寄存器，
++     * 传感器仍按 init 表的尺寸出图，而 yuv_buf 按 320×240 收 —— 画面只是从大
++     * 图里挖的左上角一块，DVP 带宽一点没省。 */
++    {TUYA_CAMERA_PPI_320X240, (uint8_t *)cGC2145_320_240_TAB, CNTSOF(cGC2145_320_240_TAB)},
      {TUYA_CAMERA_PPI_480X480,  (uint8_t *)cGC2145_480_480_TAB,  CNTSOF(cGC2145_480_480_TAB)},
      {TUYA_CAMERA_PPI_640X480,  (uint8_t *)cGC2145_640_480_TAB,  CNTSOF(cGC2145_640_480_TAB)},
      {TUYA_CAMERA_PPI_800X480,  (uint8_t *)cGC2145_800_480_TAB,  CNTSOF(cGC2145_800_480_TAB)},
-diff --git a/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_gc2145_init_seq.h b/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_gc2145_init_seq.h
-index 724c8f4..34333cd 100644
---- a/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_gc2145_init_seq.h
-+++ b/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_gc2145_init_seq.h
-@@ -207,6 +207,21 @@ const uint8_t cGC2145_640_480_TAB[][2] = {
- 	{0x95, 0x01}, {0x96, 0xe0}, {0x97, 0x02}, {0x98, 0x80},
- };
+@@ -107,6 +113,143 @@ static void __dvp_gc2145_update_reg(TUYA_I2C_NUM_E port, const uint8_t sensor_re
+     }
+ }
  
-+/* aipet: 320×240，但保留 VGA 的裁剪窗口（全视野）。
-+ * 用来验证 GC2145 的 out_win 是“缩放”还是“裁剪”：
-+ * 如果画面视野和 VGA 一样、只是变小，就是缩放；如果视野变窄，就是裁剪。 */
-+const uint8_t cGC2145_320_240_FULL_TAB[][2] = {
-+	{0xfe, 0x00}, {0xfe, 0x00}, {0xf8, 0x85}, {0xfa, 0x00},
-+
-+     /********* crop window：与 VGA 相同 ******/
-+	{0xfe, 0x00}, {0x09, 0x00}, {0x0a, 0x78}, {0x0b, 0x00}, {0x0c, 0xA0},
-+	{0x0d, 0x03}, {0x0e, 0xd0}, {0x0f, 0x05}, {0x10, 0x10}, {0xfd, 0x01},
-+
-+     /********* out windows：320×240 ******/
-+    {0x90, 0x01}, {0x91, 0x00}, {0x92, 0x00}, {0x93, 0x00}, {0x94, 0x00},
-+	{0x95, 0x00}, {0x96, 0xf0}, {0x97, 0x01}, {0x98, 0x40},
++/* 关键寄存器：窗口 / 输出尺寸 / 子采样 / 缩放器。
++ *
++ * 为什么这几条要单独盯：它们**不是写完就生效**，传感器在帧边界上整批换值。
++ * 2026-10-20 的实测就是这样：写完立刻回读，读到的是 init 表的旧值
++ * （0D=04/0F=06/99=11），隔一帧再读才是新值。上一版把"立刻回读"当判据，
++ * 于是把"正常换值"报成了"没落住 9 条"，纯属误导。
++ *
++ * 但确实有一种真的没落住：JPEG 模式那一趟，隔一帧再读 0x99 还是 0x11、
++ * 0xFD 被传感器自己置成了 1（切到内部缩放器），画面就只剩中间一小块。
++ * 所以判据改成"等一下、回读、不一致就重写"，重写最多 3 轮。 */
++static const uint8_t s_crit_regs[] = {
++    0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
++    0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0xfd
 +};
 +
- const uint8_t cGC2145_640_480_30FPS_TAB[][2] = {
-     {0xfe, 0x00}, {0x05, 0x01}, {0x06, 0x56}, {0x07, 0x00}, {0x08, 0xa0},
-     {0xfe, 0x01}, {0x25, 0x01}, {0x26, 0x63}, {0x27, 0x04}, {0x28, 0x29},
++static int __dvp_gc2145_fix_crit(TUYA_I2C_NUM_E port,
++                                 const uint8_t tab[][2], uint32_t size)
++{
++    DVP_I2C_REG_CFG_T i2c_reg_cfg = { 0 };
++    int               round;
++    int               rewrite_total = 0;
++    int               left          = 0;
++    char              bad[256]      = { 0 };
++    int               bad_n         = 0;
++
++    i2c_reg_cfg.port      = port;
++    i2c_reg_cfg.addr      = (GC2145_WRITE_ADDRESS >> 1);
++    i2c_reg_cfg.is_16_reg = 0;
++
++    tal_system_sleep(20);               /* 先让刚才那批写入过一帧边界 */
++
++    for (round = 0; round < 3; round++) {
++        int rewrite = 0;
++
++        left  = 0;
++        bad_n = 0;
++        bad[0] = '\0';
++
++        for (uint32_t i = 0; i < CNTSOF(s_crit_regs); i++) {
++            uint8_t want = 0;
++            uint8_t cur  = 0;
++            BOOL_T  found = FALSE;
++            int     n;
++
++            for (uint32_t k = 0; k < size; k++) {
++                if (tab[k][0] == s_crit_regs[i]) {
++                    want  = tab[k][1];
++                    found = TRUE;
++                    break;
++                }
++            }
++            if (!found) {
++                continue;               /* 这张表没写这条，不管它 */
++            }
++
++            i2c_reg_cfg.reg = s_crit_regs[i];
++            if (OPRT_OK != tdd_dvp_i2c_read(&i2c_reg_cfg, 1, &cur)) {
++                cur = 0xEE;
++            }
++            if (cur == want) {
++                continue;
++            }
++
++            n = snprintf(bad + bad_n, sizeof(bad) - (size_t)bad_n,
++                         " %02X:%02X>%02X", s_crit_regs[i], want, cur);
++            if ((n > 0) && ((size_t)(bad_n + n) < sizeof(bad))) {
++                bad_n += n;
++            }
++            left++;
++
++            if (round < 2) {            /* 最后一轮只报不改 */
++                uint8_t v = want;
++
++                if (OPRT_OK == tdd_dvp_i2c_write(&i2c_reg_cfg, 1, &v)) {
++                    rewrite++;
++                }
++            }
++        }
++
++        rewrite_total += rewrite;
++
++        if (0 == left) {
++            if (rewrite_total > 0) {
++                PR_NOTICE("gc2145 win-fix：第 %d 轮才落住（共重写 %d 条）",
++                          round + 1, rewrite_total);
++            }
++            return 0;
++        }
++        if (0 == rewrite) {
++            break;                      /* 这轮一条也没改写成功，再试没意义 */
++        }
++        tal_system_sleep(20);
++    }
++
++    PR_ERR("gc2145 win-fix 失败：%d 条传感器不认（重写 %d 条）:%s",
++           left, rewrite_total, bad);
++    return left;
++}
++
++/**
++ * @brief Read the window/output-size registers back after a PPI table is applied
++ * @param port I2C port number
++ *
++ * 用来把"画面被裁"二分成两类，别靠猜：
++ *   - 回读 == 表里写进去的值  → 传感器接受了配置，画面还窄就得往 DVP 收帧那一侧查；
++ *   - 回读 != 写进去的值      → 传感器忽略了（PLL/时钟约束），只能换参数或换表。
++ * 0xEE 表示这一条读失败。寄存器含义见 cGC2145_320_240_TAB 上面的注释。
++ */
++static void __dvp_gc2145_dump_win(TUYA_I2C_NUM_E port)
++{
++    static const uint8_t regs[] = {0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
++                                   0x10, 0x95, 0x96, 0x97, 0x98, 0x99, 0xfd, 0xfa};
++    DVP_I2C_REG_CFG_T    i2c_reg_cfg;
++    char                 line[sizeof(regs) * 8 + 8] = { 0 };
++    int                  n = 0;
++
++    i2c_reg_cfg.port      = port;
++    i2c_reg_cfg.addr      = (GC2145_WRITE_ADDRESS >> 1);
++    i2c_reg_cfg.is_16_reg = 0;
++
++    for (uint32_t i = 0; i < CNTSOF(regs); i++) {
++        uint8_t v = 0xFF;
++
++        i2c_reg_cfg.reg = regs[i];
++        if (OPRT_OK != tdd_dvp_i2c_read(&i2c_reg_cfg, 1, &v)) {
++            v = 0xEE;
++        }
++        n += snprintf(line + n, sizeof(line) - (size_t)n, " %02X=%02X",
++                      regs[i], (unsigned)v);
++        if (n >= (int)sizeof(line)) {
++            n = (int)sizeof(line) - 1;
++        }
++    }
++
++    PR_NOTICE("gc2145 readback:%s", line);
++}
++
+ /**
+  * @brief Reset GC2145 camera sensor
+  * @param rst_pin Pointer to reset pin control structure
+@@ -196,12 +339,33 @@ static OPERATE_RET __dvp_gc2145_set_ppi(DVP_I2C_CFG_T *i2c, TUYA_CAMERA_PPI_E pp
+ 
+     if(ppi_init_tab) {
+         __dvp_gc2145_update_reg(i2c->port, (const uint8_t (*)[2])ppi_init_tab->seq_tab, ppi_init_tab->tab_size);
++    } else {
++        /* 找不到表时一个寄存器都不写、仍然返回 OK —— 传感器会保持 init 表配的
++         * 分辨率，而 yuv_buf 是按请求的 width/height 收的，两边对不上就只能从
++         * 大图里挖一块。这条日志就是为了让这种"静默落空"一眼可见。 */
++        PR_NOTICE("set_ppi: NO table for %ux%u, sensor keeps init resolution",
++                  (unsigned)(ppi >> 16), (unsigned)(ppi & 0xFFFF));
+     }
+ 
+     if(fps_init_tab) {
+         __dvp_gc2145_update_reg(i2c->port, (const uint8_t (*)[2])fps_init_tab->seq_tab, fps_init_tab->tab_size);
+     }
+ 
++    if(ppi_init_tab) {
++        /* 320x240 是新补的表，窗口/子采样这一组最容易被传感器吞掉，单独核对一遍。
++         * 其余分辨率沿用 SDK 原表的既有行为，不在这里加动作。 */
++        if (TUYA_CAMERA_PPI_320X240 == ppi) {
++            (void)__dvp_gc2145_fix_crit(i2c->port,
++                                        (const uint8_t (*)[2])ppi_init_tab->seq_tab,
++                                        ppi_init_tab->tab_size);
++        }
++        __dvp_gc2145_dump_win(i2c->port);
++        /* 隔一帧再读一次。窗口/子采样这类寄存器有可能被传感器在帧边界回滚
++         * （或者要等 PLL 锁定才生效），两次一样才能排除"读得太早"。 */
++        tal_system_sleep(60);
++        __dvp_gc2145_dump_win(i2c->port);
++    }
++
+     PR_NOTICE("__dvp_gc2145_set_ppi ppi:%x, fps:%d", ppi, fps);
+ 
+     return OPRT_OK;
+diff --git a/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_gc2145_init_seq.h b/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_gc2145_init_seq.h
+index 724c8f4b..c2e23036 100644
+--- a/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_gc2145_init_seq.h
++++ b/src/peripherals/camera/tdd_camera/src/dvp/tdd_camera_gc2145_init_seq.h
+@@ -355,6 +355,53 @@ const uint8_t cGC2145_240_240_TAB[][2] = {
+     {0xfe, 0x00}, 
+ };
+ 
++/* 320×240（4:3）—— 应用层预览请求的分辨率。
++ *
++ * 这张表是"先裁剪、再 ROTT"能成立的前提：只有传感器自己按 320×240 出图，
++ * ROTT 才有紧凑缓冲可吃。没有这张表时 set_ppi() 会静默跳过（找不到就不写
++ * 寄存器、还返回 OK），传感器继续按 init 表配的尺寸出图，而 yuv_buf 按
++ * 320×240 去收 —— 结果只是从大图里挖了左上角一块，既没省带宽，视野也偏。
++ *
++ * 寄存器语义（Page0，由本文件 400×160 表的规格书注释 + 240/480 表互证）：
++ *   0x09/0x0a = 窗口行起始，0x0b/0x0c = 窗口列起始
++ *   0x0d/0x0e = 窗口**高**，  0x0f/0x10 = 窗口**宽**   （两者都是尺寸，不是结束坐标）
++ *   0x95/0x96 = 输出高，      0x97/0x98 = 输出宽
++ *   0x99      = 子采样比 [7:4]行 / [3:0]列（0x11=1:1，0x22=2:1，0x44=4:1）
++ *   0xfd      = 缩放器开关，且与 0xfa 配对：
++ *               0xfd=0 + 0xfa=0x11 → 走子采样；0xfd=1 + 0xfa=0x00 → 走缩放器
++ *
++ * 三个已实的证据点（都从原表推得，不是猜）：
++ *   240×240：窗 976×976，0x99=0x44，0xfd=0 → 244×244 → out 240×240
++ *   480×480：窗 976×976，0x99=0x22，0xfd=0 → 488×488 → out 480×480
++ *   400×160：窗 816×320，0x99=0x22，0xfd=0 → 408×160 → out 400×160
++ * 结论：**子采样决定分辨率，out_win 只能从子采样结果里裁，不能放大**。
++ *
++ * 本表：照 240×240 表的 4:1 子采样路径，只把窗口放大到接近 VGA 的视野：
++ *   窗 1280×960（VGA 是 1296×976，视野只差 1%），4:1 → 320×240，与 out 恰好相等，
++ *   **完全不需要 out_win 裁剪**。
++ *
++ * 前两版为什么都只剩一小块：
++ *   v1 窗 1296×976 + 0x99=0x44 → 324×244，要裁 4 像素；
++ *   v2 窗 1296×976 + 1:1 + 0xfd=1 → 缩放器只做 2 倍 → 648×488，
++ *      out 取 320×240 等于只留 49% 的视野。
++ * 这版把裁剪量压到 0，参数全部落在已验证的 4:1 路径上。 */
++const uint8_t cGC2145_320_240_TAB[][2] = {
++    {0xfe, 0x00}, {0xfe, 0x00}, {0xf8, 0x85}, {0xfa, 0x11}, {0xfe, 0x00},
++    /* 窗口：行起始 120、列起始 160、高 960(0x03C0)、宽 1280(0x0500) */
++    {0x09, 0x00}, {0x0a, 0x78}, {0x0b, 0x00}, {0x0c, 0xA0}, {0x0d, 0x03},
++    {0x0e, 0xC0}, {0x0f, 0x05}, {0x10, 0x00},
++    /* 0xfd=0x00 + 0xfa=0x11：走 4:1 子采样（同 240×240 表） */
++    {0xfd, 0x00}, {0x90, 0x01}, {0x91, 0x00}, {0x92, 0x00}, {0x93, 0x00},
++    {0x94, 0x00},
++    /* 输出 高 240(0x00F0) 宽 320(0x0140) = 窗口 1280×960 的 1/4，零裁剪 */
++    {0x95, 0x00}, {0x96, 0xF0}, {0x97, 0x01}, {0x98, 0x40},
++    {0x99, 0x44},
++    {0xfe, 0x00}, {0x05, 0x01}, {0x06, 0x56}, {0x07, 0x00}, {0x08, 0xa0},
++    {0xfe, 0x01}, {0x25, 0x01}, {0x26, 0x63}, {0x27, 0x04}, {0x28, 0x29},
++    {0x29, 0x04}, {0x2a, 0x29}, {0x2b, 0x04}, {0x2c, 0x29}, {0x2d, 0x04},
++    {0x2e, 0x29}, {0xfe, 0x00},
++};
++
+ /***********************************************************
+ ********************function declaration********************
+ ***********************************************************/
 diff --git a/src/peripherals/camera/tdl_camera/src/tdl_camera_manage.c b/src/peripherals/camera/tdl_camera/src/tdl_camera_manage.c
-index b5580ae..e5506e1 100644
+index b5580ae9..12cec946 100644
 --- a/src/peripherals/camera/tdl_camera/src/tdl_camera_manage.c
 +++ b/src/peripherals/camera/tdl_camera/src/tdl_camera_manage.c
-@@ -28,9 +28,14 @@
+@@ -27,7 +27,11 @@
+ /***********************************************************
  ************************macro define************************
  ***********************************************************/
- #define CAMERA_RAW_FRAME_BUFF_CNT           (2)
--#define CAMERA_ENCODE_FRAME_BUFF_CNT        (CAMERA_RAW_FRAME_BUFF_CNT << 2)
--
--#define CAMERA_RAW_PER_PIXEL_MAX_BYTE       (3)
-+/* aipet: 编码路只在按快门那一下用，一次只要一张。原来的 8 个缓冲
-+ * （VGA 下 8x184KB 约 1.5MB PSRAM，且跨会话不释放）把 8MB PSRAM 的机器
-+ * 直接挤爆，第二次进拍照页连 256KB 都分配不出来。2 个够用。 */
-+#define CAMERA_ENCODE_FRAME_BUFF_CNT        (2)
-+
-+/* aipet: 只用到 YUV422（2 字节/像素）+ JPEG（走编码池）。原来的 3 是按
-+ * RGB888 预留的，VGA 下两个原始缓冲白占 614KB。 */
-+#define CAMERA_RAW_PER_PIXEL_MAX_BYTE       (2)
- #define CAMERA_ENCODE_MIN_COMP_PCT          (20) // Unit: percentage
+-#define CAMERA_RAW_FRAME_BUFF_CNT           (2)
++/* 3 而不是 2：切 output_mode（预览 YUV -> 抓图 JPEG -> 回 YUV）时，前一模式
++ * 可能还有一帧压在 raw_flow_task 的队列里没消费完，同时新一次 init 又要借一块。
++ * 只有 2 块时这一步会借空（assign idle frame fail）。多一块 320x240 的 YUV422
++ * 是 225KB，换掉一次"拍照后摄像头再也进不去"的问题。 */
++#define CAMERA_RAW_FRAME_BUFF_CNT           (3)
+ #define CAMERA_ENCODE_FRAME_BUFF_CNT        (CAMERA_RAW_FRAME_BUFF_CNT << 2)
  
- #if defined(ENABLE_EXT_RAM) && (ENABLE_EXT_RAM==1)
+ #define CAMERA_RAW_PER_PIXEL_MAX_BYTE       (3)
 diff --git a/src/peripherals/display/tdd_display/src/rgb/tdd_disp_rgb_ili9488.c b/src/peripherals/display/tdd_display/src/rgb/tdd_disp_rgb_ili9488.c
-index 140b185..194833a 100644
+index 140b1856..194833a1 100644
 --- a/src/peripherals/display/tdd_display/src/rgb/tdd_disp_rgb_ili9488.c
 +++ b/src/peripherals/display/tdd_display/src/rgb/tdd_disp_rgb_ili9488.c
 @@ -46,7 +46,38 @@ const uint8_t cILI9488_INIT_SEQ[] = {
@@ -3945,7 +4625,7 @@ index 140b185..194833a 100644
              .pixel_fmt = TUYA_PIXEL_FMT_RGB565,
              .hsync_back_porch = 80,
 diff --git a/src/peripherals/tp/tdd_tp/include/tdd_tp_gt1151.h b/src/peripherals/tp/tdd_tp/include/tdd_tp_gt1151.h
-index f4411f9..dc2c493 100644
+index f4411f92..dc2c493a 100644
 --- a/src/peripherals/tp/tdd_tp/include/tdd_tp_gt1151.h
 +++ b/src/peripherals/tp/tdd_tp/include/tdd_tp_gt1151.h
 @@ -32,8 +32,16 @@ extern "C" {
@@ -3966,8 +4646,396 @@ index f4411f9..dc2c493 100644
  #else
  #define GT1151_POINT_INFO_NUM (TP_SUPPORT_MAX_NUM)
  #endif
+diff --git a/src/tuya_ai_service/port/include/http_manager.h b/src/tuya_ai_service/port/include/http_manager.h
+index 09615998..0a9aa96a 100644
+--- a/src/tuya_ai_service/port/include/http_manager.h
++++ b/src/tuya_ai_service/port/include/http_manager.h
+@@ -224,11 +224,6 @@ typedef OPERATE_RET (*FUNC_HTTP_SESSION_SEND)(IN CONST SESSION_ID session, IN CO
+  */
+ typedef OPERATE_RET (*FUNC_HTTP_SESSION_RECEIVE)(SESSION_ID session, http_resp_t **resp);
+ 
+-/** Read response body bytes from a session created by this manager.
+- * Returns the number of bytes read, 0 at end of response, or -1 on error.
+- */
+-typedef int (*FUNC_HTTP_SESSION_READ_CONTENT)(SESSION_ID session, void *buf, unsigned int max_len);
+-
+ /**
+  * @brief This API is used to destroy HTTP session
+  *
+@@ -269,8 +264,6 @@ typedef struct {
+     FUNC_HTTP_SESSION_SEND send_http_request;
+     /** handler to recv response header from HTTP session */
+     FUNC_HTTP_SESSION_RECEIVE receive_http_response;
+-    /** handler to read response body from HTTP session */
+-    FUNC_HTTP_SESSION_READ_CONTENT read_http_content;
+     /** handler to destroy HTTP session */
+     FUNC_HTTP_SESSION_DESTORY destory_http_session;
+     /** handler to recv response content from HTTP session */
+diff --git a/src/tuya_ai_service/port/src/http_manager.c b/src/tuya_ai_service/port/src/http_manager.c
+index d5679749..3fbd7530 100644
+--- a/src/tuya_ai_service/port/src/http_manager.c
++++ b/src/tuya_ai_service/port/src/http_manager.c
+@@ -49,7 +49,7 @@ static S_HTTP_MANAGER s_http_manager = {0};
+ static void *http_mem_calloc(size_t count, size_t size)
+ {
+     size_t total = count * size;
+-    void  *ptr   = HTTP_MEMORY_MALLOC(total);
++    void *ptr = HTTP_MEMORY_MALLOC(total);
+     if (ptr) {
+         memset(ptr, 0, total);
+     }
+@@ -63,17 +63,16 @@ static inline void http_safe_free(void *ptr)
+     }
+ }
+ 
+-static SESSION_ID  http_session_create_internal(const char *url, BOOL_T is_persistent);
+-static SESSION_ID  http_session_create(const char *url, BOOL_T is_persistent);
+-static SESSION_ID  http_session_create_tls(const char *url, BOOL_T is_persistent, tuya_tls_config_t *config);
++static SESSION_ID http_session_create_internal(const char *url, BOOL_T is_persistent);
++static SESSION_ID http_session_create(const char *url, BOOL_T is_persistent);
++static SESSION_ID http_session_create_tls(const char *url, BOOL_T is_persistent, tuya_tls_config_t *config);
+ static OPERATE_RET http_session_destroy(SESSION_ID id);
+ static OPERATE_RET http_session_send(const SESSION_ID session, const http_req_t *req, http_hdr_field_sel_t field_flags);
+ static OPERATE_RET http_session_receive(SESSION_ID session, http_resp_t **resp);
+-static int         http_session_read_content(SESSION_ID session, void *buf, unsigned int max_len);
+ static OPERATE_RET http_session_receive_data(SESSION_ID session, http_resp_t *pResp, uint8_t **pDataOut);
+ static OPERATE_RET http_parse_url(const char *url, char **host, char **path, uint16_t *port, BOOL_T *use_tls);
+ static const char *http_method_to_string(http_method_t method);
+-static void        http_session_ctx_reset_response(http_session_ctx_t *ctx);
++static void http_session_ctx_reset_response(http_session_ctx_t *ctx);
+ 
+ /***********************************************************
+ ***********************function define**********************
+@@ -87,14 +86,13 @@ S_HTTP_MANAGER *get_http_manager_instance(VOID_T)
+             return NULL;
+         }
+ 
+-        s_http_manager.inited                  = true;
+-        s_http_manager.create_http_session     = http_session_create;
++        s_http_manager.inited = true;
++        s_http_manager.create_http_session = http_session_create;
+         s_http_manager.create_http_session_tls = http_session_create_tls;
+-        s_http_manager.send_http_request       = http_session_send;
+-        s_http_manager.receive_http_response   = http_session_receive;
+-        s_http_manager.read_http_content       = http_session_read_content;
+-        s_http_manager.destory_http_session    = http_session_destroy;
+-        s_http_manager.receive_http_data       = http_session_receive_data;
++        s_http_manager.send_http_request = http_session_send;
++        s_http_manager.receive_http_response = http_session_receive;
++        s_http_manager.destory_http_session = http_session_destroy;
++        s_http_manager.receive_http_data = http_session_receive_data;
+     }
+ 
+     return &s_http_manager;
+@@ -113,7 +111,7 @@ static SESSION_ID http_session_create_internal(const char *url, BOOL_T is_persis
+     }
+ 
+     size_t url_len = strlen(url);
+-    ctx->url       = HTTP_MEMORY_MALLOC(url_len + 1);
++    ctx->url = HTTP_MEMORY_MALLOC(url_len + 1);
+     if (!ctx->url) {
+         PR_ERR("alloc session url failed");
+         HTTP_MEMORY_FREE(ctx);
+@@ -130,9 +128,9 @@ static SESSION_ID http_session_create_internal(const char *url, BOOL_T is_persis
+         return NULL;
+     }
+ 
+-    session->s             = (http_session_t)ctx;
++    session->s = (http_session_t)ctx;
+     session->is_persistent = is_persistent;
+-    session->state         = HTTP_DISCONNECT;
++    session->state = HTTP_DISCONNECT;
+     strncpy(session->url, url, MAX_HTTP_URL_LEN - 1);
+     session->url[MAX_HTTP_URL_LEN - 1] = '\0';
+ 
+@@ -203,17 +201,17 @@ static void http_session_ctx_reset_response(http_session_ctx_t *ctx)
+         memset(&ctx->transport, 0, sizeof(TransportInterface_t));
+         memset(&ctx->request_headers, 0, sizeof(HTTPRequestHeaders_t));
+ 
+-        ctx->streaming_mode    = false;
++        ctx->streaming_mode = false;
+         ctx->total_body_length = 0;
+-        ctx->bytes_read        = 0;
++        ctx->bytes_read = 0;
+     }
+ 
+     ctx->resp_info.content_length = 0;
+-    ctx->resp_info.status_code    = 0;
+-    ctx->resp_info.chunked        = false;
++    ctx->resp_info.status_code = 0;
++    ctx->resp_info.chunked = false;
+     ctx->resp_info.keep_alive_ack = false;
+-    ctx->read_offset              = 0;
+-    ctx->response_ready           = false;
++    ctx->read_offset = 0;
++    ctx->response_ready = false;
+ 
+     http_safe_free(ctx->host);
+     ctx->host = NULL;
+@@ -284,7 +282,7 @@ static OPERATE_RET http_parse_url(const char *url, char **host, char **path, uin
+     }
+ 
+     size_t schema_len = parsed.field_data[UF_SCHEMA].len;
+-    *use_tls          = false;
++    *use_tls = false;
+     if (schema_len) {
+         const char *schema = url + parsed.field_data[UF_SCHEMA].off;
+         if ((schema_len == strlen("https")) && (strncasecmp(schema, "https", schema_len) == 0)) {
+@@ -304,10 +302,10 @@ static OPERATE_RET http_parse_url(const char *url, char **host, char **path, uin
+     }
+     memcpy(*host, url + parsed.field_data[UF_HOST].off, host_len);
+ 
+-    size_t path_len  = parsed.field_data[UF_PATH].len;
++    size_t path_len = parsed.field_data[UF_PATH].len;
+     size_t query_len = parsed.field_data[UF_QUERY].len;
+     size_t total_len = (path_len ? path_len : 1) + (query_len ? (query_len + 1) : 0);
+-    *path            = http_mem_calloc(1, total_len + 1);
++    *path = http_mem_calloc(1, total_len + 1);
+     if (!*path) {
+         http_safe_free(*host);
+         *host = NULL;
+@@ -320,7 +318,7 @@ static OPERATE_RET http_parse_url(const char *url, char **host, char **path, uin
+         offset = path_len;
+     } else {
+         (*path)[0] = '/';
+-        offset     = 1;
++        offset = 1;
+     }
+ 
+     if (query_len) {
+@@ -348,10 +346,10 @@ static OPERATE_RET http_session_send(const SESSION_ID session, const http_req_t
+     /* Clean up any previous session state before starting new request */
+     http_session_ctx_reset_response(ctx);
+ 
+-    char    *host    = NULL;
+-    char    *path    = NULL;
+-    uint16_t port    = 0;
+-    BOOL_T   use_tls = false;
++    char *host = NULL;
++    char *path = NULL;
++    uint16_t port = 0;
++    BOOL_T use_tls = false;
+ 
+     OPERATE_RET rt = http_parse_url(req->resource, &host, &path, &port, &use_tls);
+     if (OPRT_OK != rt) {
+@@ -366,14 +364,14 @@ static OPERATE_RET http_session_send(const SESSION_ID session, const http_req_t
+     }
+ 
+     /* Store host and path in context for cleanup */
+-    ctx->host    = host;
+-    ctx->path    = path;
+-    ctx->port    = port;
++    ctx->host = host;
++    ctx->path = path;
++    ctx->port = port;
+     ctx->use_tls = use_tls;
+ 
+     /* Create and connect network transport */
+     TUYA_TRANSPORT_TYPE_E transport_type = use_tls ? TRANSPORT_TYPE_TLS : TRANSPORT_TYPE_TCP;
+-    ctx->network                         = tuya_transporter_create(transport_type, NULL);
++    ctx->network = tuya_transporter_create(transport_type, NULL);
+     if (!ctx->network) {
+         PR_ERR("Failed to create transporter");
+         http_safe_free(host);
+@@ -381,13 +379,9 @@ static OPERATE_RET http_session_send(const SESSION_ID session, const http_req_t
+         return OPRT_MALLOC_FAILED;
+     }
+ 
+-    /* Configure TLS if needed.
+-     * The TLS layer only keeps a pointer to the CA buffer: tuya_tls_config_set()
+-     * copies the config struct itself, not the certificate data. The CA is parsed
+-     * during tuya_transporter_connect(), so cacert must stay alive until that call
+-     * returns -- it is freed right after, below. */
+-    uint8_t *cacert = NULL;
++    /* Configure TLS if needed */
+     if (use_tls) {
++        uint8_t *cacert = NULL;
+         uint16_t cacert_len = 0;
+         rt = tuya_iotdns_query_domain_certs(req->resource ? (char *)req->resource : ctx->url, &cacert, &cacert_len);
+         if (OPRT_OK != rt) {
+@@ -397,30 +391,22 @@ static OPERATE_RET http_session_send(const SESSION_ID session, const http_req_t
+             http_safe_free(path);
+             return rt;
+         }
+-        if (NULL == cacert || 0 == cacert_len) {
+-            PR_ERR("invalid ca cert from iotdns, len:%d", cacert_len);
+-            http_safe_free(cacert);
+-            tuya_transporter_destroy(ctx->network);
+-            ctx->network = NULL;
+-            http_safe_free(host);
+-            http_safe_free(path);
+-            return OPRT_COM_ERROR;
+-        }
+ 
+         tuya_tls_config_t tls_config = {
+-            .ca_cert      = (char *)cacert,
++            .ca_cert = (char *)cacert,
+             .ca_cert_size = cacert_len,
+-            .hostname     = host,
+-            .port         = port,
+-            .timeout      = HTTP_TIMEOUT_MS_DEFAULT,
+-            .mode         = TUYA_TLS_SERVER_CERT_MODE,
+-            .verify       = true,
++            .hostname = host,
++            .port = port,
++            .timeout = HTTP_TIMEOUT_MS_DEFAULT,
++            .mode = TUYA_TLS_SERVER_CERT_MODE,
++            .verify = true,
+         };
+ 
+         rt = tuya_transporter_ctrl(ctx->network, TUYA_TRANSPORTER_SET_TLS_CONFIG, &tls_config);
++        http_safe_free(cacert);
++
+         if (OPRT_OK != rt) {
+             PR_ERR("Failed to set TLS config: %d", rt);
+-            http_safe_free(cacert);
+             tuya_transporter_destroy(ctx->network);
+             ctx->network = NULL;
+             http_safe_free(host);
+@@ -429,9 +415,8 @@ static OPERATE_RET http_session_send(const SESSION_ID session, const http_req_t
+         }
+     }
+ 
+-    /* Connect to server (the CA cert is parsed inside this call) */
++    /* Connect to server */
+     rt = tuya_transporter_connect(ctx->network, host, port, HTTP_TIMEOUT_MS_DEFAULT);
+-    http_safe_free(cacert);
+     if (OPRT_OK != rt) {
+         PR_ERR("Failed to connect to server: %d", rt);
+         tuya_transporter_close(ctx->network);
+@@ -444,8 +429,8 @@ static OPERATE_RET http_session_send(const SESSION_ID session, const http_req_t
+ 
+     /* Setup transport interface for coreHTTP */
+     ctx->transport.pNetworkContext = &ctx->network;
+-    ctx->transport.send            = (TransportSend_t)NetworkTransportSend;
+-    ctx->transport.recv            = (TransportRecv_t)NetworkTransportRecv;
++    ctx->transport.send = (TransportSend_t)NetworkTransportSend;
++    ctx->transport.recv = (TransportRecv_t)NetworkTransportRecv;
+ 
+     /* Allocate header buffer */
+     ctx->header_buffer = HTTP_MEMORY_MALLOC(512);
+@@ -461,18 +446,18 @@ static OPERATE_RET http_session_send(const SESSION_ID session, const http_req_t
+ 
+     /* Setup HTTP request */
+     HTTPRequestInfo_t requestInfo = {
+-        .pHost     = host,
+-        .hostLen   = strlen(host),
+-        .pMethod   = method,
++        .pHost = host,
++        .hostLen = strlen(host),
++        .pMethod = method,
+         .methodLen = strlen(method),
+-        .pPath     = path,
+-        .pathLen   = strlen(path),
+-        .reqFlags  = 0,
++        .pPath = path,
++        .pathLen = strlen(path),
++        .reqFlags = 0,
+     };
+ 
+     /* Initialize request headers */
+     ctx->request_headers.bufferLen = 512;
+-    ctx->request_headers.pBuffer   = ctx->header_buffer;
++    ctx->request_headers.pBuffer = ctx->header_buffer;
+ 
+     HTTPStatus_t httpStatus = HTTPClient_InitializeRequestHeaders(&ctx->request_headers, &requestInfo);
+     if (httpStatus != HTTPSuccess) {
+@@ -489,7 +474,7 @@ static OPERATE_RET http_session_send(const SESSION_ID session, const http_req_t
+ 
+     /* Initialize HTTP response structure */
+     memset(&ctx->http_response, 0, sizeof(HTTPResponse_t));
+-    ctx->http_response.pBuffer   = ctx->header_buffer;
++    ctx->http_response.pBuffer = ctx->header_buffer;
+     ctx->http_response.bufferLen = 512;
+ 
+     /* Send request with HTTP_SEND_DISABLE_RECV_BODY_FLAG to only receive headers */
+@@ -511,17 +496,17 @@ static OPERATE_RET http_session_send(const SESSION_ID session, const http_req_t
+ 
+     /* Setup response info (don't call http_session_ctx_reset_response as it would cleanup our streaming resources) */
+     ctx->resp_info.status_code = ctx->http_response.statusCode;
+-    ctx->resp_info.version     = HTTP_VER_1_1;
+-    ctx->resp_info.chunked     = (ctx->http_response.respFlags & HTTP_RESPONSE_CONNECTION_CLOSE_FLAG) ? false : false;
++    ctx->resp_info.version = HTTP_VER_1_1;
++    ctx->resp_info.chunked = (ctx->http_response.respFlags & HTTP_RESPONSE_CONNECTION_CLOSE_FLAG) ? false : false;
+     ctx->resp_info.content_length = ctx->http_response.contentLength;
+     ctx->resp_info.keep_alive_ack =
+         (ctx->http_response.respFlags & HTTP_RESPONSE_CONNECTION_KEEP_ALIVE_FLAG) ? true : false;
+ 
+     /* Enable streaming mode */
+-    ctx->streaming_mode    = true;
++    ctx->streaming_mode = true;
+     ctx->total_body_length = ctx->http_response.contentLength;
+-    ctx->bytes_read        = 0;
+-    ctx->response_ready    = true;
++    ctx->bytes_read = 0;
++    ctx->response_ready = true;
+ 
+     session->state = HTTP_UPLOADING;
+     memcpy(&session->req, req, sizeof(http_req_t));
+@@ -540,49 +525,11 @@ static OPERATE_RET http_session_receive(SESSION_ID session, http_resp_t **resp)
+         return OPRT_COM_ERROR;
+     }
+ 
+-    *resp          = &ctx->resp_info;
++    *resp = &ctx->resp_info;
+     session->state = HTTP_CONNECTED;
+     return OPRT_OK;
+ }
+ 
+-static int http_session_read_content(SESSION_ID session, void *buf, unsigned int max_len)
+-{
+-    if (!session || !session->s || !buf || max_len == 0) {
+-        return -1;
+-    }
+-
+-    http_session_ctx_t *ctx = (http_session_ctx_t *)session->s;
+-    if (!ctx->streaming_mode || !ctx->response_ready) {
+-        return -1;
+-    }
+-
+-    if (ctx->total_body_length > 0 && ctx->bytes_read >= ctx->total_body_length) {
+-        return 0;
+-    }
+-
+-    size_t read_len = max_len;
+-    if (ctx->total_body_length > 0 && read_len > ctx->total_body_length - ctx->bytes_read) {
+-        read_len = ctx->total_body_length - ctx->bytes_read;
+-    }
+-
+-    int32_t bytes_read = HTTPClient_Recv(&ctx->transport, &ctx->http_response, (uint8_t *)buf, read_len);
+-    if (bytes_read < 0) {
+-        PR_ERR("HTTPClient_Recv failed: %d", (int)bytes_read);
+-        return -1;
+-    }
+-    if (bytes_read == 0) {
+-        if (ctx->total_body_length > 0 && ctx->bytes_read < ctx->total_body_length) {
+-            PR_WARN("http_session_read_content premature close: %u/%u", (unsigned int)ctx->bytes_read,
+-                    (unsigned int)ctx->total_body_length);
+-            return -1;
+-        }
+-        return 0;
+-    }
+-
+-    ctx->bytes_read += (size_t)bytes_read;
+-    return (int)bytes_read;
+-}
+-
+ static OPERATE_RET http_session_receive_data(SESSION_ID session, http_resp_t *pResp, uint8_t **pDataOut)
+ {
+     if (!session || !pResp || !pDataOut) {
+@@ -594,8 +541,8 @@ static OPERATE_RET http_session_receive_data(SESSION_ID session, http_resp_t *pR
+         return OPRT_COM_ERROR;
+     }
+ 
+-    size_t   total = ctx->response.body_length;
+-    uint8_t *buf   = HTTP_MEMORY_MALLOC(total + 1);
++    size_t total = ctx->response.body_length;
++    uint8_t *buf = HTTP_MEMORY_MALLOC(total + 1);
+     if (!buf) {
+         return OPRT_MALLOC_FAILED;
+     }
 diff --git a/src/tuya_ai_service/svc_ai_agent/include/tuya_ai_output.h b/src/tuya_ai_service/svc_ai_agent/include/tuya_ai_output.h
-index 461ba35..e00789c 100755
+index 461ba356..e00789c8 100755
 --- a/src/tuya_ai_service/svc_ai_agent/include/tuya_ai_output.h
 +++ b/src/tuya_ai_service/svc_ai_agent/include/tuya_ai_output.h
 @@ -112,6 +112,17 @@ OPERATE_RET tuya_ai_output_start(VOID);
@@ -3989,7 +5057,7 @@ index 461ba35..e00789c 100755
   * @brief ai output write
   *
 diff --git a/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_agent.c b/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_agent.c
-index ca73baf..2f54272 100755
+index ca73baf7..2f542722 100755
 --- a/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_agent.c
 +++ b/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_agent.c
 @@ -157,7 +157,14 @@ STATIC OPERATE_RET __ai_event_cb(AI_EVENT_ATTR_T *event, AI_EVENT_HEAD_T *head,
@@ -4009,7 +5077,7 @@ index ca73baf..2f54272 100755
                      return OPRT_OK;
                  }
 diff --git a/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_output.c b/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_output.c
-index 544645f..1ceaf9f 100755
+index 544645f6..1ceaf9f7 100755
 --- a/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_output.c
 +++ b/src/tuya_ai_service/svc_ai_agent/src/tuya_ai_output.c
 @@ -62,9 +62,69 @@ typedef struct {
@@ -4143,8 +5211,21 @@ index 544645f..1ceaf9f 100755
          tal_system_sleep(10);
  
          data += rt;
+diff --git a/src/tuya_ai_service/svc_ai_basic/src/tuya_ai_http.c b/src/tuya_ai_service/svc_ai_basic/src/tuya_ai_http.c
+index 1c39e6c6..2fb711d2 100755
+--- a/src/tuya_ai_service/svc_ai_basic/src/tuya_ai_http.c
++++ b/src/tuya_ai_service/svc_ai_basic/src/tuya_ai_http.c
+@@ -157,7 +157,7 @@ STATIC VOID __ai_http_dld_work(VOID *data)
+     memset(buf, 0, unit_len);
+ 
+     while (1) {
+-        read_len = http_manager->read_http_content(http_sesion, &buf[have_read_len], unit_len - have_read_len);
++        read_len = http_read_content(http_sesion->s, &buf[have_read_len], unit_len - have_read_len);
+         if (read_len <= 0) {
+             rt = OPRT_COM_ERROR;
+             break;
 diff --git a/src/tuya_cloud_service/cloud/tuya_iot.c b/src/tuya_cloud_service/cloud/tuya_iot.c
-index 816451b..655efbc 100644
+index 816451bb..655efbc7 100644
 --- a/src/tuya_cloud_service/cloud/tuya_iot.c
 +++ b/src/tuya_cloud_service/cloud/tuya_iot.c
 @@ -413,10 +413,29 @@ static void mqtt_client_connected_on(void *context, void *user_data)
@@ -4181,3 +5262,122 @@ index 816451b..655efbc 100644
  
      /* Send connected event*/
      client->event.id = TUYA_EVENT_MQTT_CONNECTED;
+diff --git a/src/tuya_cloud_service/netcfg/ap_netcfg.c b/src/tuya_cloud_service/netcfg/ap_netcfg.c
+index 10cc32c7..bde599f0 100755
+--- a/src/tuya_cloud_service/netcfg/ap_netcfg.c
++++ b/src/tuya_cloud_service/netcfg/ap_netcfg.c
+@@ -64,11 +64,6 @@ typedef struct {
+     uint8_t tls_psk[AP_TLS_PSK_LEN + 1];
+ 
+     TIMER_ID broadcast_timer;
+-
+-    /* Hotspot identity published by ap_mode_start(); read back by
+-     * ap_netcfg_get_hotspot_info() for provisioning guidance UIs. */
+-    char hotspot_ssid[WIFI_SSID_LEN + 1];
+-    char hotspot_ip[16];
+ } ap_netcfg_t;
+ 
+ static ap_netcfg_t *s_ap_netcfg = NULL;
+@@ -847,29 +842,8 @@ static int ap_mode_start(ap_netcfg_t *ap)
+         return op_ret;
+     } else {
+         PR_DEBUG("start ap success:%s", ap_cfg.ssid);
+-        snprintf(ap->hotspot_ssid, sizeof(ap->hotspot_ssid), "%s", (char *)ap_cfg.ssid);
+-        snprintf(ap->hotspot_ip, sizeof(ap->hotspot_ip), "%s", ap_cfg.ip.ip);
+-    }
+-
+-    return OPRT_OK;
+-}
+-
+-OPERATE_RET ap_netcfg_get_hotspot_info(char *ssid, int ssid_len, char *ip, int ip_len)
+-{
+-    ap_netcfg_t *ap = ap_netcfg_get();
+-
+-    if (ssid == NULL || ssid_len <= 0 || ip == NULL || ip_len <= 0) {
+-        return OPRT_INVALID_PARM;
+-    }
+-
+-    ssid[0] = '\0';
+-    ip[0] = '\0';
+-    if (ap == NULL || ap->hotspot_ssid[0] == '\0') {
+-        return OPRT_COM_ERROR;
+     }
+ 
+-    snprintf(ssid, ssid_len, "%s", ap->hotspot_ssid);
+-    snprintf(ip, ip_len, "%s", ap->hotspot_ip);
+     return OPRT_OK;
+ }
+ 
+diff --git a/src/tuya_cloud_service/netcfg/ap_netcfg.h b/src/tuya_cloud_service/netcfg/ap_netcfg.h
+index b60e9174..aae998e8 100755
+--- a/src/tuya_cloud_service/netcfg/ap_netcfg.h
++++ b/src/tuya_cloud_service/netcfg/ap_netcfg.h
+@@ -37,19 +37,6 @@ extern "C" {
+  */
+ int ap_netcfg_init(netcfg_args_t *netcfg);
+ 
+-/**
+- * @brief get the SoftAP hotspot info used while AP netcfg is running
+- *
+- * @param[in/out] ssid buffer receiving the hotspot ssid ("SmartLife-XXXX")
+- * @param[in] ssid_len size of the ssid buffer
+- * @param[in/out] ip buffer receiving the hotspot gateway address
+- * @param[in] ip_len size of the ip buffer
+- *
+- * @return OPRT_OK when the hotspot is up and the info was copied. Others when
+- * AP netcfg has not started yet (buffers left as empty strings).
+- */
+-OPERATE_RET ap_netcfg_get_hotspot_info(char *ssid, int ssid_len, char *ip, int ip_len);
+-
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/tuya_p2p/base_ice/src/tuya_sdp.c b/src/tuya_p2p/base_ice/src/tuya_sdp.c
+index 1274eb2d..94b75678 100755
+--- a/src/tuya_p2p/base_ice/src/tuya_sdp.c
++++ b/src/tuya_p2p/base_ice/src/tuya_sdp.c
+@@ -945,7 +945,7 @@ int tuya_p2p_rtc_sdp_decode(rtc_sdp_t *sdp, char *buf)
+             p += strlen("a=msid-semantic:");
+             char wms_name[65] = {0};
+             char wms_id[65] = {0};
+-            int cnt = sscanf(p, "%64s %64s", wms_name, wms_id);
++            int cnt = sscanf(p, "%s %s", wms_name, wms_id);
+             if (cnt != 2 || strcmp(wms_name, "WMS") != 0) {
+                 continue;
+             }
+@@ -956,7 +956,7 @@ int tuya_p2p_rtc_sdp_decode(rtc_sdp_t *sdp, char *buf)
+             p += strlen("a=msid:");
+             char msid[65] = {0};
+             char track_id[65] = {0};
+-            int cnt = sscanf(p, "%64s %64s", msid, track_id);
++            int cnt = sscanf(p, "%s %s", msid, track_id);
+             if (cnt != 2 || strcmp(msid, sdp->wms_id) != 0) {
+                 continue;
+             }
+@@ -972,7 +972,7 @@ int tuya_p2p_rtc_sdp_decode(rtc_sdp_t *sdp, char *buf)
+             char m1[65] = {0};
+             char m2[65] = {0};
+             char m3[65] = {0};
+-            int cnt = sscanf(p, "%64s %64s %64s", m1, m2, m3);
++            int cnt = sscanf(p, "%s %s %s", m1, m2, m3);
+             if (cnt >= 1) {
+                 tuya_p2p_rtc_sdp_add_media(sdp, m1, "");
+             }
+@@ -1067,7 +1067,7 @@ int tuya_p2p_rtc_sdp_decode(rtc_sdp_t *sdp, char *buf)
+             p += strlen("a=fmtp:");
+             char str_pt[32] = {0};
+             char str_attr[256] = {0};
+-            int cnt = sscanf(p, "%31s %255s", str_pt, str_attr);
++            int cnt = sscanf(p, "%s %s", str_pt, str_attr);
+             if (cnt == 2) {
+                 if (strncmp(str_attr, "apt=", strlen("apt=")) == 0) {
+                     int pt = atoi(str_pt);
+@@ -1081,7 +1081,7 @@ int tuya_p2p_rtc_sdp_decode(rtc_sdp_t *sdp, char *buf)
+             char *p1 = p + strlen("a=ssrc-group:FID");
+             char ssrc[65] = {0};
+             char ssrc_rtx[65] = {0};
+-            int cnt = sscanf(p1, "%64s %64s", ssrc, ssrc_rtx);
++            int cnt = sscanf(p1, "%s %s", ssrc, ssrc_rtx);
+             if (cnt == 2) {
+                 if (m == 'a') {
+                     sdp->audio.negotiated_codec.ssrc = strtoul(ssrc, NULL, 10);

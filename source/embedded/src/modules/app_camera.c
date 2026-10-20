@@ -492,37 +492,130 @@ static void prv_make_path(char *out, size_t out_sz)
     snprintf(out, out_sz, "%s/%s/cam_999.jpg", APP_STORAGE_MOUNT, APP_CAM_PIC_DIR);
 }
 
+/* 落盘校验：把刚写的文件读回来逐字节比。
+ *
+ * 为什么非要比：SDIO 驱动的块写失败**只打一行 WARN**
+ * （`write data error, wr_status = 0x7!!!`），既不回传给 FatFs、也不影响
+ * write() 的返回值，所以 `fwrite` 报满、`fsync` 报 OK，卡上却是坏数据。
+ * 2026-10-20 实测就是"日志说照片已存、相册里打不开"。唯一可信的判据是
+ * 自己读回来比一遍 —— 写 8KB 的代价，比让用户以为存上了小得多。 */
+static BOOL_T prv_verify_jpeg(const char *path)
+{
+    static uint8_t s_cmp[512];
+    TUYA_FILE      f;
+    uint32_t       done = 0;
+
+    f = tkl_fopen(path, "r");
+    if (NULL == f) {
+        /* 写的时候 fopen("w") 成功、回头 fopen("r") 却失败，是"目录项没落盘"
+         * 的典型形态，和"内容写坏"是两种不同的失败，分开报才不误导现场判断。 */
+        PR_WARN(CAM_TAG " 落盘校验：文件读不回来（目录项没落盘）");
+        return FALSE;
+    }
+
+    while (done < sg_jpeg_len) {
+        uint32_t n = sg_jpeg_len - done;
+
+        if (n > sizeof(s_cmp)) {
+            n = sizeof(s_cmp);
+        }
+        if ((int32_t)n != tkl_fread(s_cmp, (int32_t)n, f)) {
+            break;
+        }
+        if (0 != memcmp(s_cmp, sg_jpeg + done, n)) {
+            break;
+        }
+        done += n;
+    }
+
+    (void)tkl_fclose(f);
+
+    if (done != sg_jpeg_len) {
+        PR_WARN(CAM_TAG " 落盘校验失败：第 %u/%u 字节对不上（块写被 SD 吞了）",
+                (unsigned)done, (unsigned)sg_jpeg_len);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 static BOOL_T prv_save_jpeg(char *path, size_t path_sz)
 {
     char      dir[64];
     char      full[160];
-    TUYA_FILE f;
+    BOOL_T    ok = FALSE;
 
     if (0 == sg_jpeg_len || NULL == sg_jpeg) {
         return FALSE;
     }
 
+    /* **先把卡切成"能写"的那一档**（方案 B）。
+     *
+     * 平时卡停在 4 线 —— 读最快（1000~2700 KB/s），但**写不进**（每档时钟全是
+     * `wr_status = 0x7`）。能写的是 1 线，所以按快门这一刻整条重起成 1 线，
+     * 写完再切回 4 线，动画该多快还是多快。切档约 1~1.5 秒，而抓图本身就要等
+     * 2 秒，用户感知不到。
+     *
+     * mkdir 必须在切档**之后**：建目录本身就是在写卡，放在前面等于用 4 线写一遍。 */
+    if (OPRT_OK != app_storage_write_begin()) {
+        PR_ERR(CAM_TAG " 这张卡没有能写的档位（见开机 [sto] 扫描日志），照片没存");
+        return FALSE;
+    }
+
     snprintf(dir, sizeof(dir), "%s/%s", APP_STORAGE_MOUNT, APP_CAM_PIC_DIR);
-    (void)tkl_fs_mkdir(dir);        /* 已存在时返回非 0，是预期内的 */
+    (void)tkl_fs_mkdir(dir);        /* 已存在时返回 8(FR_EXIST)，是预期内的 */
 
     prv_make_path(full, sizeof(full));
 
-    f = tkl_fopen(full, "w");
-    if (NULL == f) {
-        PR_ERR(CAM_TAG " 打不开 %s（卡在位吗？）", full);
-        return FALSE;
-    }
-    if ((int)sg_jpeg_len != tkl_fwrite(sg_jpeg, (int)sg_jpeg_len, f)) {
-        PR_ERR(CAM_TAG " 写 %s 失败（要 %u 字节）", full, (unsigned)sg_jpeg_len);
+    /* 整段写 + 校验关进 SD 临界区。SD 是单总线：精灵预取线程此刻正在同一张卡上
+     * 以 1~2.7MB/s 连读（日志里"预取 2690 KB/s"和"write data error"永远在同一
+     * 秒），读写叠在一起就是块写成批失败的直接原因。临界区也顺便让预取让路，
+     * 写完立刻放行。 */
+    app_storage_busy_enter();
+
+    for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+        TUYA_FILE f;
+
+        if (attempt > 0) {
+            tal_system_sleep(40);
+        }
+
+        f = tkl_fopen(full, "w");
+        if (NULL == f) {
+            PR_ERR(CAM_TAG " 建不了 %s（卡满 / 只读 / 目录项写不进）", full);
+            break;
+        }
+        if ((int)sg_jpeg_len != tkl_fwrite(sg_jpeg, (int)sg_jpeg_len, f)) {
+            PR_ERR(CAM_TAG " 写 %s 失败（要 %u 字节）", full, (unsigned)sg_jpeg_len);
+            (void)tkl_fclose(f);
+            break;
+        }
+        (void)tkl_fsync(tkl_fileno(f));
         (void)tkl_fclose(f);
+
+        ok = prv_verify_jpeg(full);
+        if (!ok) {
+            PR_WARN(CAM_TAG " 第 %d 次落盘不合格，重写", attempt + 1);
+            (void)tkl_fs_remove(full);
+        }
+    }
+
+    app_storage_busy_leave();
+
+    /* 切回读最快的那一档（4 线），动画立刻恢复满速。成功失败都要切。 */
+    app_storage_write_end();
+
+    if (!ok) {
+        PR_ERR(CAM_TAG " %s 落盘失败（3 次都校验不过）。对照开机那条"
+                       "「写卡扫描」：它也失败就是卡/供电，通过才是并发问题",
+               full);
         return FALSE;
     }
-    (void)tkl_fclose(f);
 
     if (NULL != path && path_sz > 0) {
         snprintf(path, path_sz, "%s", full);
     }
-    PR_NOTICE(CAM_TAG " 照片已存 %s（%u 字节）", full, (unsigned)sg_jpeg_len);
+    PR_NOTICE(CAM_TAG " 照片已存 %s（%u 字节，已校验）", full, (unsigned)sg_jpeg_len);
     return TRUE;
 }
 

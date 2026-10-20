@@ -21,7 +21,7 @@
 
 | 文件 | 是什么 |
 |---|---|
-| `tuyaopensdk.diff` | **外层** `TuyaOpenSDK/` 的改动，42 个文件（`boards/` + `src/`），`git apply -p1` 可重放 |
+| `tuyaopensdk.diff` | **外层** `TuyaOpenSDK/` 的改动，44 个文件（`boards/` + `src/` + `platform/platform_config.yaml`），`git apply -p1` 可重放 |
 | `tuyaopensdk.diff.stat` | 上面那份的 `--stat`，一眼看改了哪些文件 |
 | `platform-T5AI.diff` | **嵌套** `platform/T5AI/` 的改动，11 个文件，`git apply -p1` 可重放 |
 | `platform-T5AI.diff.stat` | 同上 |
