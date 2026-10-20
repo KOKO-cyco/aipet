@@ -47,6 +47,7 @@
 #include "app_avatar_tools.h"
 #include "app_bringup.h"
 #include "app_cam_test.h"
+#include "app_cam_snapshot.h"   /* 开机快照测试（src/tests） */
 #include "app_sd_test.h"
 #include "app_disp.h"
 #include "app_event.h"
@@ -452,6 +453,18 @@ static void user_main(void)
     }
     app_splash_hide();
     app_mem_sram("boot: home ui");
+
+#if APP_CAM_SNAPSHOT
+    /* ---- 摄像头快照测试 ----
+     *
+     * **不阻塞启动**：起一个后台线程，睡 2 秒（让字库/精灵首帧/预热先跑完）再拍
+     * 一张，JPEG 存 /sdcard/pictures，RGB565 留在 PSRAM 里给拍照页的取景框。
+     * 开关在 app_cam_snapshot.h；测试完改 0 即可。
+     *
+     * 放在这里是因为：SD 已经就绪（5.7 等过）、首页已经上屏（界面线程在跑），
+     * 而摄像头和 LVGL 共用 PSRAM/CPU —— 让启动序列先落地，再动它。 */
+    app_cam_snapshot_start();
+#endif
 
     /* 启动序列走完。音频/路由/LVGL 都起来了；字库是异步加载的，它完成时
      * 还会再打一条 —— 对照这一条就能看出"字库吃掉了多少、连续块掉到多少"。 */

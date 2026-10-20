@@ -75,10 +75,14 @@ void app_mem_sram(const char *tag)
 {
     uint32_t    sram_b  = (uint32_t)tal_system_get_free_heap_size();
     uint32_t    sram_lo = (uint32_t)xPortGetMinimumEverFreeHeapSize();
+    uint32_t    psram_b = (uint32_t)tal_psram_get_free_heap_size();
     const char *t       = (NULL != tag) ? tag : "-";
 
-    PR_NOTICE("[mem] %s: sram=%uKB(min %uKB)",
-              t, (unsigned)(sram_b / 1024u), (unsigned)(sram_lo / 1024u));
+    /* 不做最大连续块探针（那要 malloc 失败几次，日志会红）——开机里程碑只要
+     * 一个 PSRAM 余量数字，看每步吃了多少、还有多大空间。 */
+    PR_NOTICE("[mem] %s: sram=%uKB(min %uKB) psram=%uKB",
+              t, (unsigned)(sram_b / 1024u), (unsigned)(sram_lo / 1024u),
+              (unsigned)(psram_b / 1024u));
 }
 
 void app_mem_stat(const char *tag)

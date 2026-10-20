@@ -640,6 +640,11 @@ static BOOL_T prv_read_frame(uint32_t idx)
 #define SP2D_PF_BATCH       4                 /* 一次连读最多几帧 */
 #define SP2D_PF_BATCH_BYTES 65536             /* 一批连读的字节预算 */
 #define SP2D_PF_IDLE_SLEEP  2                 /* 没有新作业时的轮询间隔(ms) */
+/* 播放头之后要保持"已备好"的帧数。**不是** 1 —— 只看 want 一帧的话，流水线
+ * 深度永远只有一批（大动作一批只装得下 2 帧 ≈ 84ms），播放头一追到批尾，
+ * loader 又被"want 已缓冲"挡住不再读，供帧速度被锁死在 ~16fps，画面持续兜底。
+ * 3 = 播放头 + 后面 3 帧，正好填满 4 个槽（当前那帧是 RENDER）。 */
+#define SP2D_PF_AHEAD       3
 
 #define SP2D_PF_EMPTY       0
 #define SP2D_PF_READY       1
@@ -910,18 +915,29 @@ static void prv_pf_task(void *args)
             continue;
         }
 
-        /* 想要的帧已经在槽里：什么都别做（顺序播放时大部分拍数如此）*/
-        if (prv_pf_has(want)) {
-            prv_pf_stats();
-            tal_system_sleep(SP2D_PF_IDLE_SLEEP);
-            continue;
-        }
-
+        /* 想要的帧已经在槽里：**还不够** —— 见 SP2D_PF_AHEAD 的说明。
+         * 这里改成"播放头往后 AHEAD 帧都备好才睡"，让 loader 能主动跑在前面。 */
         const sp2d_clip_t *c = prv_clip_of(want);
 
         if (NULL == c) {
             tal_system_sleep(SP2D_PF_IDLE_SLEEP);
             continue;
+        }
+
+        {
+            uint32_t end   = c->first + c->frames;
+            uint32_t ahead = 0;
+
+            while (ahead < SP2D_PF_AHEAD && (want + ahead) < end &&
+                   prv_pf_has(want + ahead)) {
+                ahead++;
+            }
+            if (ahead >= SP2D_PF_AHEAD || (want + ahead) >= end) {
+                prv_pf_stats();
+                tal_system_sleep(SP2D_PF_IDLE_SLEEP);
+                continue;
+            }
+            want += ahead;              /* 从第一个没备好的帧开始读 */
         }
 
         /* ---- 换代：作废旧组的就绪槽 ----
@@ -1224,6 +1240,17 @@ static const sp2d_fr_t *prv_frame_at(uint32_t idx)
             sg_data.fr.dx    = slot->dx;
             sg_data.fr.dy    = slot->dy;
             return &sg_data.fr;
+        }
+
+        /* 没拿到 exact：保持上一帧不动。**只在同一组里** —— 切组之后 held
+         * 还是**上一组的最后一帧**，复读它会让角色在"新组首帧 ↔ 旧组姿势"
+         * 之间来回跳。点击 / 进拍照 / 进备忘录 / AI 切表情都会触发切组，
+         * AI 播报期 SD 被抢占、miss 变多时最明显。
+         *
+         * 跨组时把旧 held 放掉（槽回池子给 loader 用），下面落到"本组首帧
+         * 常驻"兜底 —— 首帧也是新组自己的姿势，至少不会跨组来回跳。 */
+        if (NULL != s_pf.held && prv_clip_of(s_pf.held->idx) != c) {
+            prv_pf_release_held();
         }
 
         /* 没拿到 exact：保持上一帧不动。卡不在位时除外 —— 那时 loader 已经
@@ -1813,6 +1840,48 @@ void app_sprite2d_dirty_reset(void)
     prv_dirty_reset_full();
 }
 
+void app_sprite2d_rewind(int clip)
+{
+    const sp2d_clip_t *c;
+
+    if (!sg_data.loaded || !s_pf.on ||
+        clip < 0 || clip >= (int)sg_data.file.clip_count) {
+        return;
+    }
+
+    c = &sg_data.file.clips[clip];
+    if (0 == c->frames) {
+        return;
+    }
+
+    prv_pf_lock();
+
+    /* 作废这一组所有"就绪"的槽：它们装的是上一遍播放靠后的帧，重播时若命中
+     * 会把画面拽回上一遍的位置。 */
+    for (uint8_t i = 0; i < SP2D_PF_SLOTS; i++) {
+        sp2d_pf_slot_t *s = &s_pf.slots[i];
+
+        if (SP2D_PF_READY == s->state && prv_clip_of(s->idx) == c) {
+            s->state = SP2D_PF_EMPTY;
+        }
+    }
+
+    /* held 同理：它多半就是"上次播到的那个姿势"，重播第一拍复读它最刺眼。
+     * 状态是 RENDER，直接还给池子（这里已经在锁里，不能调 prv_pf_release）。 */
+    if (NULL != s_pf.held && prv_clip_of(s_pf.held->idx) == c) {
+        s_pf.held->state = SP2D_PF_EMPTY;
+        s_pf.held        = NULL;
+    }
+
+    /* 播放头拉回组首，loader 下一轮就从这儿开始读。 */
+    s_pf.want      = c->first;
+    s_pf.want_clip = (uint32_t)clip;
+
+    prv_pf_unlock();
+
+    PR_DEBUG("[sp2d] 倒带 %s（第 %d 组）", app_sprite2d_clip_name(clip), clip);
+}
+
 /** 把矩形铺成背景色（已夹到画布内）。 */
 static void prv_rect_fill_bg(uint16_t *dst, int w, int h,
                              const SP2D_RECT_T *r, uint16_t bg)
@@ -1896,6 +1965,10 @@ BOOL_T app_sprite2d_render_clip_dirty(uint16_t *dst, int w, int h,
 
     uint32_t t0 = (uint32_t)tal_system_get_millisecond();
     uint32_t fi = c->first + (uint32_t)(frame % (int)c->frames);
+
+    /* 每次取帧都从"没兜底"开始算 —— fallback 是**本拍**的属性，不能沿用
+     * 上一拍的值（页面要据此决定这一帧算不算数）。 */
+    sg_stat.fallback = 0;
 
     const sp2d_fr_t *fr = prv_frame_at(fi);
 

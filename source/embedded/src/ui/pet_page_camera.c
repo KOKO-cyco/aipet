@@ -57,6 +57,10 @@
 
 #include "pet_pages.h"
 
+#include "tal_api.h"            /* tal_psram_malloc —— 照片画布 */
+
+#include "app_camera.h"         /* 实时预览 + 快门存卡（src/modules） */
+
 #include "pet_demo.h"
 #include "pet_pet.h"
 #include "pet_snapshot.h"
@@ -164,10 +168,19 @@ static void __mode_cb(lv_event_t *e)
 
 /* ---- Modal ----------------------------------------------------------------- */
 
+/* 快门抓到的照片还在内存里、等用户确认是否保存；确认卡上的路径文本。 */
+static BOOL_T    sg_shot_pending;
+static lv_obj_t *sg_shot_sub;
+
 static void __modal_close_cb(lv_event_t *e)
 {
     (void)e;
 
+    /* 关掉确认卡 = 不保存：把内存里那张照片扔掉。 */
+    if (sg_shot_pending) {
+        app_camera_discard();
+        sg_shot_pending = FALSE;
+    }
     pet_page_sheet_close();
 }
 
@@ -175,6 +188,10 @@ static void __modal_say_cb(lv_event_t *e)
 {
     const char *line = (const char *)lv_event_get_user_data(e);
 
+    if (sg_shot_pending) {
+        app_camera_discard();
+        sg_shot_pending = FALSE;
+    }
     pet_page_sheet_close();
     pet_say(line);
 }
@@ -203,9 +220,32 @@ static void __modal_button(lv_obj_t *card, const char *text, PUI_TONE_E tone, co
  * padding. A column gives every label the full width, and the card still clears the
  * 320 px of screen height at four rows.
  */
+/** 确认卡上的「保存到相册」：把内存里那张照片写进 /sdcard/pictures。 */
+static void __save_shot_cb(lv_event_t *e)
+{
+    char path[160] = { 0 };
+
+    (void)e;
+
+    if (!sg_shot_pending) {
+        return;
+    }
+
+    if (app_camera_save(path, sizeof(path))) {
+        sg_shot_pending = FALSE;
+        if (NULL != sg_shot_sub) {
+            lv_label_set_text_fmt(sg_shot_sub, "已保存：\n%s", path);
+        }
+        pet_say_mood("存好啦", PET_SAY_HAPPY);
+    } else if (NULL != sg_shot_sub) {
+        lv_label_set_text(sg_shot_sub, "保存失败：卡读写异常");
+    }
+}
+
 static void __shutter_cb(lv_event_t *e)
 {
-    lv_obj_t *sheet = pet_page_sheet();
+    BOOL_T    ok;
+    lv_obj_t *sheet;
     lv_obj_t *card;
     lv_obj_t *body;
     lv_obj_t *title;
@@ -214,7 +254,16 @@ static void __shutter_cb(lv_event_t *e)
 
     (void)e;
 
+    /* 先抓一张到内存（不写卡）：等用户在确认卡上点「保存到相册」再落盘。 */
+    ok = app_camera_grab();
+    sg_shot_pending = ok;
+
+    sheet = pet_page_sheet();
     if (sheet == NULL) {
+        if (sg_shot_pending) {
+            app_camera_discard();
+            sg_shot_pending = FALSE;
+        }
         return;
     }
 
@@ -226,17 +275,29 @@ static void __shutter_cb(lv_event_t *e)
     card = pui_card_create(sheet, NULL, PUI_TONE_NEUTRAL);
     body = pui_card_body(card);
 
-    title = pui_text_create(body, "拍照成功！", PUI_TEXT_BODY);
+    title = pui_text_create(body, ok ? "拍照成功！" : "拍照失败", PUI_TEXT_BODY);
     lv_obj_set_width(title, LV_PCT(100));
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
-    sub = pui_label_create(body, "演示：尚未接入相机存储", PET_FONT_CJK_SM, PET_COLOR_TEXT_SUB);
+    sub = pui_label_create(body,
+                           ok ? "点「保存到相册」存进 pictures/"
+                              : (app_camera_is_open() ? "没等到相机帧"
+                                                      : "相机没有打开"),
+                           PET_FONT_CJK_SM, PET_COLOR_TEXT_SUB);
     lv_obj_set_width(sub, LV_PCT(100));
     lv_obj_set_style_text_align(sub, LV_TEXT_ALIGN_CENTER, 0);
+    sg_shot_sub = sub;
+
+    if (ok) {
+        lv_obj_t *save = pui_button_create(body, "保存到相册", PUI_TONE_ACCENT,
+                                           PUI_FILL_SOLID, PUI_SIZE_MD);
+
+        lv_obj_set_width(save, LV_PCT(100));
+        lv_obj_add_event_cb(save, __save_shot_cb, LV_EVENT_CLICKED, NULL);
+    }
 
     __modal_button(body, "AI识别图片文字", PUI_TONE_ACCENT, "文字已经识别出来，我帮你存好了");
     __modal_button(body, "新建备忘录", PUI_TONE_ACCENT, "新建了一条备忘录，随时可以改");
-    __modal_button(body, "保存到相册", PUI_TONE_ACCENT, "已经放进相册了");
 
     close = pui_button_create(body, "关闭", PUI_TONE_RED, PUI_FILL_OUTLINE, PUI_SIZE_MD);
     lv_obj_set_width(close, LV_PCT(100));
@@ -296,6 +357,116 @@ static void __build_note(lv_obj_t *frame)
     pui_label_create(note, "买电池", PET_FONT_CJK_SM, PET_COLOR_TEXT);
 }
 
+/* ---- 取景框里的实时预览 ----------------------------------------------------
+ *
+ * 进拍照页时打开摄像头（app_camera，src/modules），取景框里放一个画布，80ms
+ * 刷一次最新帧；页面离开（被隐藏进 trash）就关流、停定时器 —— DVP 一直出帧
+ * 会白占 PSRAM 带宽和 CPU。
+ *
+ * 快门走 `app_camera_capture()`：同步等到一张完整 JPEG 并写进 /sdcard/pictures，
+ * 然后弹出确认卡显示保存路径。
+ */
+
+static lv_timer_t *sg_cam_tmr;
+static lv_obj_t   *sg_cam_cv;
+static uint16_t   *sg_cam_buf;
+static int         sg_cam_w;
+static int         sg_cam_h;
+
+static void __cam_buf_free_cb(lv_event_t *e)
+{
+    uint16_t *buf = (uint16_t *)lv_event_get_user_data(e);
+
+    if (NULL != buf) {
+        tal_psram_free(buf);
+    }
+}
+
+static void __cam_tick_cb(lv_timer_t *t)
+{
+    /* 页面已经离开（隐藏进 trash）：关流 + 停表。回来后重建页面会重新开。 */
+    if (NULL == sg_cam_cv || !lv_obj_is_visible(sg_cam_cv)) {
+        if (sg_shot_pending) {
+            app_camera_discard();
+            sg_shot_pending = FALSE;
+        }
+        if (app_camera_is_open()) {
+            app_camera_close();
+        }
+        lv_timer_delete(t);
+        sg_cam_tmr = NULL;
+        return;
+    }
+
+    if (app_camera_preview(sg_cam_buf, sg_cam_w, sg_cam_h)) {
+        lv_obj_invalidate(sg_cam_cv);
+    }
+}
+
+static void __scene_del_cb(lv_event_t *e)
+{
+    (void)e;
+
+    if (NULL != sg_cam_tmr) {
+        lv_timer_delete(sg_cam_tmr);
+        sg_cam_tmr = NULL;
+    }
+    sg_cam_cv = NULL;                   /* 画布随页面一起删；它的 DELETE 回调释放缓冲 */
+
+    if (sg_shot_pending) {
+        app_camera_discard();
+        sg_shot_pending = FALSE;
+    }
+    if (app_camera_is_open()) {
+        app_camera_close();
+    }
+}
+
+/** 建取景画布并起刷新定时器。 */
+static void __build_preview(lv_obj_t *scene)
+{
+    lv_obj_t *cv;
+    int       w;
+    int       h;
+
+    /* 场景尺寸由 flex 布局给，建页那一刻可能还没算出来 —— 强制跑一次。 */
+    lv_obj_update_layout(scene);
+    w = (int)lv_obj_get_content_width(scene);
+    h = (int)lv_obj_get_content_height(scene);
+    if (w <= 0 || h <= 0) {
+        w = 226;                        /* 兜底：面板 250 减两侧留白 */
+        h = 174;
+    }
+
+    sg_cam_buf = (uint16_t *)tal_psram_malloc((size_t)w * (size_t)h * 2u);
+    if (NULL == sg_cam_buf) {
+        PR_WARN("[cam] 取景框缓冲分配失败（%dx%d）", w, h);
+        return;
+    }
+    sg_cam_w = w;
+    sg_cam_h = h;
+
+    /* 先铺成深色底，第一帧到之前不至于是一块花屏。 */
+    for (int i = 0; i < w * h; i++) {
+        sg_cam_buf[i] = 0x10E5;         /* 0x141C2E */
+    }
+
+    cv = lv_canvas_create(scene);
+    lv_canvas_set_buffer(cv, sg_cam_buf, w, h, LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_pos(cv, 0, 0);
+    lv_obj_remove_flag(cv, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(cv, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_radius(cv, 0, 0);
+    lv_obj_set_style_border_width(cv, 0, 0);
+    lv_obj_set_style_pad_all(cv, 0, 0);
+    lv_obj_add_event_cb(cv, __cam_buf_free_cb, LV_EVENT_DELETE, sg_cam_buf);
+    sg_cam_cv = cv;
+
+    sg_cam_tmr = lv_timer_create(__cam_tick_cb, 80, NULL);
+
+    PR_NOTICE("[cam] 取景框实时预览 %dx%d", w, h);
+}
+
 static void __build_viewfinder(lv_obj_t *parent)
 {
     lv_obj_t *frame = lv_obj_create(parent);
@@ -325,32 +496,38 @@ static void __build_viewfinder(lv_obj_t *parent)
     lv_obj_set_style_bg_opa(scene, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(scene, 8, 0);
     lv_obj_set_style_clip_corner(scene, TRUE, 0);
+    lv_obj_add_event_cb(scene, __scene_del_cb, LV_EVENT_DELETE, NULL);
 
-    /* A static composition, explicitly labelled below; this is not a camera feed. */
-    part = lv_obj_create(scene);
-    pui_passthrough(part);
-    lv_obj_set_size(part, 32, 70);
-    lv_obj_set_style_bg_color(part, lv_color_hex(0x2A3448), 0);
-    lv_obj_set_style_bg_opa(part, LV_OPA_80, 0);
-    lv_obj_set_style_radius(part, 3, 0);
-    lv_obj_set_pos(part, 6, 18);
-    part = lv_obj_create(scene);
-    pui_passthrough(part);
-    lv_obj_set_size(part, LV_PCT(100), 22);
-    lv_obj_set_style_bg_color(part, lv_color_hex(0x0F1524), 0);
-    lv_obj_set_style_bg_opa(part, LV_OPA_COVER, 0);
-    lv_obj_align(part, LV_ALIGN_BOTTOM_MID, 0, 0);
+    if (OPRT_OK == app_camera_open()) {
+        /* 相机起来了：取景框里是实时画面，假布景和精灵快照全不要。 */
+        __build_preview(scene);
+    } else {
+        /* A static composition, explicitly labelled below; this is not a camera feed. */
+        part = lv_obj_create(scene);
+        pui_passthrough(part);
+        lv_obj_set_size(part, 32, 70);
+        lv_obj_set_style_bg_color(part, lv_color_hex(0x2A3448), 0);
+        lv_obj_set_style_bg_opa(part, LV_OPA_80, 0);
+        lv_obj_set_style_radius(part, 3, 0);
+        lv_obj_set_pos(part, 6, 18);
+        part = lv_obj_create(scene);
+        pui_passthrough(part);
+        lv_obj_set_size(part, LV_PCT(100), 22);
+        lv_obj_set_style_bg_color(part, lv_color_hex(0x0F1524), 0);
+        lv_obj_set_style_bg_opa(part, LV_OPA_COVER, 0);
+        lv_obj_align(part, LV_ALIGN_BOTTOM_MID, 0, 0);
 
-    /* A snapshot of the real sprite, not the demo's still image: one frame rendered
-       into its own canvas. At most 193x199, which is the viewfinder's inner width, and
-       aligned to the foot so the character stands on the same floor line the demo's
-       scaled image does. The background is the scene's own colour (0x141C2E), so the
-       opaque canvas disappears into it. */
-    art = pet_snapshot_create(scene, 0x10E5);   /* 0x141C2E */
-    if (NULL != art) {
-        lv_obj_align(art, LV_ALIGN_BOTTOM_MID, 0, -10);
+        /* A snapshot of the real sprite, not the demo's still image: one frame rendered
+           into its own canvas. At most 193x199, which is the viewfinder's inner width, and
+           aligned to the foot so the character stands on the same floor line the demo's
+           scaled image does. The background is the scene's own colour (0x141C2E), so the
+           opaque canvas disappears into it. */
+        art = pet_snapshot_create(scene, 0x10E5);   /* 0x141C2E */
+        if (NULL != art) {
+            lv_obj_align(art, LV_ALIGN_BOTTOM_MID, 0, -10);
+        }
+        __build_note(scene);
     }
-    __build_note(scene);
 
     /* On the scene rather than on the frame: the frame is padded by CAM_FRAME_PAD, and
        lv_obj_align() measures from the parent's content area, so a corner offset here
@@ -374,7 +551,9 @@ static void __build_viewfinder(lv_obj_t *parent)
     sg_mode_label = pui_label_create(chip, pet_demo_mode_name(pet_demo_mode()), PET_FONT_CJK_SM, PET_COLOR_TEXT_SUB);
     lv_obj_center(sg_mode_label);
     lv_obj_add_event_cb(chip, __mode_cb, LV_EVENT_CLICKED, NULL);
-    part = pui_label_create(scene, "演示预览", PET_FONT_CJK_SM, PET_COLOR_TEXT_SUB);
+    part = pui_label_create(scene,
+                            app_camera_is_open() ? "实时预览" : "演示预览",
+                            PET_FONT_CJK_SM, PET_COLOR_TEXT_SUB);
     lv_obj_align(part, LV_ALIGN_BOTTOM_LEFT, 5, -3);
 }
 

@@ -686,6 +686,10 @@ static uint32_t sg_refr_sum;
 static uint32_t sg_refr_max;
 static uint32_t sg_refr_at;
 
+/** 窗口内画了多少次"兜底帧"（想要的帧没取到，画的是上一帧/组首帧/常驻 idle）。
+ *  抽搐排查用：兜底次数和抽搐同时出现，就说明是供给没跟上。 */
+static uint32_t sg_fb_n;
+
 /** @brief 记一次 lv_refr_now 的耗时，满 2 秒打一条。 */
 static void prv_dbg_refr(uint32_t dt, uint32_t now)
 {
@@ -700,13 +704,15 @@ static void prv_dbg_refr(uint32_t dt, uint32_t now)
         sg_refr_max = dt;
     }
     if (now - sg_refr_at >= 2000u) {
-        PR_DEBUG("[pet] 刷新 %u 次/2s：平均 %u ms 最大 %u ms",
+        PR_DEBUG("[pet] 刷新 %u 次/2s：平均 %u ms 最大 %u ms，兜底 %u 次",
                  (unsigned)sg_refr_n,
                  (unsigned)(sg_refr_n ? sg_refr_sum / sg_refr_n : 0),
-                 (unsigned)sg_refr_max);
+                 (unsigned)sg_refr_max,
+                 (unsigned)sg_fb_n);
         sg_refr_n   = 0;
         sg_refr_sum = 0;
         sg_refr_max = 0;
+        sg_fb_n     = 0;
         sg_refr_at  = now;
     }
 #else
@@ -889,6 +895,11 @@ static void prv_tick_cb(lv_timer_t *t)
             sg_clip      = req;
             sg_clip_at   = now;
             sg_clip_once = TRUE;
+            /* **让精灵引擎对这一组倒带**：同一个动作在没演完时被再点一次时，
+             * 组的名字没变、预取不会换代，槽里还留着上一遍靠后的帧、held 还是
+             * 上一遍的姿势 —— 不清掉的话重播的前几拍会在"组首帧 ↔ 上次播到的
+             * 位置"之间来回跳。跨组请求也走这里（顺带清掉新组的旧槽）。 */
+            app_sprite2d_rewind(req);
             PR_NOTICE("[pet] 插播 %s（第 %d/%d 组）",
                       app_sprite2d_clip_name(sg_clip), sg_clip + 1, n);
         }
@@ -962,10 +973,13 @@ static void prv_tick_cb(lv_timer_t *t)
                                                    sg_clip, lf,
                                                    PET_COL_CARD565, &dirty) &&
                     NULL != sg_stage) {
+                    SP2D_STAT_T st;
                     /* invalidate_area 吃的是**屏幕坐标**：画布位置由 LVGL 的
                      * 布局决定，每拍取一次（它不会变，但别假设）。 */
                     lv_area_t coords;
                     lv_area_t inv;
+
+                    app_sprite2d_stat(&st);
 
                     lv_obj_get_coords(sg_stage, &coords);
                     inv.x1 = coords.x1 + dirty.x0;
@@ -974,8 +988,20 @@ static void prv_tick_cb(lv_timer_t *t)
                     inv.y2 = coords.y1 + dirty.y1;
                     lv_obj_invalidate_area(sg_stage, &inv);
 
-                    sg_painted_clip  = sg_clip;
-                    sg_painted_frame = lf;
+                    if (st.fallback) {
+                        /* 这一拍画的是**兜底帧**（想取的帧没拿到），不是本拍的
+                         * 目标帧：
+                         *   - 帧号别往前走（少算一拍，下一拍还要同一帧）；
+                         *   - 不记"已画过"，否则同帧跳过会让它永远不再重试。
+                         * 供给恢复后动作从断点接着播，不会跳过中间几帧。 */
+                        if (sg_frame_idx > 0) {
+                            sg_frame_idx--;
+                        }
+                        sg_fb_n++;
+                    } else {
+                        sg_painted_clip  = sg_clip;
+                        sg_painted_frame = lf;
+                    }
                 }
             }
         }
