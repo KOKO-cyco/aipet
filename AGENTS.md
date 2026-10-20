@@ -8,10 +8,14 @@ AI agent instructions for the `aipet` TuyaOpen project.
 - **Platform**: `t5ai`（T5AI / BK7258，480MHz Cortex-M33）
 - **Framework**: `base`
 - **What it is**: 横屏桌宠摆件 —— **宠物 + 对话 + 备忘录**三件事。
-  宠物在左半屏，备忘录（**别人做**，现在是设计原型）在右半屏，顶部一条状态栏。
+  界面是 `third_party/ai_pet_wide`（宽屏 demo）移植过来的米白卡片风：
+  顶栏（待办 · 天气 · 时间 · WiFi · 音量 · 电量）+ 左宠物卡 + 右功能面板。
+  宠物是**实时精灵**（app_sprite2d，SD 卡），不是静态图。
 - **Source**: `source/embedded/`，`cd source/embedded && tos.py build`。
   纯 C 工程（老产品的 NES 模拟器和 MP3 软解已删，不再需要 C++）。
-- **Pages**: 只有两个 —— `page_pet.c`（唯一主界面）和 `page_nosd.c`（SD 门页）。
+- **Pages**: 路由层两页 —— `page_pet.c`（唯一主界面，宿主页）和 `page_nosd.c`（SD 门页）。
+  **主界面内部**是一套七页的面板栈，源码在 `src/ui/`（移植自 ai_pet_wide）：
+  主页 / 拍照 / 相册 / 备忘录 / 全部笔记 / 设置，以及左侧的宠物卡。
   老产品的首页/游戏/电影/音乐/角色页全删了，见 `START-HERE.md`。
 
 ## Project layout
@@ -40,7 +44,11 @@ aipet/
 │   │   └── src/
 │   │       ├── core/       # 事件总线 / 配置中心 / 页面路由
 │   │       ├── service/    # 显示 / 音频 / 存储 / 网络 / 时间 / 按键 / 字体 / 天气 / 电量
-│   │       ├── pages/      # 页面 + 状态栏控件
+│   │       ├── pages/      # 路由页（page_pet / page_nosd）+ 状态栏控件
+│   │       ├── ui/         # 主界面内部：pui 组件库 + 宠物卡 + 七页面板栈
+│   │       │   ├── pui/    # 组件库（卡片 / 瓷贴 / 行 / 按钮 / 页面骨架）
+│   │       │   ├── fonts/  # FontAwesome 图标字体（中文全部走 SD）
+│   │       │   └── pet_page_*.c  # 主页 / 拍照 / 相册 / 备忘录 / 笔记 / 设置
 │   │       ├── modules/    # 精灵引擎 / AI 语音 / 对话驱动动作 / 扬声器
 │   │       └── tests/      # 宏门控的 bring-up 测试
 │   └── miniapp/            # panel/mini-app placeholder

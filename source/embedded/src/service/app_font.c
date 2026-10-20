@@ -36,6 +36,7 @@
 
 #include "app_font.h"
 #include "app_disp.h"
+#include "app_event.h"
 #include "app_storage.h"
 
 /* 固件里编译进来的手挑子集（const，在 rodata 里，改不了它的字段） */
@@ -116,6 +117,31 @@ static APP_SDFONT_T  s_f16;
 static APP_SDFONT_T  s_f21;
 static BOOL_T        s_loading  = FALSE;
 static THREAD_HANDLE s_task_hdl = NULL;
+
+/* ---- 新 UI 的六个字号（SD 卡上的 puhui<px>.bin） -------------------------
+ *
+ * 和 cn16/cn21 的代理套路一样，但有一处不同：cn 那份是**挂在 fallback 上**的
+ * （内置子集 + SD 全字库），而 puhui 这几档要**整份替换**代理的内容 —— 它们就是
+ * 主字体本身，内置的 16/21 只是"SD 还没就绪"时的占位。
+ *
+ * 所以这里 memcpy 的是整个 lv_font_t（含 dsc 指针，指向下面 s_fpx[] 里的静态
+ * 槽位），不是 fallback 字段。 */
+#define APP_FONT_PX_N   6
+
+static const struct {
+    int         px;
+    const char *path;
+} sg_px_tab[APP_FONT_PX_N] = {
+    { 14, APP_FONT_PUHUI_14 },
+    { 16, APP_FONT_PUHUI_16 },
+    { 18, APP_FONT_PUHUI_18 },
+    { 20, APP_FONT_PUHUI_20 },
+    { 24, APP_FONT_PUHUI_24 },
+    { 32, APP_FONT_PUHUI_32 },
+};
+
+static lv_font_t     s_px[APP_FONT_PX_N];      /* 代理：地址恒定，内容可换 */
+static APP_SDFONT_T  s_fpx[APP_FONT_PX_N];     /* SD 字库的实体 */
 
 /*****************************************************************************
  * bin 解析小工具（内存游标 / 位读取）
@@ -685,12 +711,75 @@ static OPERATE_RET prv_load(APP_SDFONT_T *f, const char *path)
 
 const lv_font_t *app_font_cn(void)
 {
-    return &s_proxy16;
+    /* 旧接口保留：现在全产品的正文就是新 UI 的 14px。cn16/cn21 不再加载
+     * （省 2.4MB PSRAM）—— 需要它们时各自用 app_font_load_sync() 单独加载。 */
+    return app_font_puhui(14);
 }
 
 const lv_font_t *app_font_21(void)
 {
-    return &s_proxy21;
+    return app_font_puhui(20);
+}
+
+/** 字号表里的下标；px 不精确匹配时取最接近的一档（永远有结果）。 */
+static int prv_px_index(int px)
+{
+    int best = 0;
+    int diff = 0x7fffffff;
+
+    for (int i = 0; i < APP_FONT_PX_N; i++) {
+        int d = sg_px_tab[i].px - px;
+
+        if (d < 0) {
+            d = -d;
+        }
+        if (d < diff) {
+            diff = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/** 这一档的兜底字体（内置 16 / 21px 子集）。 */
+static const lv_font_t *prv_px_fallback(int i)
+{
+    return (sg_px_tab[i].px >= 20) ? &lv_font_SourceHanSerifSC_Regular_21
+                                   : &lv_font_SourceHanSerifSC_Regular_16;
+}
+
+/** 字库里有没有这个码点（只查 cmap，不碰位图）。 */
+static BOOL_T prv_has_cp(const APP_SDFONT_T *f, uint32_t cp)
+{
+    for (uint32_t i = 0; i < f->cmap_num; i++) {
+        const lv_font_fmt_txt_cmap_t *cm = &f->cmaps[i];
+        uint32_t                      ofs;
+
+        if (LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY == cm->type ||
+            LV_FONT_FMT_TXT_CMAP_FORMAT0_FULL == cm->type) {
+            if (cp >= cm->range_start &&
+                cp < (uint32_t)cm->range_start + (uint32_t)cm->range_length) {
+                return TRUE;
+            }
+            continue;
+        }
+
+        if (NULL == cm->unicode_list || cp < cm->range_start) {
+            continue;
+        }
+        ofs = cp - cm->range_start;
+        for (uint32_t k = 0; k < cm->list_length; k++) {
+            if (cm->unicode_list[k] == ofs) {
+                return TRUE;
+            }
+        }
+    }
+    return FALSE;
+}
+
+const lv_font_t *app_font_puhui(int px)
+{
+    return &s_px[prv_px_index(px)];
 }
 
 OPERATE_RET app_font_init(void)
@@ -709,6 +798,18 @@ OPERATE_RET app_font_init(void)
     s_f16.px = 16;
     s_f21.px = 21;
     s_proxied = TRUE;
+
+    /* 新 UI 的六档：先全部装成内置字体，SD 字库到了再原地换掉。
+     * 14/16/18 用内置 16px（行高接近），20/24/32 用内置 21px。 */
+    for (int i = 0; i < APP_FONT_PX_N; i++) {
+        const lv_font_t *base = (sg_px_tab[i].px >= 20)
+                                ? &lv_font_SourceHanSerifSC_Regular_21
+                                : &lv_font_SourceHanSerifSC_Regular_16;
+
+        memcpy(&s_px[i], base, sizeof(lv_font_t));
+        s_px[i].fallback = NULL;
+        s_fpx[i].px      = sg_px_tab[i].px;
+    }
 
     PR_NOTICE("[font] 代理字体就绪（内置子集：%upx / %upx），等待 SD 字库",
               (unsigned)lv_font_SourceHanSerifSC_Regular_16.line_height,
@@ -758,8 +859,8 @@ static BOOL_T prv_wait_card(void)
     for (uint32_t i = 0; i < APP_FONT_TRY_MAX; i++) {
         (void)app_storage_init();
 
-        if (app_storage_probe(APP_FONT_FILE_16, NULL) ||
-            app_storage_probe(APP_FONT_FILE_21, NULL)) {
+        if (app_storage_probe(APP_FONT_PUHUI_18, NULL) ||
+            app_storage_probe(APP_FONT_PUHUI_14, NULL)) {
             if (0 != i) {
                 PR_NOTICE("[font] SD 卡在第 %u 次探测后可用（等了约 %u 秒）",
                           (unsigned)(i + 1), (unsigned)(i * APP_FONT_TRY_GAP_MS / 1000u));
@@ -780,19 +881,54 @@ static void prv_font_task(void *arg)
 
     if (!prv_wait_card()) {
         PR_WARN("[font] SD 卡上没有 %s / %s，沿用固件内置字库",
-                APP_FONT_FILE_16, APP_FONT_FILE_21);
+                APP_FONT_PUHUI_14, APP_FONT_PUHUI_18);
         s_loading = FALSE;
         return;
     }
 
-    if (OPRT_OK != prv_load(&s_f16, APP_FONT_FILE_16)) {
-        PR_WARN("[font] 16px 字库没加载上，内置子集继续生效");
-    }
-    if (OPRT_OK != prv_load(&s_f21, APP_FONT_FILE_21)) {
-        PR_WARN("[font] 21px 字库没加载上，内置子集继续生效");
+    /* 新 UI 的六个字号。**每一档单独成败**：缺哪份就留内置占位，界面照样起。
+     * 换代理要拿显示锁 —— 换的这一刻 LVGL 可能正在用这个字体画字。
+     *
+     * cn16 / cn21 不再加载：全产品的中文都走 puhui14 / puhui18 了，那两份
+     * 完整字库是 2.4MB PSRAM，白占。要它们的时候用 app_font_load_sync()。 */
+    {
+        int loaded = 0;
+
+        for (int i = 0; i < APP_FONT_PX_N; i++) {
+            if (OPRT_OK != prv_load(&s_fpx[i], sg_px_tab[i].path)) {
+                PR_WARN("[font] %s 没加载上，%dpx 用内置占位",
+                        sg_px_tab[i].path, sg_px_tab[i].px);
+                continue;
+            }
+
+            app_disp_lock();
+            memcpy(&s_px[i], &s_fpx[i].font, sizeof(lv_font_t));
+            /* 兜底：字库缺的字（最常见的是生成时没带 ASCII 的子集字号）回退到
+             * 内置子集，而不是画一个空白。完整的字库永远走不到这一层。 */
+            s_px[i].fallback = prv_px_fallback(i);
+            app_disp_unlock();
+
+            if (!prv_has_cp(&s_fpx[i], '0')) {
+                PR_WARN("[font] %s 没有 ASCII 数字（顶栏时间/电量会回退内置字体）。"
+                        "生成时请带上 0x20-0x7e", sg_px_tab[i].path);
+            }
+            loaded++;
+        }
+
+        if (loaded > 0) {
+            /* 已经画在屏上的字是内置字体的形状，得让它们用新字库重画一遍。 */
+            app_disp_lock();
+            lv_obj_invalidate(lv_screen_active());
+            app_disp_unlock();
+
+            /* 换字体不只是重画：已经按内置字体量过尺寸的标签（标题、状态栏、
+             * 行内省略号）得重新排一次。页面订阅这个事件，在 LVGL 线程里重建
+             * 当前页 —— 这里只发事件，不碰界面。 */
+            app_event_publish(APP_EVT_FONT_READY, NULL);
+        }
+        PR_NOTICE("[font] puhui 字号加载 %d/%d 档", loaded, APP_FONT_PX_N);
     }
 
-    prv_attach();
     app_font_stat();
     s_loading = FALSE;
 
@@ -846,17 +982,24 @@ OPERATE_RET app_font_load_sync(int px, const char *path)
 
 BOOL_T app_font_ready(void)
 {
-    return (BOOL_T)(s_f16.ok && s_f21.ok);
+    /* 正文和工作字号在位就算就绪（其它几档缺了有内置占位）。 */
+    return (BOOL_T)(s_fpx[prv_px_index(14)].ok && s_fpx[prv_px_index(18)].ok);
 }
 
 void app_font_stat(void)
 {
-    PR_NOTICE("[font] 状态：16px %s（%uKB / %u 字形） 21px %s（%uKB / %u 字形）"
-              " 合计 %uKB PSRAM，空闲 %uKB",
-              s_f16.ok ? "SD" : "内置", (unsigned)(s_f16.psram_bytes / 1024u),
-              (unsigned)s_f16.glyph_cnt,
-              s_f21.ok ? "SD" : "内置", (unsigned)(s_f21.psram_bytes / 1024u),
-              (unsigned)s_f21.glyph_cnt,
-              (unsigned)((s_f16.psram_bytes + s_f21.psram_bytes) / 1024u),
+    uint32_t px_bytes = 0;
+    int      loaded   = 0;
+
+    for (int i = 0; i < APP_FONT_PX_N; i++) {
+        px_bytes += s_fpx[i].psram_bytes;
+        if (s_fpx[i].ok) {
+            loaded++;
+        }
+    }
+
+    PR_NOTICE("[font] 状态：puhui %d/%d 档，%uKB PSRAM，空闲 %uKB",
+              loaded, APP_FONT_PX_N,
+              (unsigned)(px_bytes / 1024u),
               (unsigned)(tal_psram_get_free_heap_size() / 1024u));
 }

@@ -44,6 +44,9 @@ set(APP_INC
     ${APP_PATH}/src/pages
     ${APP_PATH}/src/modules
     ${APP_PATH}/src/tests
+    ${APP_PATH}/src/ui
+    ${APP_PATH}/src/ui/pui
+    ${APP_PATH}/src/ui/fonts
 )
 
 ########################################

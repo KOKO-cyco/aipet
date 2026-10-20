@@ -39,17 +39,18 @@ extern "C" {
  * 不直接指向那份 const 字体，而是指向 app_font.c 里的**代理字体**（地址恒定）：
  *
  *   开机时  代理的内容 == 内置子集本体（行为与以前完全一样）
- *   后台把 SD 卡上的完整字库（/sdcard/font/cn16.bin、cn21.bin）读进 PSRAM 之后，
- *   代理的 fallback 指向它 —— 内置子集查不到的码点自动去 SD 字库找。
+ *   后台把 SD 卡上的字库（/sdcard/font/puhui14.bin、puhui20.bin）读进 PSRAM
+ *   之后，14px / 20px 两份代理**原地换成 PuHuiTi**（和新 UI 同一套字体），
+ *   已经建好的界面自动跟上；缺字再回退内置子集。
  *
- * 之所以要绕一圈：内置字体是 const、编译进 rodata（flash），改不了它的 fallback
- * 字段；而代理在 RAM 里、地址不变，改它的字段对所有已建界面立刻生效。
+ * 之所以要绕一圈：内置字体是 const、编译进 rodata（flash），改不了它的内容；
+ * 而代理在 RAM 里、地址不变，改它的字段对所有已建界面立刻生效。
  * 详见 app_font.h。 */
 LV_FONT_DECLARE(lv_font_SourceHanSerifSC_Regular_16)
 LV_FONT_DECLARE(lv_font_SourceHanSerifSC_Regular_21)
 
-#define UI_FONT_21          app_font_21()      /* 大号标题 / 时钟 */
-#define UI_FONT_CN          app_font_cn()      /* 正文 / 列表 */
+#define UI_FONT_21          app_font_puhui(20)  /* 大号标题 / 时钟 */
+#define UI_FONT_CN          app_font_puhui(14)  /* 正文 / 列表 */
 #define UI_FONT_ICON        (&lv_font_montserrat_16)   /* 内建符号字体 */
 
 /**

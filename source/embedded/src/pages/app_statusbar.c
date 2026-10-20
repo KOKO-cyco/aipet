@@ -33,7 +33,12 @@
 #include "app_time.h"
 #include "app_volui.h"
 #include "app_weather.h"
-#include "weather_icons.h"
+#include "app_weather_icon.h"
+
+/* 新 UI 的图标字体和配色 token。状态栏现在长在新界面里，用它的字号和颜色。 */
+#include "pet_theme.h"
+#include "pet_ui.h"
+#include "pui.h"
 
 /***********************************************************
 ************************macro define************************
@@ -43,13 +48,14 @@
 #define SB_W                480
 #define SB_H                320
 
-/* 配色：与桌宠页（page_pet.c 的 PET_COL_*）同一套低对比调子，只把状态栏底色
- * 提亮一档，让它读起来是"一条栏"而不是背景。 */
-#define SB_COL_BG           0x1B232F
-#define SB_COL_LINE         0x2A3442      /* 栏底那条分隔线 */
-#define SB_COL_ICON         0xE4EBF5
-#define SB_COL_DIM          0x8C9AAC
-#define SB_COL_ACCENT       0x4DA3FF
+/* 配色：跟着新 UI 的**暗色**主题走（参考 ai_pet_wide/4页面暗色UI.png）——
+ * 状态栏本身不铺底色，直接坐在深色页面底色上；弹窗用略亮的深色卡片 + 细边。
+ * 图标和文字全部用浅色（weather 图标就是 SD 上 white/1x 那套原色，不再重着色）。 */
+#define SB_COL_BG           0x151C2A      /* 弹窗底（深色卡片） */
+#define SB_COL_LINE         0x263146      /* 细边 */
+#define SB_COL_ICON         0xE9EEF8      /* 主文字 / 图标 */
+#define SB_COL_DIM          0x9AA6BC      /* 次要文字 / 未连接 */
+#define SB_COL_ACCENT       0x3D7BFF      /* 强调（标题、主按钮） */
 
 /** 状态栏刷新周期（ms）。时钟是分钟级的，但电量/网络状态要跟得上。 */
 #define SB_TICK_MS          1000
@@ -58,7 +64,7 @@
 #define SB_WICON_SCALE      128
 
 /** 缩完之后图标的**对象尺寸**。⚠️ `lv_image_set_scale()` 只改绘制缩放，**不改
- * 对象尺寸** —— 不显式设的话对象还是 48x48，在 32px 高的状态栏里会被裁掉下半截，
+ * 对象尺寸** —— 不显式设的话对象还是 48x48，在 24px 高的状态栏里会被裁掉下半截，
  * 旁边的温度文字也被挤下去（这就是"天气看不全"的原因）。 */
 #define SB_WICON_PX         24
 
@@ -68,6 +74,7 @@
 static lv_obj_t *sg_root;          /* 弹窗的父对象（桌宠页的屏幕） */
 static lv_obj_t *sg_bar;
 
+static lv_obj_t *sg_badge;
 static lv_obj_t *sg_clock;
 static lv_obj_t *sg_wifi_icon;
 static lv_obj_t *sg_wea_icon;
@@ -83,6 +90,15 @@ static int32_t     sg_wea_code = -1;      /* 上次画过的天气码，用来�
  * BOOL_T 是原子的，不需要锁（老主页就是这么干的，见 app_weather.h）。 */
 static volatile BOOL_T sg_wea_dirty = FALSE;
 
+/* SD 字库换进来了（APP_EVT_FONT_READY）：栏里的标签是按内置字体量过尺寸的，
+ * 而且每个 refresh 都有"内容没变就不动"的短路。置上这一位让下一拍**强制**
+ * 重写一遍，标签就用新字体重新量尺寸。 */
+static volatile BOOL_T sg_font_dirty = FALSE;
+
+/* 遮罩在不在。给宠物 tick 用的**免锁**只读标志 —— tick 跑在 LVGL 线程里，
+ * 已经持有显示锁，再去 app_disp_lock() 会死锁。 */
+static volatile BOOL_T sg_popup_on = FALSE;
+
 /* ---- 弹窗 ---- */
 static lv_obj_t *sg_mask;
 
@@ -91,6 +107,15 @@ static lv_obj_t *sg_vol_win;
 static lv_obj_t *sg_wea_win;
 
 static lv_obj_t *sg_set_win;
+
+/* ---- 时间设置窗 ---- */
+static lv_obj_t *sg_time_win;
+static lv_obj_t *sg_time_big;      /* 大字 "10:34" */
+static lv_obj_t *sg_time_date;     /* 日期行（只读） */
+static lv_obj_t *sg_time_hv;       /* 时 / 分 的数值 */
+static lv_obj_t *sg_time_mv;
+static int       sg_time_h;
+static int       sg_time_m;
 
 static lv_obj_t *sg_wifi_win;
 static lv_obj_t *sg_wifi_kb;
@@ -108,6 +133,8 @@ static void prv_vol_close(void);
 static void prv_wea_close(void);
 static void prv_set_close(void);
 static void prv_wifi_close(void);
+static void prv_time_close(void);
+static void prv_time_open(void);
 
 /***********************************************************
 ************************ modal mask ************************
@@ -133,6 +160,8 @@ static void prv_mask_click(lv_event_t *e)
         prv_wifi_close();
     } else if (NULL != sg_wea_win) {
         prv_wea_close();
+    } else if (NULL != sg_time_win) {
+        prv_time_close();
     } else if (NULL != sg_set_win) {
         prv_set_close();
     }
@@ -146,6 +175,10 @@ static void prv_mask_show(void)
     sg_mask = lv_obj_create(sg_root);
     lv_obj_set_size(sg_mask, SB_W, SB_H);
     lv_obj_set_pos(sg_mask, 0, 0);
+    /* **必须脱离布局**：新 UI 把屏幕本身设成了 flex 列（pui_screen_apply），
+     * 不标这一位的话遮罩会被当成第二个 flex 子项排到 shell 下面（y=320），
+     * 整块跑到屏幕外 —— 看得出来"弹窗打开了"但既不见遮罩也挡不住触摸。 */
+    lv_obj_add_flag(sg_mask, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_set_style_bg_opa(sg_mask, LV_OPA_TRANSP, 0);   /* 透明，不挡视觉 */
     lv_obj_set_style_border_width(sg_mask, 0, 0);
     lv_obj_set_style_radius(sg_mask, 0, 0);
@@ -153,6 +186,7 @@ static void prv_mask_show(void)
     lv_obj_clear_flag(sg_mask, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(sg_mask, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(sg_mask, prv_mask_click, LV_EVENT_CLICKED, NULL);
+    sg_popup_on = TRUE;
 }
 
 static void prv_mask_hide(void)
@@ -161,11 +195,19 @@ static void prv_mask_hide(void)
         lv_obj_delete_async(sg_mask);
         sg_mask = NULL;
     }
+    sg_popup_on = FALSE;
 }
 
-/* 把三个弹窗全关掉（建新弹窗前调，保证一次只有一个）。 */
+/* 把三个弹窗全关掉（建新弹窗前调，保证一次只有一个）。
+ *
+ * 面板上开着模态 sheet（备忘录的图片选择器）时，也把它收掉：弹窗和 sheet 不能
+ * 叠在一起，也不允许从 sheet 里点顶栏直接进另一个界面 —— 要么关掉，要么禁用。 */
 static void prv_close_all_popups(void)
 {
+    if (pet_ui_sheet_active()) {
+        pet_ui_close_sheet();
+    }
+
     if (NULL != sg_vol_win) {
         prv_vol_close();
     }
@@ -175,6 +217,9 @@ static void prv_close_all_popups(void)
     if (NULL != sg_wifi_win) {
         prv_wifi_close();
     }
+    if (NULL != sg_time_win) {
+        prv_time_close();
+    }
     if (NULL != sg_set_win) {
         prv_set_close();
     }
@@ -183,19 +228,24 @@ static void prv_close_all_popups(void)
 /***********************************************************
 ************************ small helper **********************
 ***********************************************************/
-/* 状态栏图标按钮：透明底，留出指尖余量。 */
-static lv_obj_t *prv_icon(lv_obj_t *parent, const char *sym, uint32_t color,
-                          int x, int y)
+/* 状态栏里的一个图标格：透明底，留出指尖余量。图标用 FontAwesome 16px，
+ * 和新 UI 里 pui 组件的图标同一套字形。 */
+static lv_obj_t *prv_glyph(lv_obj_t *parent, const char *sym, uint32_t color)
 {
     lv_obj_t *btn = lv_button_create(parent);
 
     lv_obj_set_size(btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_pos(btn, x, y);
     lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(btn, 0, 0);
-    lv_obj_set_style_pad_all(btn, 4, 0);           /* touch finger-room */
-    app_ui_label(btn, sym, UI_FONT_ICON, color);
+    lv_obj_set_style_pad_all(btn, 2, 0);           /* touch finger-room */
+    app_ui_label(btn, sym, PET_FONT_ICON, color);
     return btn;
+}
+
+/* 状态栏里的一个文字格（14px）。 */
+static lv_obj_t *prv_text(lv_obj_t *parent, const char *txt, uint32_t color)
+{
+    return pui_label_create(parent, txt, PET_FONT_CJK_SM, lv_color_hex(color));
 }
 
 /* 一个不透明的小窗（三个弹窗共用）。建完里面自己排。 */
@@ -205,6 +255,9 @@ static lv_obj_t *prv_window(const char *title, int w, int h,
     lv_obj_t *win = lv_obj_create(sg_root);
 
     lv_obj_set_size(win, w, h);
+    /* 和遮罩一样：屏幕是 flex 容器，窗口必须脱离布局才能按 lv_obj_center 定位，
+     * 否则会被排到 shell 下面（屏幕外）。 */
+    lv_obj_add_flag(win, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_center(win);
     lv_obj_set_style_bg_color(win, lv_color_hex(SB_COL_BG), 0);
     lv_obj_set_style_bg_opa(win, LV_OPA_COVER, 0);
@@ -237,8 +290,8 @@ static void prv_clock_refresh(void)
         snprintf(buf, sizeof(buf), "--:--");
     }
     /* 1s tick 里一直调它，但内容一分钟才变一次 —— 内容没变就不 set_text，
-     * 省掉一次标签重排 + 重绘。 */
-    if (0 == strcmp(buf, sg_clock_last)) {
+     * 省掉一次标签重排 + 重绘。字库换了要强制重写一次（见 sg_font_dirty）。 */
+    if (!sg_font_dirty && 0 == strcmp(buf, sg_clock_last)) {
         return;
     }
     snprintf(sg_clock_last, sizeof(sg_clock_last), "%s", buf);
@@ -278,7 +331,7 @@ static void prv_battery_refresh(void)
         }
         return;
     }
-    if (pct == s_last_pct && (int)charging == s_last_chg) {
+    if (!sg_font_dirty && pct == s_last_pct && (int)charging == s_last_chg) {
         return;
     }
     s_last_pct = pct;
@@ -291,17 +344,17 @@ static void prv_battery_refresh(void)
         const char *sym;
 
         if (charging) {
-            sym = LV_SYMBOL_CHARGE;
+            sym = FONT_AWESOME_BATTERY_CHARGING;
         } else if (pct >= 80) {
-            sym = LV_SYMBOL_BATTERY_FULL;
+            sym = FONT_AWESOME_BATTERY_FULL;
         } else if (pct >= 55) {
-            sym = LV_SYMBOL_BATTERY_3;
+            sym = FONT_AWESOME_BATTERY_3;
         } else if (pct >= 30) {
-            sym = LV_SYMBOL_BATTERY_2;
+            sym = FONT_AWESOME_BATTERY_2;
         } else if (pct >= 10) {
-            sym = LV_SYMBOL_BATTERY_1;
+            sym = FONT_AWESOME_BATTERY_1;
         } else {
-            sym = LV_SYMBOL_BATTERY_EMPTY;
+            sym = FONT_AWESOME_BATTERY_EMPTY;
         }
         if (NULL != l) {
             lv_label_set_text(l, sym);
@@ -334,7 +387,7 @@ static void prv_weather_refresh(void)
     {
         int32_t code = (NULL != d) ? d->code : APP_WEATHER_CODE_UNKNOWN;
 
-        if (code != sg_wea_code) {
+        if (code != sg_wea_code || sg_font_dirty) {
             sg_wea_code = code;
             lv_image_set_src(sg_wea_icon, app_weather_icon(code));
         }
@@ -549,6 +602,163 @@ static void prv_wea_click(lv_event_t *e)
     prv_wea_detail_open();
 }
 
+/* 点时钟 = 打开时间设置（弹窗互斥 + 遮罩由 prv_time_open 处理）。 */
+static void prv_time_click(lv_event_t *e)
+{
+    (void)e;
+    prv_time_open();
+}
+
+/***********************************************************
+********************** 时间设置窗 ***************************
+***********************************************************/
+/* 点顶栏的时钟打开。只拨**时 / 分**，日期不动 —— 日期来自云端，没有网的机器
+ * 拨日期也没有意义；时/分错了（时区没同步、云校时失败）是用户唯一需要自己改的。
+ *
+ * 保存走 app_time_set_local()：按配置里的时区换算成 UTC 写 RTC。 */
+static void prv_time_close(void)
+{
+    if (NULL != sg_time_win) {
+        lv_obj_delete_async(sg_time_win);
+    }
+    sg_time_win  = NULL;
+    sg_time_big  = NULL;
+    sg_time_date = NULL;
+    sg_time_hv   = NULL;
+    sg_time_mv   = NULL;
+    prv_mask_hide();
+}
+
+static void prv_time_close_cb(lv_event_t *e)
+{
+    (void)e;
+    prv_time_close();
+}
+
+static void prv_time_show(void)
+{
+    if (NULL != sg_time_big) {
+        lv_label_set_text_fmt(sg_time_big, "%02d:%02d", sg_time_h, sg_time_m);
+    }
+    if (NULL != sg_time_hv) {
+        lv_label_set_text_fmt(sg_time_hv, "%02d", sg_time_h);
+    }
+    if (NULL != sg_time_mv) {
+        lv_label_set_text_fmt(sg_time_mv, "%02d", sg_time_m);
+    }
+}
+
+static void prv_time_hour_cb(lv_event_t *e)
+{
+    int d = (int)(intptr_t)lv_event_get_user_data(e);
+
+    sg_time_h = (sg_time_h + d + 24) % 24;
+    prv_time_show();
+}
+
+static void prv_time_min_cb(lv_event_t *e)
+{
+    int d = (int)(intptr_t)lv_event_get_user_data(e);
+
+    sg_time_m = (sg_time_m + d + 60) % 60;
+    prv_time_show();
+}
+
+static void prv_time_save_cb(lv_event_t *e)
+{
+    APP_DATETIME_T now;
+
+    (void)e;
+
+    if (OPRT_OK == app_time_now(&now)) {
+        now.hour = sg_time_h;
+        now.min  = sg_time_m;
+        now.sec  = 0;
+        if (OPRT_OK == app_time_set_local(&now)) {
+            sg_clock_last[0] = '\0';        /* 强制下一次 tick 重写时钟 */
+            prv_clock_refresh();
+        }
+    }
+    prv_time_close();
+}
+
+/* 一行：标签 + [-] + 数值 + [+] */
+static void prv_time_row(lv_obj_t *win, int y, const char *caption,
+                         lv_event_cb_t cb, lv_obj_t **out_val)
+{
+    lv_obj_t *l = app_ui_label(win, caption, UI_FONT_CN, SB_COL_DIM);
+
+    lv_obj_set_pos(l, 46, y + 4);
+
+    lv_obj_t *minus = app_ui_button(win, 32, 28, 0x1B2434, "-", UI_FONT_21,
+                                    SB_COL_ICON, cb, (void *)(intptr_t)-1);
+    lv_obj_set_pos(minus, 86, y);
+
+    lv_obj_t *plus = app_ui_button(win, 32, 28, 0x1B2434, "+", UI_FONT_21,
+                                   SB_COL_ICON, cb, (void *)(intptr_t)1);
+    lv_obj_set_pos(plus, 230, y);
+
+    *out_val = app_ui_label(win, "00", UI_FONT_21, SB_COL_ICON);
+    lv_obj_set_width(*out_val, 70);
+    lv_obj_set_style_text_align(*out_val, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(*out_val, 140, y + 2);
+}
+
+static void prv_time_open(void)
+{
+    APP_DATETIME_T now;
+    char           date[40];
+
+    if (NULL != sg_time_win) {          /* 再点一次 = 收起 */
+        prv_time_close();
+        return;
+    }
+    prv_close_all_popups();
+    prv_mask_show();                    /* 先把遮罩铺上，窗口才在它上面 */
+
+    memset(&now, 0, sizeof(now));
+    (void)app_time_now(&now);
+    sg_time_h = (now.hour >= 0 && now.hour < 24) ? now.hour : 0;
+    sg_time_m = (now.min >= 0 && now.min < 60) ? now.min : 0;
+
+    sg_time_win = prv_window("时间设置", 340, 226, prv_time_close_cb);
+
+    /* 日期：只读。没同步时给一句提示，别显示 1970。 */
+    if (app_time_valid() &&
+        OPRT_OK == app_time_format(date, sizeof(date), "%Y年%-m月%-d日 星期%a")) {
+        sg_time_date = app_ui_label(sg_time_win, date, UI_FONT_CN, SB_COL_DIM);
+    } else {
+        sg_time_date = app_ui_label(sg_time_win, "时间未同步（联网后自动校准）",
+                                    UI_FONT_CN, SB_COL_DIM);
+    }
+    lv_obj_set_width(sg_time_date, 316);
+    lv_obj_set_style_text_align(sg_time_date, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(sg_time_date, 12, 40);
+
+    /* 大字时间 */
+    sg_time_big = app_ui_label(sg_time_win, "00:00", UI_FONT_21, SB_COL_ACCENT);
+    lv_obj_set_width(sg_time_big, 316);
+    lv_obj_set_style_text_align(sg_time_big, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(sg_time_big, 12, 66);
+
+    prv_time_row(sg_time_win, 112, "时", prv_time_hour_cb, &sg_time_hv);
+    prv_time_row(sg_time_win, 148, "分", prv_time_min_cb, &sg_time_mv);
+
+    /* 取消 / 保存 */
+    lv_obj_t *cancel = app_ui_button(sg_time_win, 92, 34, 0x1B2434, "取消",
+                                     UI_FONT_CN, SB_COL_ICON,
+                                     prv_time_close_cb, NULL);
+    lv_obj_set_pos(cancel, 96, 186);
+
+    lv_obj_t *save = app_ui_button(sg_time_win, 92, 34, SB_COL_ACCENT, "保存",
+                                   UI_FONT_CN, 0xFFFFFF,
+                                   prv_time_save_cb, NULL);
+    lv_obj_set_pos(save, 200, 186);
+
+    prv_time_show();
+    PR_NOTICE("[bar] 时间窗打开");
+}
+
 /***********************************************************
 ************************* WiFi 窗 ***************************
 ***********************************************************/
@@ -676,6 +886,9 @@ static void prv_wifi_open(void)
     sg_wifi_win = lv_obj_create(sg_root);
     lv_obj_set_size(sg_wifi_win, SB_W, SB_H);
     lv_obj_set_pos(sg_wifi_win, 0, 0);
+    /* 这个窗是直接建在屏幕上的（没走 prv_window），同样要脱离屏幕的 flex 布局，
+     * 否则会被排到 shell 下面 —— 屏幕外，看不见。 */
+    lv_obj_add_flag(sg_wifi_win, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_set_style_bg_color(sg_wifi_win, lv_color_hex(SB_COL_BG), 0);
     lv_obj_set_style_bg_opa(sg_wifi_win, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(sg_wifi_win, 0, 0);
@@ -838,12 +1051,18 @@ static void prv_bar_deleted_cb(lv_event_t *e)
     sg_vol_win   = NULL;
     sg_wea_win   = NULL;
     sg_set_win   = NULL;
+    sg_time_win  = NULL;
+    sg_time_big  = NULL;
+    sg_time_date = NULL;
+    sg_time_hv   = NULL;
+    sg_time_mv   = NULL;
     sg_wifi_win  = NULL;
     sg_wifi_kb   = NULL;
     sg_wifi_ta_ssid = NULL;
     sg_wifi_ta_pwd  = NULL;
     sg_wifi_status  = NULL;
     sg_clock     = NULL;
+    sg_badge     = NULL;
     sg_wifi_icon = NULL;
     sg_wea_icon  = NULL;
     sg_wea_text  = NULL;
@@ -859,10 +1078,13 @@ static void prv_tick_cb(lv_timer_t *t)
     prv_wifi_refresh();
     prv_battery_refresh();
 
-    if (sg_wea_dirty) {
+    if (sg_wea_dirty || sg_font_dirty) {
         sg_wea_dirty = FALSE;
         prv_weather_refresh();
     }
+
+    /* 强制重写这一拍已经做完，后面的 refresh 恢复"内容没变就不动"。 */
+    sg_font_dirty = FALSE;
 }
 
 /***********************************************************
@@ -875,9 +1097,11 @@ static void prv_evt_cb(APP_EVT_E evt, void *data, void *user)
     (void)user;
 
     /* 网络状态和电量都由 1s tick 自己读（app_net_status / app_battery_get 都是
-     * 纯内存读，没有 IO），不需要事件驱动 —— 所以这里只接天气。 */
+     * 纯内存读，没有 IO），不需要事件驱动 —— 所以这里只接天气和字库。 */
     if (APP_EVT_WEATHER_UPDATED == evt) {
         sg_wea_dirty = TRUE;
+    } else if (APP_EVT_FONT_READY == evt) {
+        sg_font_dirty = TRUE;
     }
 }
 
@@ -890,7 +1114,10 @@ lv_obj_t *app_statusbar_create(lv_obj_t *parent)
         return NULL;
     }
 
-    sg_root = parent;
+    /* 弹窗建在**屏幕**上，不是父容器上：新 UI 的父容器（shell / body）是
+     * flex 布局，往里面塞一个 `lv_obj_center()` 的窗口会被 flex 当成普通子项
+     * 排进队列，既不会居中也不会盖满屏。屏幕不是布局容器，坐标才有意义。 */
+    sg_root = lv_obj_get_screen(parent);
 
     /* 上一次的状态栏还活着（同一个屏幕重建）就先删掉 —— 它的 DELETE 回调会把
      * 定时器和所有指针清干净，所以下面可以直接重来。**屏幕被删过的话 sg_bar
@@ -902,36 +1129,37 @@ lv_obj_t *app_statusbar_create(lv_obj_t *parent)
     sg_wea_code = -1;
 
     sg_bar = lv_obj_create(parent);
-    lv_obj_set_size(sg_bar, SB_W, APP_STATUSBAR_H);
-    lv_obj_set_pos(sg_bar, 0, 0);
-    lv_obj_set_style_bg_color(sg_bar, lv_color_hex(SB_COL_BG), 0);
-    lv_obj_set_style_bg_opa(sg_bar, LV_OPA_COVER, 0);
+    lv_obj_set_size(sg_bar, LV_PCT(100), APP_STATUSBAR_H);
+    /* **不铺底色、不画分隔线**：新 UI 的顶栏就是一条字，坐在页面底色上。 */
+    lv_obj_set_style_bg_opa(sg_bar, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(sg_bar, 0, 0);
     lv_obj_set_style_radius(sg_bar, 0, 0);
-    lv_obj_set_style_pad_all(sg_bar, 0, 0);
-    /* 底下一条 1px 分隔线 —— 让状态栏读起来是"一条栏"，不是背景的一部分。 */
-    lv_obj_set_style_border_width(sg_bar, 1, 0);
-    lv_obj_set_style_border_side(sg_bar, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_border_color(sg_bar, lv_color_hex(SB_COL_LINE), 0);
+    lv_obj_set_style_pad_hor(sg_bar, PET_PAD_PAGE + 4, 0);
+    lv_obj_set_style_pad_ver(sg_bar, 0, 0);
+    lv_obj_set_style_pad_column(sg_bar, 6, 0);
+    lv_obj_set_flex_flow(sg_bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(sg_bar, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(sg_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(sg_bar, prv_bar_deleted_cb, LV_EVENT_DELETE, NULL);
 
-    /* ---- 左：WiFi + 天气 ----
-     * 栏里每一格都**垂直居中**（栏 32px、图标 24px，所以 y 偏移一律 0）。 */
-    sg_wifi_icon = prv_icon(sg_bar, LV_SYMBOL_WIFI, SB_COL_DIM, 0, 0);
-    lv_obj_align(sg_wifi_icon, LV_ALIGN_LEFT_MID, 4, 0);
-    lv_obj_add_event_cb(sg_wifi_icon, prv_wifi_icon_cb, LV_EVENT_CLICKED, NULL);
+    /* ---- 左：待办数（demo 的 "待办 3" 徽标位置）---- */
+    sg_badge = prv_text(sg_bar, "待办 0", SB_COL_DIM);
 
-    /* 天气格：图标 + 温度，整格可点 -> 详情弹窗。
+    /* 弹簧：把下面这些推到右边。 */
+    pui_spacer(sg_bar);
+
+    /* ---- 右：天气 · 时间 · WiFi · 音量 · 电量 ----
      *
-     * 整格在栏里**垂直居中**（栏 32px，图标 24px + 上下各 4px 内边距 = 32，正好）。 */
+     * 天气图标用 SD 卡上 white/1x 那套（浅色/彩色），**不重着色** —— 顶栏是深色底，
+     * 白色云彩和黄色太阳正是它设计时用的底色。 */
     {
         lv_obj_t *wea = lv_button_create(sg_bar);
 
         lv_obj_set_size(wea, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-        lv_obj_align(wea, LV_ALIGN_LEFT_MID, 40, 0);
         lv_obj_set_style_bg_opa(wea, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(wea, 0, 0);
-        lv_obj_set_style_pad_all(wea, 4, 0);
+        lv_obj_set_style_pad_all(wea, 0, 0);
         lv_obj_set_flex_flow(wea, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(wea, LV_FLEX_ALIGN_START,
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -939,34 +1167,36 @@ lv_obj_t *app_statusbar_create(lv_obj_t *parent)
 
         sg_wea_icon = lv_image_create(wea);
         lv_image_set_scale(sg_wea_icon, SB_WICON_SCALE);
+        lv_image_set_antialias(sg_wea_icon, true);   /* 48 -> 24 的降采样 */
         lv_obj_set_size(sg_wea_icon, SB_WICON_PX, SB_WICON_PX);   /* 见 SB_WICON_PX 的说明 */
-        sg_wea_text = app_ui_label(wea, "--°", UI_FONT_CN, SB_COL_ICON);
+
+        sg_wea_text = prv_text(wea, "--°", SB_COL_ICON);
         lv_obj_add_event_cb(wea, prv_wea_click, LV_EVENT_RELEASED, NULL);
     }
 
-    /* ---- 中：时间 ---- */
-    sg_clock = app_ui_label(sg_bar, "--:--", UI_FONT_CN, SB_COL_ICON);
-    lv_obj_align(sg_clock, LV_ALIGN_CENTER, 0, 0);
-
-    /* ---- 右：音量 + 电量 ----
-     *
-     * 电量那两格（图标 + 百分比）**必须贴在一起** —— 它们是一件事的两个部分，
-     * 分开摆会读成两个不相干的图标。所以按"百分比在右、图标紧贴它左边"来摆：
-     *   百分比：右对齐到 -4，宽 42
-     *   图标  ：右对齐到 -48（图标约 24 宽，正好接在百分比左边，中间留 2px） */
     {
-        lv_obj_t *vol = prv_icon(sg_bar, LV_SYMBOL_VOLUME_MAX, SB_COL_ICON, 0, 0);
+        lv_obj_t *clk = lv_button_create(sg_bar);
 
-        lv_obj_align(vol, LV_ALIGN_RIGHT_MID, -124, 0);
+        lv_obj_set_size(clk, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(clk, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(clk, 0, 0);
+        lv_obj_set_style_pad_all(clk, 2, 0);
+        sg_clock = prv_text(clk, "--:--", SB_COL_ICON);
+        lv_obj_add_event_cb(clk, prv_time_click, LV_EVENT_CLICKED, NULL);
+    }
+
+    sg_wifi_icon = prv_glyph(sg_bar, FONT_AWESOME_WIFI, SB_COL_DIM);
+    lv_obj_add_event_cb(sg_wifi_icon, prv_wifi_icon_cb, LV_EVENT_CLICKED, NULL);
+
+    {
+        lv_obj_t *vol = prv_glyph(sg_bar, FONT_AWESOME_VOLUME_HIGH, SB_COL_ICON);
+
         lv_obj_add_event_cb(vol, prv_vol_icon_cb, LV_EVENT_CLICKED, NULL);
     }
-    sg_bat_icon = prv_icon(sg_bar, LV_SYMBOL_BATTERY_3, SB_COL_ICON, 0, 0);
-    lv_obj_align(sg_bat_icon, LV_ALIGN_RIGHT_MID, -48, 0);
 
-    sg_bat_text = app_ui_label(sg_bar, "--", UI_FONT_CN, SB_COL_ICON);
-    lv_obj_set_width(sg_bat_text, 42);
-    lv_obj_set_style_text_align(sg_bat_text, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_align(sg_bat_text, LV_ALIGN_RIGHT_MID, -4, 0);
+    /* 电量：图标 + 百分比贴在一起（它们是一件事的两个部分）。 */
+    sg_bat_icon = prv_glyph(sg_bar, FONT_AWESOME_BATTERY_3, SB_COL_ICON);
+    sg_bat_text = prv_text(sg_bar, "--", SB_COL_ICON);
 
     /* ---- 首次填充 + 常驻定时器 ---- */
     prv_clock_refresh();
@@ -980,9 +1210,67 @@ lv_obj_t *app_statusbar_create(lv_obj_t *parent)
 
     /* 订阅是幂等的（见 app_event.h）——页面重进时重复调不会叠加。 */
     app_event_subscribe(APP_EVT_WEATHER_UPDATED, prv_evt_cb, NULL);
+    app_event_subscribe(APP_EVT_FONT_READY, prv_evt_cb, NULL);
 
     PR_NOTICE("[bar] 状态栏就绪（%dx%d）", SB_W, APP_STATUSBAR_H);
     return sg_bar;
+}
+
+void app_statusbar_set_todo(uint32_t pending)
+{
+    char text[24];
+
+    if (NULL == sg_badge) {
+        return;
+    }
+
+    lv_snprintf(text, sizeof(text), "待办 %u", (unsigned)pending);
+    if (0 == strcmp(lv_label_get_text(sg_badge), text)) {
+        return;
+    }
+    lv_label_set_text(sg_badge, text);
+}
+
+void app_statusbar_open_time(void)
+{
+    app_disp_lock();
+    prv_time_open();
+    app_disp_unlock();
+}
+
+BOOL_T app_statusbar_popup_visible(void)
+{
+    /* 免锁：只读一个 volatile，LVGL 定时器里也能调。 */
+    return sg_popup_on;
+}
+
+BOOL_T app_statusbar_popup_active(void)
+{
+    BOOL_T on;
+
+    app_disp_lock();
+    on = (BOOL_T)((NULL != sg_mask) || (NULL != sg_vol_win) ||
+                  (NULL != sg_wifi_win) || (NULL != sg_wea_win) ||
+                  (NULL != sg_time_win) || (NULL != sg_set_win));
+    app_disp_unlock();
+    return on;
+}
+
+BOOL_T app_statusbar_close_popup(void)
+{
+    BOOL_T had;
+
+    app_disp_lock();
+    had = (BOOL_T)((NULL != sg_vol_win) || (NULL != sg_wifi_win) ||
+                   (NULL != sg_wea_win) || (NULL != sg_time_win) ||
+                   (NULL != sg_set_win) || (NULL != sg_mask));
+    prv_close_all_popups();
+    if (NULL != sg_mask) {
+        /* 只剩遮罩（窗口已经没了）的边角情况 */
+        prv_mask_hide();
+    }
+    app_disp_unlock();
+    return had;
 }
 
 void app_statusbar_open_settings(void)

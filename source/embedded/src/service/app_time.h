@@ -71,6 +71,19 @@ OPERATE_RET app_time_format(char *out, size_t out_sz, const char *fmt);
 /** @brief 当前时区偏移（小时）。 */
 int app_time_timezone(void);
 
+/**
+ * @brief 手动设置本地时间（时间设置弹窗用）。
+ *
+ * 年/月/日/时/分/秒都取 @a dt 的字段，按 app_settings 里的时区换成 UTC 后写入
+ * 系统 RTC（`tal_time_set_posix(..., 2)`，source = other）。设完 sg_valid 置位，
+ * 界面不再显示 "--:--"。
+ *
+ * 联网后云端会再校时，这里只是让用户在没网 / 时区不对时能自己拨。
+ *
+ * @return OPRT_OK 成功；参数非法 / RTC 写入失败返回错误码。
+ */
+OPERATE_RET app_time_set_local(const APP_DATETIME_T *dt);
+
 #ifdef __cplusplus
 }
 #endif

@@ -35,6 +35,25 @@ OPERATE_RET app_disp_init(void *device_name)
     lv_vendor_init((NULL != device_name) ? device_name : (void *)DISPLAY_NAME);
     sg_inited = TRUE;
 
+    /* 全局默认主题切成**暗色**。
+     *
+     * 新 UI（src/ui）的每个控件都显式设了颜色，不依赖主题；但 LVGL 原生控件
+     * （WiFi 窗的文本框 / 键盘、roller 这类）吃的是主题色。lv_conf.h 里
+     * LV_THEME_DEFAULT_DARK 是 0，而那是 SDK 文件 —— 这里在**建任何界面之前**
+     * 重新初始化一次主题，效果一样，不用改 SDK、也不用维护 sdk-patches。
+     *
+     * 主色取新 UI 的亮蓝，次色取提示用的靛蓝。 */
+    {
+        lv_display_t *disp = lv_display_get_default();
+
+        if (NULL != disp) {
+            lv_theme_default_init(disp,
+                                  lv_color_hex(0x3D7BFF),
+                                  lv_color_hex(0x6C5CE7),
+                                  true, LV_FONT_DEFAULT);
+        }
+    }
+
     /* 应用用户保存的背光亮度 */
     app_disp_set_brightness(app_settings_get_int(APP_SET_BRIGHTNESS));
 

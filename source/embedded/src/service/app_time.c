@@ -181,3 +181,48 @@ OPERATE_RET app_time_format(char *out, size_t out_sz, const char *fmt)
     out[o] = '\0';
     return OPRT_OK;
 }
+
+/**
+ * @brief 手动设置本地时间（时间设置弹窗）。
+ *
+ * 把本地时间字段转成 POSIX，再减去时区得到 UTC，写进系统 RTC。
+ * `tal_time_mktime` 是 SDK 对 mktime 的替换实现（裸机 newlib 的 mktime 依赖
+ * 时区，不可靠），它按 UTC 解释结构体 —— 所以这里先把"本地墙上时间"当成
+ * UTC 算出一个秒数，再减去时区偏移，才是真正的 UTC。
+ */
+OPERATE_RET app_time_set_local(const APP_DATETIME_T *dt)
+{
+    POSIX_TM_S tm;
+    TIME_T     local;
+    TIME_T     utc;
+    OPERATE_RET rt;
+
+    if (NULL == dt || dt->year < 2020 || dt->month < 1 || dt->month > 12 ||
+        dt->day < 1 || dt->day > 31 || dt->hour < 0 || dt->hour > 23 ||
+        dt->min < 0 || dt->min > 59 || dt->sec < 0 || dt->sec > 59) {
+        return OPRT_INVALID_PARM;
+    }
+
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = dt->year - 1900;
+    tm.tm_mon  = dt->month - 1;
+    tm.tm_mday = dt->day;
+    tm.tm_hour = dt->hour;
+    tm.tm_min  = dt->min;
+    tm.tm_sec  = dt->sec;
+
+    local = tal_time_mktime(&tm);
+    utc   = local - (TIME_T)app_settings_get_int(APP_SET_TIMEZONE) * 3600;
+
+    rt = tal_time_set_posix(utc, 2);     /* 2 = other（不是 RTC / 云端） */
+    if (OPRT_OK != rt) {
+        PR_WARN("[time] 手动设置失败: %d", rt);
+        return rt;
+    }
+
+    sg_valid = TRUE;
+    PR_NOTICE("[time] 手动设置 -> %04d-%02d-%02d %02d:%02d:%02d（UTC%+d）",
+              dt->year, dt->month, dt->day, dt->hour, dt->min, dt->sec,
+              app_settings_get_int(APP_SET_TIMEZONE));
+    return OPRT_OK;
+}

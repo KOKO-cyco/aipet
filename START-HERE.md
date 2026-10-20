@@ -57,9 +57,27 @@ tos.py flash -p COM19      # 端口按实际改
 
 ```
 /sdcard/sprite/fish_elf.spf        精灵（待机整组常驻 PSRAM）
-/sdcard/font/cn16.bin              16px 中文字库
-/sdcard/font/cn21.bin              21px 中文字库
+/sdcard/font/puhui14.bin           正文/工作字号（14px，全 GB2312 + ASCII）
+/sdcard/font/puhui18.bin           正文（18px，全 GB2312 + ASCII）
+/sdcard/font/puhui16.bin           卡片标题（16px，子集即可）
+/sdcard/font/puhui20.bin           页面标题（20px，子集即可）
+/sdcard/font/puhui24.bin           大标题（24px，子集即可，可选）
+/sdcard/font/puhui32.bin           卡片大数字（32px，子集即可）
+/sdcard/weather/<code>.bin         天气图标，code = 0..38 / 99（WXI1 格式）
 ```
+
+`/sdcard/font/cn16.bin`、`cn21.bin`（老的两份全字库）**开机不再加载**了 ——
+全产品中文都走 puhui14/18，留着只是省得删。要它们得自己调
+`app_font_load_sync()`。
+
+**puhui 六档是新界面（`src/ui/`）的字体**，全部从 SD 加载（demo 把它们编进
+固件，合计 7.5MB，放不下）。14/18 要**全 GB2312 + ASCII**（用户/模型带来的文本
+都会用到）；16/20/24/32 是界面自己写死的字，子集码点见
+`tools/puhui_subset.txt`。缺哪份就退到内置字体（14/16/18 用 16px，20/24/32 用
+21px），界面不崩、只是字号不对。
+
+天气图标是 8 字节头（`WXI1` + 宽 + 高）+ RGB565 平面 + A8 平面的 48x48 数据，
+见 `app_weather_icon.h`。顶栏里会把它**重着色成暗色单色**，详情弹窗里用原彩色。
 
 字库可以不放（固件里有内置子集兜底），但内置子集**缺字就渲染空白**，
 开发期建议放上。
@@ -128,7 +146,8 @@ tos.py flash -p COM19      # 端口按实际改
 | `app_movie.c/.h`、`app_movie_audio.c/.h`、`page_movie.c` | 电影 |
 | `app_music.c/.h`、`page_music.c` | 音乐 |
 | `app_role2d.c/.h`、`page_char.c` | 老角色页那套 2D 大角色 |
-| `app_weather.c/.h`、`weather_icons.c/.h` | **留着了** —— 天气挪进了状态栏 |
+| `app_weather.c/.h` | **留着了** —— 天气挪进了状态栏 |
+| `weather_icons.c/.h` | **删了** —— 40 张图标 1.1MB flash，改成 SD 卡按需加载（`app_weather_icon.c`） |
 | `page_home.c` | 老主页 —— 能力（WiFi 键盘 / 天气 / 时间 / 音量）搬进了 `app_statusbar.c` |
 | `app_pool.c/.h` | 全屏缓冲池（只有电影/音乐/角色用） |
 | `third_party/quicknes/`、`third_party/minimp3/` | NES 核心、MP3 软解 |

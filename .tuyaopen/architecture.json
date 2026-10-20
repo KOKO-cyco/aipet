@@ -92,7 +92,18 @@
         "source/embedded/src/pages/"
       ],
       "surface": "embedded",
-      "notes": "两个页面（桌宠 page_pet、SD 门页 page_nosd）+ 顶部状态栏控件 app_statusbar。"
+      "notes": "路由层两个页面（桌宠 page_pet、SD 门页 page_nosd）+ 顶部状态栏控件 app_statusbar。"
+    },
+    {
+      "id": "ui",
+      "name": "Main UI (ported from ai_pet_wide)",
+      "kind": "component",
+      "language": "C",
+      "sources": [
+        "source/embedded/src/ui/"
+      ],
+      "surface": "embedded",
+      "notes": "主界面内部：pui 组件库、宠物卡（实时精灵画布 + 气泡）、七页面板栈（主页 / 拍照 / 相册 / 备忘录 / 全部笔记 / 设置）。字体全部走 SD（app_font_puhui）。"
     },
     {
       "id": "modules",

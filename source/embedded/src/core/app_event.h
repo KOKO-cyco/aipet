@@ -64,6 +64,11 @@ typedef enum {
     APP_EVT_WEATHER_UPDATED,  /* 拉到/刷新天气，快照已就绪，data = NULL          */
                               /* 订阅方（状态栏）只置脏位，刷新交给自己的 lv_timer */
 
+    /* ---- 字体服务 app_font 发布 ---------------------------------------- */
+    APP_EVT_FONT_READY,       /* SD 字库（puhui 六档）换进代理字体，data = NULL  */
+                              /* 字号变了，已经量过尺寸的标签要重排 —— 订阅方    */
+                              /* （桌宠页）只置位，在 LVGL 线程里重建当前页      */
+
     /* ---- 页面路由 app_router 发布 -------------------------------------- */
     APP_EVT_PAGE_CHANGED,     /* 进入了新页面，data = (APP_PAGE_EVT_T *)         */
                               /* 订阅方据此决定"这一页要不要干活" —— 只看       */

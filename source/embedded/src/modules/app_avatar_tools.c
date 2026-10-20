@@ -44,11 +44,12 @@
  * 改动作集（fish_extract.py 的 CLIPS / build_fish.sh 的 --order）时**这里要跟着改**；
  * 漏改的后果是"模型要求演某个新动作，被这层挡下来"。
  *
- * **只列当前动作集（2026-10-16，third_party/动作视频/ 的 8 条）真实存在的组** —— 
- * snap / drag / talk 那些旧组随旧素材一起没了，列了只会让大模型点名演不存在的动作。 */
+ * **只列当前动作集真实存在的组**（fish_elf.spf 的 15 组 + idle）。旧套的
+ * click_wave / rnd_photo 之类已经随素材没了，列了只会让大模型点名演不存在的动作。 */
 #define AVATAR_ANIM_NAMES                                                      \
-    "idle, click_wave, click_happy, "                                       \
-    "rnd_photo, rnd_note"
+    "idle, tap_proud, tap_shy, tap_happy, tap_tickle, "                        \
+    "fn_photo, fn_note, emo_sad, emo_happy, emo_think, "                       \
+    "rnd_gomoku, rnd_pigeon, rnd_yawn, rnd_cat, rnd_lion, rnd_scare"
 
 /* 情绪名 = skill_emotion.h 里的 EMOJI_*（page_pet.c 的情绪表按这些键映射动作）。
  * 大模型给大小写都认（页面里用 strcasecmp 比对），这里列全便于它挑。 */
@@ -59,7 +60,11 @@
     "RELAXED, SLEEP"
 
 static const char *const sg_anim_whitelist[] = {
-    "idle", "click_wave", "click_happy", "rnd_photo", "rnd_note",
+    "idle",
+    "tap_proud", "tap_shy", "tap_happy", "tap_tickle",
+    "fn_photo", "fn_note",
+    "emo_sad", "emo_happy", "emo_think",
+    "rnd_gomoku", "rnd_pigeon", "rnd_yawn", "rnd_cat", "rnd_lion", "rnd_scare",
 };
 
 /* MCP 服务器是否已经建好（= 工具已登记）。MQTT 没连上时是 false。 */
@@ -208,8 +213,8 @@ static OPERATE_RET prv_register_tools(void)
         "and then returns to the idle loop by itself, so prefer calling this once "
         "near the START of your reply.\n"
         "Use it to match the emotion or intent of what you are saying "
-        "(e.g. click_wave for a greeting, click_shy for sad news, happy for good "
-        "news, think while pondering). Do NOT call it for every sentence.\n"
+        "(e.g. tap_happy for good news, emo_sad for sad news, emo_think while "
+        "pondering, tap_proud for a boast). Do NOT call it for every sentence.\n"
         "Animations: " AVATAR_ANIM_NAMES ".\n"
         "Response: true if the animation started.",
         prv_mcp_play_animation,
