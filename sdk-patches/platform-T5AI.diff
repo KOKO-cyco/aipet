@@ -2182,6 +2182,26 @@ index 2a6f7dfb6..0a795bac9 100644
 +CONFIG_LWIP_PPP_SUPPORT=n
 +CONFIG_USB_CDC_MODEM=n
 +CONFIG_USB_CDC=n
+diff --git a/t5_os/ap/middleware/soc/common/hal/yuv_buf_hal.c b/t5_os/ap/middleware/soc/common/hal/yuv_buf_hal.c
+index fed72d7cb..81c5198ea 100755
+--- a/t5_os/ap/middleware/soc/common/hal/yuv_buf_hal.c
++++ b/t5_os/ap/middleware/soc/common/hal/yuv_buf_hal.c
+@@ -58,6 +58,15 @@ static bk_err_t yuv_buf_hal_set_config_common(yuv_buf_hal_t *hal, const yuv_buf_
+ 	yuv_buf_ll_enable_sync_edge_dect(hal->hw);
+ 	yuv_buf_ll_set_encode_begin_hsync_posedge(hal->hw);
+ 	yuv_buf_ll_disable_bps_cis(hal->hw);
++
++	/* aipet: GC2145 P0:0x84[4:0]=0x02 表示传感器输出 Y Cb Y Cr（YUYV）。
++	 * YUV BUF 的 bus_dat_byte_reve 位没有在初始化里设置过，默认状态下会把
++	 * 每组 4 字节整体反转，内存里变成 Cr Y Cb Y —— 这就是之前必须按 VYUY
++	 * 解析、ROTT 也认不出的原因。这里显式关掉，保持传感器原生顺序。 */
++	bk_printf("yuv_buf bus_dat_byte_reve=%d -> 0\n",
++	          hal->hw->ctrl.bus_dat_byte_reve);
++	yuv_buf_ll_disable_reverse_yuv_data(hal->hw);
++
+ 	yuv_buf_ll_disable_memrev(hal->hw);
+ 	yuv_buf_ll_enable_int(hal->hw);
+ 
 diff --git a/t5_os/projects/tuya_app/ap/config/bk7258_ap/config b/t5_os/projects/tuya_app/ap/config/bk7258_ap/config
 index 35fba4edc..d9253dd72 100644
 --- a/t5_os/projects/tuya_app/ap/config/bk7258_ap/config
@@ -2210,6 +2230,50 @@ index 35fba4edc..d9253dd72 100644
  CONFIG_SDIO_GDMA_EN=n
  
  # CONFIG_LOG_LEVEL=4
+diff --git a/tuyaos/tuyaos_adapter/include/dvp/tkl_dvp.h b/tuyaos/tuyaos_adapter/include/dvp/tkl_dvp.h
+index e9aedfb75..7234ce42d 100755
+--- a/tuyaos/tuyaos_adapter/include/dvp/tkl_dvp.h
++++ b/tuyaos/tuyaos_adapter/include/dvp/tkl_dvp.h
+@@ -46,6 +46,39 @@ OPERATE_RET tkl_dvp_start(void);
+  */
+ OPERATE_RET tkl_dvp_stop(void);
+ 
++/**
++ * @brief 取硬件 resize 的输出缓冲（aipet 调试用）。
++ *
++ * 该缓冲由 YUV BUF 模块在写主 YUV 帧的同时缩小输出，尺寸固定为
++ * TKL_DVP_RSZ_W × TKL_DVP_RSZ_H，格式与传感器输入一致（YUV422）。
++ *
++ * @param[out] w   输出宽
++ * @param[out] h   输出高
++ * @param[out] buf 输出缓冲地址（PSRAM）
++ * @return OPRT_OK = 可用；其它 = resize 没启用/没分配成功
++ */
++OPERATE_RET tkl_dvp_get_resize_info(uint32_t *w, uint32_t *h, uint8_t **buf);
++
++/**
++ * @brief 单帧硬件旋转/转色测试（aipet 调试用）。
++ *
++ * 用 ROTT/PFC 硬件把一帧 YUV422 转成 RGB565 并旋转 90°。输入按 YUYV + 字节
++ * 翻转处理，用来匹配这颗 GC2145 的 VYUY 输出。输出缓冲由本函数在 PSRAM
++ * 里分配并复用，尺寸为 h × w。
++ *
++ * @param[in]  yuv    YUV422 源（VYUY）
++ * @param[in]  w      源宽
++ * @param[in]  h      源高
++ * @param[out] out_ms 本次耗时（ms）
++ * @param[out] out_w  输出宽（= h）
++ * @param[out] out_h  输出高（= w）
++ * @param[out] out_rgb 输出 RGB565 缓冲（PSRAM）
++ * @return OPRT_OK = 完成；其它 = 未初始化/超时/参数错误
++ */
++OPERATE_RET tkl_dvp_test_rotate(const uint8_t *yuv, uint32_t w, uint32_t h,
++                                uint32_t *out_ms, uint32_t *out_w,
++                                uint32_t *out_h, uint16_t **out_rgb);
++
+ #ifdef __cplusplus
+ }
+ #endif /* __cplusplus */
 diff --git a/tuyaos/tuyaos_adapter/include/vad/tkl_vad.h b/tuyaos/tuyaos_adapter/include/vad/tkl_vad.h
 index 3b1a7ebd1..3fbd4b800 100755
 --- a/tuyaos/tuyaos_adapter/include/vad/tkl_vad.h
@@ -2249,6 +2313,192 @@ index c84cab620..ce896e1c2 100644
      pframe.buf_size = len;
      pframe.used_size = len;
      pframe.pbuf = (char *)data;
+diff --git a/tuyaos/tuyaos_adapter/src/driver/tkl_dvp.c b/tuyaos/tuyaos_adapter/src/driver/tkl_dvp.c
+index 67aeb89b4..d7b6f5f2f 100644
+--- a/tuyaos/tuyaos_adapter/src/driver/tkl_dvp.c
++++ b/tuyaos/tuyaos_adapter/src/driver/tkl_dvp.c
+@@ -15,6 +15,10 @@
+ #include <driver/yuv_buf.h>
+ #include <driver/h264.h>
+ #include <driver/video_common_driver.h>
++#include <driver/rott_driver.h>
++#if CONFIG_CACHE_ENABLE
++#include "cache.h"
++#endif
+ 
+ #define HARDWARE_BLOCK_WDITH_BYTE   8
+ #define HARDWARE_BLOCK_LINE         8
+@@ -23,6 +27,32 @@
+ #define BLOCK_WIDTH           8   // 像素处理块宽
+ #define BLOCK_HEIGHT          8   // 像素处理块高
+ 
++/* aipet: 硬件 resize 输出尺寸（必须是 8 的倍数）。
++ * 640×480 传感器输出在 YUV BUF 模块里直接缩到 240×208，写进单独的
++ * emr_base_addr；转 90° 后是 208×240，和取景框 204×240 只差 4px。 */
++#define TKL_DVP_RSZ_W         240
++#define TKL_DVP_RSZ_H         208
++
++static uint8_t  *s_rsz_buf;
++static uint32_t  s_rsz_w;
++static uint32_t  s_rsz_h;
++
++/* aipet: ROTT/PFC 单帧旋转测试 */
++#define TKL_DVP_ROT_TIMEOUT_MS  1000
++static uint16_t         *s_rot_buf;
++static uint32_t          s_rot_w;
++static uint32_t          s_rot_h;
++static beken_semaphore_t s_rot_sem;
++static volatile bool     s_rot_done;
++
++static void __rot_complete_isr(void)
++{
++    s_rot_done = true;
++    if (NULL != s_rot_sem) {
++        rtos_set_semaphore(&s_rot_sem);
++    }
++}
++
+ #define clk_m(a) (a * 1000 * 1000)
+ 
+ #define YUV422_PER_PIXEL_BYTE   (2)
+@@ -314,6 +344,42 @@ init_yuv_buf:
+ 		return OPRT_COM_ERROR;
+ 	}
+ 
++    /* aipet: 硬件 resize 暂时禁用。
++     *
++     * 实测（2026-10-20）：按 `bk_yuv_buf_set_resize()` 配置 240×184 后，读该
++     * 缓冲得到的是粉紫色噪点（未初始化内存），说明 BPS 在传感器 YUV 模式下
++     * 并没有往 emr_base_addr 写缩小画面；而且 yuv_buf_resize_config_t 里
++     * `emr_base_addr` 的注释是 "used for read resize data base addr"，
++     * 可能是编码模块的**读取**地址，不是写输出。若硬件仍按整幅写，会越界
++     * 踩内存，所以先关掉，等拿到 BPS 寄存器说明再试。
++     *
++     * 打开方法：把下面的 0 改 1。 */
++#if 0
++    if (dvp_mgmt->cur_work_mode == YUV_MODE) {
++        yuv_buf_resize_config_t rsz = { 0 };
++
++        if (NULL == s_rsz_buf) {
++            s_rsz_buf = (uint8_t *)tkl_system_psram_malloc(TKL_DVP_RSZ_W * TKL_DVP_RSZ_H * 2);
++        }
++        if (NULL == s_rsz_buf) {
++            bk_printf("dvp resize buf malloc failed\n");
++        } else {
++            rsz.x_pixel_resize = TKL_DVP_RSZ_W;
++            rsz.y_pixel_resize = TKL_DVP_RSZ_H;
++            rsz.emr_base_addr  = s_rsz_buf;
++
++            if (BK_OK == bk_yuv_buf_set_resize(&rsz)) {
++                s_rsz_w = TKL_DVP_RSZ_W;
++                s_rsz_h = TKL_DVP_RSZ_H;
++                bk_printf("dvp hw resize %ux%u -> %p\n",
++                          s_rsz_w, s_rsz_h, s_rsz_buf);
++            } else {
++                bk_printf("dvp hw resize config failed\n");
++            }
++        }
++    }
++#endif
++
+     return OPRT_OK;
+ }
+ 
+@@ -1424,3 +1490,94 @@ OPERATE_RET tkl_dvp_stop()
+     g_dvp_module_manage.output_enable = false;
+     return OPRT_OK;
+ }
++
++OPERATE_RET tkl_dvp_get_resize_info(uint32_t *w, uint32_t *h, uint8_t **buf)
++{
++    if (NULL == w || NULL == h || NULL == buf) {
++        return OPRT_INVALID_PARM;
++    }
++
++    *w   = s_rsz_w;
++    *h   = s_rsz_h;
++    *buf = s_rsz_buf;
++
++    return (NULL != s_rsz_buf && s_rsz_w > 0 && s_rsz_h > 0) ? OPRT_OK : OPRT_COM_ERROR;
++}
++
++OPERATE_RET tkl_dvp_test_rotate(const uint8_t *yuv, uint32_t w, uint32_t h,
++                                uint32_t *out_ms, uint32_t *out_w,
++                                uint32_t *out_h, uint16_t **out_rgb)
++{
++    rott_config_t cfg = { 0 };
++    bk_err_t      ret;
++    uint32_t      t0;
++
++    if (NULL == yuv || 0 == w || 0 == h || NULL == out_ms ||
++        NULL == out_w || NULL == out_h || NULL == out_rgb) {
++        return OPRT_INVALID_PARM;
++    }
++
++    if (NULL == s_rot_buf || s_rot_w != h || s_rot_h != w) {
++        if (NULL != s_rot_buf) {
++            tkl_system_psram_free(s_rot_buf);
++            s_rot_buf = NULL;
++        }
++        s_rot_buf = (uint16_t *)tkl_system_psram_malloc((size_t)w * h * 2);
++        if (NULL == s_rot_buf) {
++            return OPRT_MALLOC_FAILED;
++        }
++        s_rot_w = h;
++        s_rot_h = w;
++    }
++
++    if (NULL == s_rot_sem) {
++        if (kNoErr != rtos_init_semaphore_ex(&s_rot_sem, 1, 0)) {
++            s_rot_sem = NULL;
++            return OPRT_COM_ERROR;
++        }
++        bk_rott_driver_init();
++        bk_rott_int_enable(ROTATE_COMPLETE_INT | ROTATE_CFG_ERR_INT, 1);
++        bk_rott_isr_register(ROTATE_COMPLETE_INT, __rot_complete_isr);
++    }
++
++    cfg.rot_mode       = ROTATE_90;
++    cfg.input_addr     = (void *)yuv;
++    cfg.output_addr    = s_rot_buf;
++    /* 传感器按 P0:0x84=0x02 输出 Y Cb Y Cr；YUV BUF 的字节反转已在 HAL 层
++     * 关闭，内存里就是标准 YUYV，ROTT 可以直接吃。 */
++    cfg.input_fmt      = PIXEL_FMT_YUYV;
++    cfg.input_flow     = ROTT_INPUT_NORMAL;
++    cfg.output_flow    = ROTT_OUTPUT_NORMAL;
++    cfg.picture_xpixel = (uint16_t)w;
++    cfg.picture_ypixel = (uint16_t)h;
++
++    /* TABLE_ROTT_BLOCK 里没有 320×240，显式给块参数（80×60 × 4×4 = 16 块，
++     * 每块 4800 像素，正好是硬件上限）。 */
++    if (320 == w && 240 == h) {
++        cfg.block_xpixel = 80;
++        cfg.block_ypixel = 60;
++        cfg.block_cnt    = 16;
++    }
++
++    s_rot_done = false;
++    t0 = tkl_system_get_millisecond();
++
++    ret = rott_config(&cfg);
++    if (BK_OK != ret) {
++        return OPRT_COM_ERROR;
++    }
++
++    bk_rott_enable();
++    rtos_get_semaphore(&s_rot_sem, TKL_DVP_ROT_TIMEOUT_MS);
++
++    *out_ms  = tkl_system_get_millisecond() - t0;
++    *out_w   = s_rot_w;
++    *out_h   = s_rot_h;
++    *out_rgb = s_rot_buf;
++
++#if CONFIG_CACHE_ENABLE
++    invalidate_dcache(s_rot_buf, (long)(w * h * 2));
++#endif
++
++    return s_rot_done ? OPRT_OK : OPRT_TIMEOUT;
++}
 diff --git a/tuyaos/tuyaos_adapter/src/driver/tkl_kws.c b/tuyaos/tuyaos_adapter/src/driver/tkl_kws.c
 index 0e8d8e1a1..fc831688a 100755
 --- a/tuyaos/tuyaos_adapter/src/driver/tkl_kws.c

@@ -48,6 +48,7 @@
 #include "ai_manage_mode.h"     /* AI_MODE_STATE_* —— AI 状态驱动动作 */
 
 #include "app_ai_chat.h"
+#include "app_camera.h"
 #include "app_disp.h"
 #include "app_event.h"
 #include "app_pages.h"
@@ -927,6 +928,7 @@ static void prv_tick_cb(lv_timer_t *t)
                     sg_idle_at = now;
                 }
             } else if (PET_CLIP_IDLE == want &&
+                       !app_camera_is_open() &&
                        (now - sg_idle_at) >= PET_IDLE_ACT_AFTER_MS) {
                 int act = prv_pick_idle_act();
 

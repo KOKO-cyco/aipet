@@ -1,43 +1,26 @@
  boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_board.c      |   15 +-
  boards/T5AI/TUYA_T5AI_BOARD/tuya_t5ai_ex_module.c  |   25 +
- platform/platform_config.yaml                      |    2 +-
- src/ai_components/Kconfig                          |    9 -
  src/ai_components/ai_agent/src/ai_agent.c          |   18 +
  src/ai_components/ai_audio/src/ai_audio_input.c    |   50 +-
  src/ai_components/ai_audio/src/ai_audio_player.c   |   85 +-
  src/ai_components/ai_main/include/ai_chat_main.h   |    6 +
  src/ai_components/ai_main/src/ai_chat_main.c       |  242 +++-
- src/ai_components/ai_main/src/ai_chat_ui.c         |   90 +-
  src/ai_components/ai_mode/src/ai_mode_free.c       |   88 +-
- src/ai_components/ai_ui/CMakeLists.txt             |    5 -
- src/ai_components/ai_ui/Kconfig                    |   15 +-
- src/ai_components/ai_ui/include/ai_ui_manage.h     |    5 -
- src/ai_components/assets/include/local_alert_src.h |   15 +-
- src/ai_components/assets/include/media_src.h       |   19 +-
- src/ai_components/assets/src/local_alert_src_en.c  |    3 +-
- src/ai_components/assets/src/local_alert_src_zh.c  |    3 +-
  src/audio_player/src/svc_ai_player.c               |   74 +-
- src/liblvgl/Kconfig                                |    7 +-
- src/liblvgl/v8/CMakeLists.txt                      |    4 -
- src/liblvgl/v8/conf/lv_conf.h                      |    8 +-
- src/liblvgl/v9/CMakeLists.txt                      |    4 -
  src/liblvgl/v9/conf/lv_conf.h                      |   24 +-
- src/liblvgl/v9/port/lv_port_disp_full_frame.c      |  178 ++-
- src/libtls/Kconfig                                 |    6 +-
- src/libtls/port/tuya_tls_config.h                  |    5 +-
+ src/liblvgl/v9/port/lv_port_disp_full_frame.c      |  217 +++-
+ src/liblvgl/v9/port/lv_port_disp_internal.h        |   22 +
  src/libu8g2/u8g2/tools/font/bdf/emoticons21.bdf    | 1234 ++++++++++----------
  .../u8g2/tools/font/emoticons/emoticons21.bdf      | 1234 ++++++++++----------
  .../audio_codecs/tdd_audio/src/tdd_audio.c         |   14 +
+ .../camera/tdd_camera/src/dvp/tdd_camera_dvp.c     |   10 +-
+ .../tdd_camera/src/dvp/tdd_camera_dvp_gc2145.c     |    1 +
+ .../src/dvp/tdd_camera_gc2145_init_seq.h           |   15 +
+ .../camera/tdl_camera/src/tdl_camera_manage.c      |   11 +-
  .../tdd_display/src/rgb/tdd_disp_rgb_ili9488.c     |   33 +-
  src/peripherals/tp/tdd_tp/include/tdd_tp_gt1151.h  |   10 +-
- src/tuya_ai_service/port/include/http_manager.h    |    7 -
- src/tuya_ai_service/port/src/http_manager.c        |  175 +--
  .../svc_ai_agent/include/tuya_ai_output.h          |   11 +
  .../svc_ai_agent/src/tuya_ai_agent.c               |    9 +-
  .../svc_ai_agent/src/tuya_ai_output.c              |   78 +-
- .../svc_ai_basic/src/tuya_ai_http.c                |    2 +-
  src/tuya_cloud_service/cloud/tuya_iot.c            |   27 +-
- src/tuya_cloud_service/netcfg/ap_netcfg.c          |   26 -
- src/tuya_cloud_service/netcfg/ap_netcfg.h          |   13 -
- src/tuya_p2p/base_ice/src/tuya_sdp.c               |   10 +-
- 42 files changed, 2232 insertions(+), 1656 deletions(-)
+ 25 files changed, 2243 insertions(+), 1310 deletions(-)

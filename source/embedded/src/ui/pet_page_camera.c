@@ -481,9 +481,11 @@ static void __build_viewfinder(lv_obj_t *parent)
     lv_obj_set_flex_grow(frame, 1);
     lv_obj_set_style_bg_color(frame, PET_COLOR_PREVIEW, 0);
     lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(frame, 16, 0);
-    lv_obj_set_style_pad_all(frame, CAM_FRAME_PAD, 0);
-    lv_obj_set_style_clip_corner(frame, TRUE, 0);
+    /* 取景框四角直角、零内边距：相机画面铺满整块，四周不留边。 */
+    lv_obj_set_style_radius(frame, 0, 0);
+    lv_obj_set_style_pad_all(frame, 0, 0);
+    lv_obj_set_style_border_width(frame, 0, 0);
+    lv_obj_set_style_clip_corner(frame, FALSE, 0);
 
     scene = lv_obj_create(frame);
     pui_passthrough(scene);
@@ -494,8 +496,8 @@ static void __build_viewfinder(lv_obj_t *parent)
     lv_obj_set_style_bg_grad_color(scene, lv_color_hex(0x141C2E), 0);
     lv_obj_set_style_bg_grad_dir(scene, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_opa(scene, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(scene, 8, 0);
-    lv_obj_set_style_clip_corner(scene, TRUE, 0);
+    lv_obj_set_style_radius(scene, 0, 0);
+    lv_obj_set_style_clip_corner(scene, FALSE, 0);
     lv_obj_add_event_cb(scene, __scene_del_cb, LV_EVENT_DELETE, NULL);
 
     if (OPRT_OK == app_camera_open()) {
@@ -672,11 +674,16 @@ void pet_page_camera_build(lv_obj_t *panel)
     inner = pui_card_body(card);
     lv_obj_set_height(inner, 0);
     lv_obj_set_flex_grow(inner, 1);
+    /* 相机页的卡片内边距清零：取景框直接铺到卡片边缘，四周不留边框。
+     * 底部保留 PUI_CARD_PAD，快门那一行不贴边。 */
+    lv_obj_set_style_pad_all(inner, 0, 0);
     lv_obj_set_style_pad_row(inner, CAM_STAGE_GAP, 0);
+    lv_obj_set_style_pad_bottom(inner, PUI_CARD_PAD, 0);
 
     __build_viewfinder(inner);
 
     row = pui_box_create(inner, PUI_FLOW_ROW, CAM_ROW_GAP);
+    lv_obj_set_style_pad_hor(row, PUI_CARD_PAD, 0);
     lv_obj_set_height(row, CAM_SHUTTER);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 

@@ -8,7 +8,7 @@
  *    —— 它内部只按 `min(in_w,out_w) × min(in_h,out_h)` 逐点拷，不会缩放。
  *    这里是一趟做完"cover 裁切 + 最近邻缩放"。
  *    2026-10-20 加了可选的 DMA2D 路径（APP_CAM_USE_DMA2D），VGA 下实测更慢，
- *    降到 240×240 后可以再试。
+ *    暂不启用。
  * 2) **按 cover 裁，不拉伸**：摄像头 4:3、取景框不是，硬缩会把画面拉长。
  * 3) 帧回调里**只做内存操作**：写 SD 会把 SDIO 堵住、把出帧队列顶爆。
  * 4) **双缓冲**：回调写后缓冲、写完再翻 `sg_front`；LVGL 读前缓冲，互不打架。
@@ -19,6 +19,7 @@
 
 #include "tal_api.h"
 #include "tkl_fs.h"
+#include "tkl_dvp.h"                    /* 硬件 resize 的输出缓冲 */
 #include "tal_image_yuv422_to_rgb.h"    /* YUV422->RGB565：有 DMA2D 时走硬件 */
 
 #include "tdl_camera_manage.h"
@@ -37,6 +38,9 @@
 
 /* 快门等一张完整 JPEG 的上限。出帧 15fps，正常 100ms 内就到。 */
 #define APP_CAM_CAP_WAIT_MS 2000
+
+/* 预览刷新上限（帧/秒）。传感器可能跑得更快，这里按时间闸门丢掉多余的帧。 */
+#define APP_CAM_PREVIEW_FPS 10
 
 #define CAM_TAG             "[cam]"
 
@@ -61,8 +65,17 @@ static uint32_t sg_fps_cnt;
 static uint32_t sg_fps_t0;
 static uint32_t sg_conv_ms_sum;             /* 每帧转换耗时累计（2 秒窗口） */
 static uint32_t sg_conv_ms_max;
+static uint32_t sg_last_conv_ms;            /* 预览限帧：上一帧转换的时间 */
 
-static TUYA_YUV422_ORDER_E sg_order = TUYA_YUV422_UYVY;
+/* 应用层的 YUV422 排列。SDK 的 TUYA_YUV422_ORDER_E 只有 UYVY/YUYV 两种，
+ * 但实测这块板子的 GC2145 输出的是 VYUY，所以在应用层补一种。 */
+typedef enum {
+    APP_YUV_UYVY = 0,       /* U0 Y0 V0 Y1 */
+    APP_YUV_YUYV = 1,       /* Y0 U0 Y1 V0 */
+    APP_YUV_VYUY = 2,       /* V0 Y0 U0 Y1 —— GC2145 实测排列 */
+} APP_YUV_ORDER_E;
+
+static APP_YUV_ORDER_E sg_order = APP_YUV_VYUY;
 
 /* 快门：主线程置 req，JPEG 回调拷完置 done。 */
 static volatile BOOL_T   sg_cap_req;
@@ -72,16 +85,28 @@ static volatile uint32_t sg_jpeg_len;
 
 /* ---- YUV422 -> RGB565（cover 裁切 + 最近邻缩放） -------------------------- */
 
-/** 横图暂存尺寸：和源图一样大（240×240），转 90° 后还是 240×240。 */
-#define APP_CAM_TMP_W       240
+/** 横图暂存尺寸：320×240（传感器输出），转 90° 成 240×320。 */
+#define APP_CAM_TMP_W       320
 #define APP_CAM_TMP_H       240
+
+/* 1 = 用 YUV BUF 模块的硬件 resize（640×480 -> 240×184），应用只读缩小后的
+ * 缓冲；0 = 读整幅 640×480 再软件缩。
+ *
+ * **2026-10-20 实测：硬件 resize 在这块板子上不工作**（缓冲里是未初始化的
+ * 粉紫色噪点），而且它的输出寄存器语义存疑（可能是编码模块的读地址）。
+ * 先关掉，等拿到 BPS 寄存器说明再试。 */
+#define APP_CAM_USE_HW_RESIZE   0
+
+/* 1 = 用 ROTT/PFC 硬件做 YUV->RGB565 + 90° 旋转（单帧测试）。
+ * 输入按 YUYV + 字节翻转匹配这颗传感器的 VYUY；输出 480×640 RGB565，
+ * 再由软件缩到预览尺寸。0 = 走原来的软件转色 + 软件旋转。 */
+#define APP_CAM_USE_HW_ROTATE   1
 
 /* 1 = YUV->RGB565 走 DMA2D 硬件（整幅转色后再软件缩）；0 = 纯软件逐像素。
  *
  * 2026-10-20 实测：VGA 下打开 DMA2D 反而更慢（转换 70~112ms、帧率掉到 6fps），
- * 而且每帧 600KB 的整幅写回 EMC 会和 DVP/面板抢总线，FIFO 溢出更凶。降到
- * 240×240 后数据量是原来的 1/4，先用软件路径；要再压 CPU 可以把这个改回 1
- * （此时整幅缓冲只有 115KB，总线压力小得多）。 */
+ * 而且每帧 600KB 的整幅写回 EMC 会和 DVP/面板抢总线，FIFO 溢出更凶。
+ * 目前用软件路径；要再压 CPU 可以改回 1，但整幅缓冲 600KB，需要实测。 */
 #define APP_CAM_USE_DMA2D   0
 
 /* 列/行映射表：每帧只建一次（320+240 次），内层循环变成查表。
@@ -93,14 +118,15 @@ static uint16_t s_ymap[APP_CAM_MAP_MAX];
 /**
  * @brief 一帧 YUV422 裁成目标宽高比、最近邻缩到 @a dw × @a dh。
  *
- * YUV422 每像素 2 字节，两个像素共用一组 UV：
- *   UYVY（T5AI DVP 默认）: U0 Y0 V0 Y1
- *   YUYV                 : Y0 U0 Y1 V0
+ * YUV422 每像素 2 字节，两个像素共用一组 UV。支持三种排列：
+ *   UYVY: U0 Y0 V0 Y1
+ *   YUYV: Y0 U0 Y1 V0
+ *   VYUY: V0 Y0 U0 Y1  （GC2145 实测）
  * 取某个源像素的 Y 要按它自己的奇偶挑字节。
  */
 static void prv_yuv422_cover_to_rgb565(const uint8_t *src, int sw, int sh,
                                        uint16_t *dst, int dw, int dh,
-                                       TUYA_YUV422_ORDER_E order)
+                                       APP_YUV_ORDER_E order)
 {
     int src_w, src_h, x0, y0;
 
@@ -132,7 +158,6 @@ static void prv_yuv422_cover_to_rgb565(const uint8_t *src, int sw, int sh,
         }
     }
 
-    const BOOL_T yuyv   = (order == TUYA_YUV422_YUYV);
     const int    stride = sw * 2;
     const BOOL_T mapped = (dw <= APP_CAM_MAP_MAX && dh <= APP_CAM_MAP_MAX);
 
@@ -146,10 +171,14 @@ static void prv_yuv422_cover_to_rgb565(const uint8_t *src, int sw, int sh,
             const uint8_t *p = row + (sx & ~1) * 2;
             int u, v, yv, r, g, b, c, d, e;
 
-            if (yuyv) {
+            if (APP_YUV_YUYV == order) {
                 yv = p[(sx & 1) ? 2 : 0];
                 u  = p[1];
                 v  = p[3];
+            } else if (APP_YUV_VYUY == order) {
+                v  = p[0];
+                yv = p[(sx & 1) ? 3 : 1];
+                u  = p[2];
             } else {
                 u  = p[0];
                 yv = p[1 + (sx & 1) * 2];
@@ -179,7 +208,6 @@ static void prv_yuv422_cover_to_rgb565(const uint8_t *src, int sw, int sh,
  * 所以先用硬件把整幅 YUV 转成同尺寸 RGB565，再由这里缩到目标尺寸 ——
  * 这一遍只读 RGB565、没有 YUV 数学，比逐像素算色便宜得多。
  */
-#if APP_CAM_USE_DMA2D
 static void prv_rgb565_cover_scale(const uint16_t *src, int sw, int sh,
                                    uint16_t *dst, int dw, int dh)
 {
@@ -211,7 +239,6 @@ static void prv_rgb565_cover_scale(const uint16_t *src, int sw, int sh,
         }
     }
 }
-#endif /* APP_CAM_USE_DMA2D */
 
 /**
  * @brief 90° 旋转：src (sw × sh) -> dst (sh × sw)。
@@ -222,12 +249,12 @@ static void prv_rgb565_cover_scale(const uint16_t *src, int sw, int sh,
 static void prv_rotate_90(const uint16_t *src, int sw, int sh, uint16_t *dst, BOOL_T cw)
 {
     if (cw) {
+        /* 顺时针：dst(y,x) = src(row = sh-1-x, col = y)，dst 尺寸 sh×sw。 */
         for (int y = 0; y < sw; y++) {          /* dst 行数 = src 宽 */
-            const uint16_t *row = src + (size_t)y * sw;
-            uint16_t       *out = dst + (size_t)y * sh;
+            uint16_t *out = dst + (size_t)y * sh;
 
             for (int x = 0; x < sh; x++) {
-                out[x] = row[sh - 1 - x];
+                out[x] = src[(size_t)(sh - 1 - x) * sw + y];
             }
         }
     } else {
@@ -256,6 +283,18 @@ static OPERATE_RET prv_raw_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame
         return OPRT_OK;
     }
 
+    /* 限帧：预览锁 10fps（100ms 一帧），其余帧立刻返回。
+     * 320×240 没有帧率表，传感器按默认帧率出图（约 30fps），
+     * 用时间闸门比隔帧更稳，也能避免无效的转换吃 CPU。 */
+    {
+        uint32_t now = tal_system_get_millisecond();
+
+        if ((now - sg_last_conv_ms) < (1000u / APP_CAM_PREVIEW_FPS)) {
+            return OPRT_OK;
+        }
+        sg_last_conv_ms = now;
+    }
+
     /* 写"后缓冲"，写完再翻 front —— LVGL 那边永远读的是一份完整帧。
      * 指针先取到局部变量再判空：缓冲虽然关流时不再释放，但这里少读一次
      * 全局，避免以后改回"可释放"时又踩一次 TOCTOU。 */
@@ -281,9 +320,30 @@ static OPERATE_RET prv_raw_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame
             uint32_t t0 = tal_system_get_millisecond();
             uint32_t dt;
             BOOL_T   converted = FALSE;
+            BOOL_T   rotated   = FALSE;
+
+#if APP_CAM_USE_HW_ROTATE
+            /* 硬件 ROTT：YUV -> RGB565 + 90° 旋转一次完成，输出 480×640。
+             * 输入按 YUYV + 字节翻转匹配传感器的 VYUY。 */
+            {
+                uint32_t rot_ms  = 0;
+                uint32_t rot_w   = 0;
+                uint32_t rot_h   = 0;
+                uint16_t *rot_rgb = NULL;
+
+                if (OPRT_OK == tkl_dvp_test_rotate(frame->data, frame->width, frame->height,
+                                                   &rot_ms, &rot_w, &rot_h, &rot_rgb) &&
+                    NULL != rot_rgb && rot_w > 0 && rot_h > 0) {
+                    prv_rgb565_cover_scale(rot_rgb, (int)rot_w, (int)rot_h,
+                                           dst, APP_CAM_PREVIEW_W, APP_CAM_PREVIEW_H);
+                    converted = TRUE;
+                    rotated   = TRUE;
+                }
+            }
+#endif
 
 #if APP_CAM_USE_DMA2D
-            if (NULL != rgb && frame->width > 0 && frame->height > 0 &&
+            if (!converted && NULL != rgb && frame->width > 0 && frame->height > 0 &&
                 frame->width <= APP_CAM_WANT_W && frame->height <= APP_CAM_WANT_H) {
                 TAL_IMAGE_YUV422_TO_RGB_T cfg = { 0 };
 
@@ -293,7 +353,9 @@ static OPERATE_RET prv_raw_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame
                 cfg.out_buf    = (uint8_t *)rgb;
                 cfg.out_width  = frame->width;
                 cfg.out_height = frame->height;
-                cfg.in_order   = sg_order;
+                /* DMA2D 只认 UYVY/YUYV，不支持 VYUY；这个分支默认是关的。 */
+                cfg.in_order   = (APP_YUV_YUYV == sg_order) ? TUYA_YUV422_YUYV
+                                                            : TUYA_YUV422_UYVY;
 
                 if (OPRT_OK == tal_image_convert_yuv422_to_rgb565(&cfg)) {
                     prv_rgb565_cover_scale(rgb, frame->width, frame->height,
@@ -304,12 +366,28 @@ static OPERATE_RET prv_raw_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame
 #endif
 
             if (!converted) {
-                prv_yuv422_cover_to_rgb565(frame->data, frame->width, frame->height,
-                                           tmp, APP_CAM_TMP_W, APP_CAM_TMP_H, sg_order);
+#if APP_CAM_USE_HW_RESIZE
+                uint32_t rw = 0;
+                uint32_t rh = 0;
+                uint8_t *rbuf = NULL;
+
+                if (OPRT_OK == tkl_dvp_get_resize_info(&rw, &rh, &rbuf) &&
+                    NULL != rbuf && rw > 0 && rh > 0) {
+                    prv_yuv422_cover_to_rgb565(rbuf, (int)rw, (int)rh,
+                                               tmp, APP_CAM_TMP_W, APP_CAM_TMP_H,
+                                               sg_order);
+                } else
+#endif
+                {
+                    prv_yuv422_cover_to_rgb565(frame->data, frame->width, frame->height,
+                                               tmp, APP_CAM_TMP_W, APP_CAM_TMP_H, sg_order);
+                }
             }
 
-            prv_rotate_90(tmp, APP_CAM_TMP_W, APP_CAM_TMP_H, dst,
-                          (BOOL_T)APP_CAM_ROTATE_CW);
+            if (!rotated) {
+                prv_rotate_90(tmp, APP_CAM_TMP_W, APP_CAM_TMP_H, dst,
+                              (BOOL_T)APP_CAM_ROTATE_CW);
+            }
 
             /* 转换耗时：TDL 在回调返回前一直占着这一帧缓冲，转换只要超过帧周期
              * （15fps = 66ms）就会把相机线程的缓冲耗光 → DVP FIFO 溢出。 */
@@ -346,6 +424,7 @@ static OPERATE_RET prv_raw_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame
                      (unsigned)(sg_fps_cnt * 1000u / ms),
                      (unsigned)(sg_conv_ms_sum / sg_fps_cnt),
                      (unsigned)sg_conv_ms_max);
+
             sg_fps_cnt     = 0;
             sg_fps_t0      = now;
             sg_conv_ms_sum = 0;
@@ -499,8 +578,12 @@ OPERATE_RET app_camera_open(void)
         PR_NOTICE(CAM_TAG " 设备：最大 %dx%d @%dfps，格式位图 0x%X，yuv_order=%d",
                   info.max_width, info.max_height, info.max_fps,
                   (unsigned)info.supported_fmts, (int)info.yuv_order);
-        sg_order = info.yuv_order;
     }
+
+    /* GC2145 数据手册 P0:0x84[4:0]=0x02：传感器输出 Y Cb Y Cr（YUYV）。
+     * YUV BUF 的 bus_dat_byte_reve 已在平台层显式关闭（之前默认反转，导致
+     * 内存里变成 Cr Y Cb Y），所以这里按 YUYV 解析。 */
+    sg_order = APP_YUV_YUYV;
 
     /* 缓冲只分配一次，关流不释放（原因见 app_camera_close）。 */
     for (int i = 0; i < 2; i++) {
@@ -552,6 +635,7 @@ OPERATE_RET app_camera_open(void)
     sg_fps_t0          = 0;
     sg_conv_ms_sum     = 0;
     sg_conv_ms_max     = 0;
+    sg_last_conv_ms    = 0;
 
     rt = prv_stream_open(FALSE);            /* 预览：只 YUV */
     if (OPRT_OK != rt) {
@@ -564,6 +648,22 @@ OPERATE_RET app_camera_open(void)
     PR_NOTICE(CAM_TAG " 已开流：%dx%d @%dfps（预览 YUV422），PSRAM 空闲 %uKB",
               APP_CAM_WANT_W, APP_CAM_WANT_H, APP_CAM_FPS,
               (unsigned)(tal_psram_get_free_heap_size() / 1024));
+
+#if APP_CAM_USE_HW_RESIZE
+    {
+        uint32_t rw = 0;
+        uint32_t rh = 0;
+        uint8_t *rbuf = NULL;
+
+        if (OPRT_OK == tkl_dvp_get_resize_info(&rw, &rh, &rbuf)) {
+            PR_NOTICE(CAM_TAG " 硬件 resize：%ux%u -> %p", (unsigned)rw,
+                      (unsigned)rh, rbuf);
+        } else {
+            PR_WARN(CAM_TAG " 硬件 resize 不可用，回退整幅转换");
+        }
+    }
+#endif
+
     return OPRT_OK;
 }
 
@@ -594,6 +694,7 @@ void app_camera_close(void)
     sg_fps_t0   = 0;
     sg_conv_ms_sum = 0;
     sg_conv_ms_max = 0;
+    sg_last_conv_ms = 0;
 
     /* 相机 TDL 的帧池（VGA 原始 2×600KB + 编码 2×120KB）关流后**不释放**，
      * 这里打的是常驻后的余量，用来判断下次进页面还够不够分配。 */
@@ -622,7 +723,7 @@ BOOL_T app_camera_preview(uint16_t *dst, int w, int h)
     }
     src = sg_buf[front];
 
-    /* cover：从预览缓冲（APP_CAM_PREVIEW_W×H）里取一块和目标同比例的最大中心矩形 */
+    /* cover：填满取景框（裁掉一点源画面边缘），不留黑边。 */
     src_w = APP_CAM_PREVIEW_W;
     src_h = APP_CAM_PREVIEW_H;
     if ((int64_t)w * src_h > (int64_t)h * src_w) {

@@ -37,28 +37,23 @@ extern "C" {
 #endif
 
 /** 预览源图尺寸：**竖屏**（摄像头模组是转 90° 装的，见 APP_CAM_ROTATE_CW）。
- *  双缓冲 2 × 240×240×2 = 230KB PSRAM，另有一块 240×240 的旋转暂存 115KB。 */
+ *  320×240 经 ROTT 旋转后是 240×320；取景框 236×264 再做一次 cover。
+ *  双缓冲 2 × 240×320×2 = 300KB PSRAM，另有一块 320×240 的旋转暂存 150KB。 */
 #define APP_CAM_PREVIEW_W   240
-#define APP_CAM_PREVIEW_H   240
+#define APP_CAM_PREVIEW_H   320
 
 /** 1 = 预览顺时针转 90°；0 = 逆时针。摄像头模组相对屏幕是转着装的，
- *  画面不转就是横躺的。转反了（上下颠倒）就把这个改 0。 */
+ *  画面不转就是横躺的。实测当前模组要顺时针（1）。 */
 #define APP_CAM_ROTATE_CW   1
 
 /** 向摄像头请求的分辨率 / 帧率。
  *
- * **240×240**：驱动里有这个 PPI 的传感器寄存器表（cGC2145_240_240_TAB），
- * 取景框本身只有 204×240，这个分辨率已经够用，而且数据量只有 VGA 的 1/4
- * （240×240×2×15fps ≈ 1.7MB/s，VGA 是 9.2MB/s）——真机上 VGA 会把 PSRAM
- * 带宽和 CPU 一起顶满，DVP 一直刷 `sensor fifo is full`，界面和精灵全被拖慢。
+ * **320×240（临时性能测试）**：视野是裁切的（GC2145 out_win 只裁不缩），
+ * 这里只用它来代表“未来 OV2640 全视野 320×240”的数据量，验证 LVGL/桌宠
+ * 性能能否达标。达标后再换 OV2640；不达标就不用买。
  *
- * 帧率选 15：驱动对 240×240 没有单独的帧率表，set_ppi 会保留初始化时的
- * 帧长度寄存器，也就是 15fps 这一档。
- *
- * 注意：别的分辨率（比如 320×240）驱动里没有对应的 PPI 表，传感器仍按 VGA
- * 输出，硬件 YUV-BUF 的分辨率校验对不上，会不停报
- * `sensor's yuyv data resoltion is not right` 并丢帧。 */
-#define APP_CAM_WANT_W      240
+ * **15fps**：320×240 没有单独帧率表，沿用默认帧长度（约 15fps）。 */
+#define APP_CAM_WANT_W      320
 #define APP_CAM_WANT_H      240
 #define APP_CAM_FPS         15
 
@@ -85,9 +80,10 @@ BOOL_T app_camera_is_open(void);
 uint32_t app_camera_gen(void);
 
 /**
- * @brief 把最新一帧按 cover 方式采到 @a dst（取景框自己的尺寸）。
+ * @brief 把最新一帧按 fit 方式画到 @a dst（取景框自己的尺寸）。
  *
- * 源图已经是转好 90° 的竖图（240×320）。
+ * 源图已经是转好 90° 的竖图（240×320）。取景框比例不同时完整保留源图、
+ * 两侧补底色，不做 cover 裁边 —— 这样预览看到的就是整幅画面，和存图一致。
  *
  * @return TRUE = 画了（有帧）；FALSE = 还没出帧 / 参数非法。
  * @note 只能在 LVGL 线程里调。
