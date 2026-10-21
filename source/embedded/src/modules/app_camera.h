@@ -157,6 +157,12 @@ void app_camera_discard(void);
  *   contrast  P2:0xd3  luma_contrast   对比度，0x40 = 1.0，0x20..0x60
  *   sat       P2:0xd1/0xd2  Cb/Cr 饱和度，0x20 = 1.0，0x10..0x50
  *   aec       P1:0x13  AEC_target_Y    自动曝光的目标亮度，越大越亮，0x20..0xc0
+ *   wbr/wbb   **不写寄存器**：像素层的红/蓝增益（百分比，100 = 原样），50..200
+ *
+ * 前四个是传感器参数，能调亮度/反差/饱和度/曝光；**色偏（发青、发红）不是它们
+ * 能修的** —— 那是白平衡。AWB 由传感器自己做（P0:0x82[1]=1），缺省是开着的；
+ * 场景光本身偏色（比如那颗 LED）或 AWB 被增益上限卡住时，画面就会整体偏；
+ * 这时用 wbr/wbb 在预览和照片的像素上乘一个系数，立刻可见、也不影响传感器状态。
  *
  * **背光/点光源太亮（画面里那盏 LED）先动 aec**：目标亮度是 AEC 平均下来的
  * 期望值，调低整幅就压暗，过曝的光斑会缩。默认 0x7b 是驱动出厂值，数据手册
@@ -170,6 +176,8 @@ typedef enum {
     APP_CAM_PARAM_CONTRAST,
     APP_CAM_PARAM_SATURATION,
     APP_CAM_PARAM_AEC_TARGET,
+    APP_CAM_PARAM_WB_R,             /* 红增益（百分比，100 = 原样） */
+    APP_CAM_PARAM_WB_B,             /* 蓝增益（百分比，100 = 原样） */
     APP_CAM_PARAM_COUNT
 } APP_CAM_PARAM_E;
 

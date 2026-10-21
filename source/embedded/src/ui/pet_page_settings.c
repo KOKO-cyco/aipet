@@ -78,7 +78,7 @@ static const SET_GROUP_T sg_groups[] = {
 
 /* 相机参数的显示名。顺序跟 APP_CAM_PARAM_E 一一对应。 */
 static const char *const sg_cam_param_names[APP_CAM_PARAM_COUNT] = {
-    "曝光目标", "亮度", "对比度", "饱和度",
+    "曝光目标", "亮度", "对比度", "饱和度", "红增益", "蓝增益",
 };
 
 /***********************************************************
@@ -164,6 +164,36 @@ static void __cam_slider_save_cb(lv_event_t *e)
 /**
  * @brief 相机参数一张卡：四行滑条。
  */
+/**
+ * @brief 相机参数全部恢复默认，并把六条滑条同步过去。
+ *
+ * 重置之后状态页的滑条还停在旧位置会很怪，所以按参数表逐条回写 —— 滑条的
+ * user_data 就是参数号，从上往下扫一遍即可，不用额外记对象。
+ */
+static void __cam_reset_cb(lv_event_t *e)
+{
+    lv_obj_t *body = lv_event_get_user_data(e);
+
+    app_camera_param_reset();
+    app_camera_param_save();        /* 存回 flash —— 不然重启又是调歪的那套 */
+
+    if (NULL == body) {
+        return;
+    }
+    for (uint32_t i = 0; i < lv_obj_get_child_count(body); i++) {
+        lv_obj_t *row = lv_obj_get_child(body, i);
+        lv_obj_t *ctl = pet_widget_row_control(row);
+        APP_CAM_PARAM_E p;
+
+        if (NULL == ctl || NULL == lv_obj_get_user_data(ctl)) {
+            continue;               /* "恢复默认"按钮自己也在 body 里 */
+        }
+        p = (APP_CAM_PARAM_E)(uintptr_t)lv_obj_get_user_data(ctl);
+        lv_slider_set_value(ctl, app_camera_param_get(p), LV_ANIM_OFF);
+        pet_widget_slider_row_refresh(row);
+    }
+}
+
 static lv_obj_t *__build_cam_params(lv_obj_t *parent)
 {
     lv_obj_t *card = pui_card_create(parent, "相机参数", PUI_TONE_INDIGO);
@@ -186,6 +216,16 @@ static lv_obj_t *__build_cam_params(lv_obj_t *parent)
         lv_obj_set_user_data(ctl, (void *)(uintptr_t)p);
         lv_obj_add_event_cb(ctl, __cam_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
         lv_obj_add_event_cb(ctl, __cam_slider_save_cb, LV_EVENT_RELEASED, NULL);
+    }
+
+    /* 恢复默认：调歪了（比如把红/蓝增益拉到底）得有条路回来，
+     * 不然只能靠改 flash 里的参数串。 */
+    {
+        lv_obj_t *btn = pui_button_create(body, "恢复默认", PUI_TONE_INDIGO,
+                                          PUI_FILL_OUTLINE, PUI_SIZE_MD);
+
+        lv_obj_set_width(btn, LV_PCT(100));
+        lv_obj_add_event_cb(btn, __cam_reset_cb, LV_EVENT_CLICKED, body);
     }
 
     last = lv_obj_get_child(body, lv_obj_get_child_count(body) - 1);

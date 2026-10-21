@@ -98,6 +98,9 @@ typedef enum {
 
 static APP_YUV_ORDER_E sg_order = APP_YUV_VYUY;
 
+/* 白平衡微调（像素层红/蓝增益）：定义在参数表旁边，抓图和 overlay 都要用。 */
+static uint16_t prv_wb_px(uint16_t px);
+
 /* 快门：把当前预览帧拼成 BMP 放在这块缓冲里，等用户确认再写卡。 */
 static uint8_t  *sg_bmp;
 static uint32_t  sg_bmp_len;
@@ -1062,6 +1065,9 @@ BOOL_T app_camera_grab(void)
                 px = prv_blend565(px, s, pet_a[i]);
             }
 
+            /* 照片和预览用同一套白平衡增益，存出来的和屏上看到的一致。 */
+            px = prv_wb_px(px);
+
             if (hd) {
                 uint8_t r5 = (uint8_t)((px >> 11) & 0x1F);
                 uint8_t g6 = (uint8_t)((px >> 5) & 0x3F);
@@ -1157,10 +1163,38 @@ static const APP_CAM_PARAM_T sg_param_tab[APP_CAM_PARAM_COUNT] = {
     /* contrast */ { "contrast", 2, 0xd3, 0x00, 0x40, 0x20,  0x60 },
     /* sat      */ { "sat",      2, 0xd1, 0xd2, 0x32, 0x10,  0x50 },
     /* aec      */ { "aec",      1, 0x13, 0x00, 0x7b, 0x20,  0xc0 },
+    /* wbr      */ { "wbr",      0xFF, 0xFF, 0x00, 100,  50,   200 },  /* 像素层，不写寄存器 */
+    /* wbb      */ { "wbb",      0xFF, 0xFF, 0x00, 100,  50,   200 },
 };
 
 static int    sg_param_val[APP_CAM_PARAM_COUNT];
 static BOOL_T sg_param_ready;
+
+/** 白平衡增益查表：RGB565 的 5 位 R / 5 位 B 各一张（32 项），改参数时重建。 */
+static uint16_t sg_wb_lut_r[32];
+static uint16_t sg_wb_lut_b[32];
+
+static void prv_wb_lut_build(void)
+{
+    int rp = sg_param_val[APP_CAM_PARAM_WB_R];
+    int bp = sg_param_val[APP_CAM_PARAM_WB_B];
+
+    for (int i = 0; i < 32; i++) {
+        int r = (i * rp + 50) / 100;
+        int b = (i * bp + 50) / 100;
+
+        sg_wb_lut_r[i] = (uint16_t)((r > 31) ? 31 : r);
+        sg_wb_lut_b[i] = (uint16_t)((b > 31) ? 31 : b);
+    }
+}
+
+/** 把一个 RGB565 像素按白平衡增益修正一次。R/B 都是 100% 时原样返回。 */
+static uint16_t prv_wb_px(uint16_t px)
+{
+    return (uint16_t)((sg_wb_lut_r[(px >> 11) & 0x1F] << 11) |
+                      (px & 0x07E0) |
+                      sg_wb_lut_b[px & 0x1F]);
+}
 
 static void prv_param_load(void);
 
@@ -1174,6 +1208,7 @@ static void prv_param_ensure(void)
     }
     sg_param_ready = TRUE;
     prv_param_load();
+    prv_wb_lut_build();                 /* 白平衡查表跟着内存值走 */
 }
 
 static int prv_param_clamp(APP_CAM_PARAM_E p, int v)
@@ -1241,6 +1276,12 @@ static void prv_param_apply_one(APP_CAM_PARAM_E p)
 {
     const APP_CAM_PARAM_T *t = &sg_param_tab[p];
     uint8_t                v = (uint8_t)sg_param_val[p];
+
+    /* 像素层参数（白平衡增益）不写寄存器，只重建查表。 */
+    if (0xFF == t->page) {
+        prv_wb_lut_build();
+        return;
+    }
 
     (void)tdd_camera_gc2145_reg_write(t->page, t->reg, v);
     if (0 != t->reg2) {
@@ -1446,7 +1487,9 @@ static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb)
 
         for (int px = px0; px <= px1; px++, lx += sg_ov_ax, ly += sg_ov_bx) {
             if (lx >= 0 && lx < sg_ov_w && ly >= 0 && ly < sg_ov_h) {
-                drow[px - px0] = src[(size_t)sg_ov_my[ly] * APP_CAM_PREVIEW_W + sg_ov_mx[lx]];
+                /* 白平衡微调在这里做：写进 fb 的每个像素都过一遍 R/B 增益查表。 */
+                drow[px - px0] = prv_wb_px(
+                    src[(size_t)sg_ov_my[ly] * APP_CAM_PREVIEW_W + sg_ov_mx[lx]]);
             }
         }
         /* 这一行已经写完整，刷回 PSRAM，供 DMA/面板读取。 */
