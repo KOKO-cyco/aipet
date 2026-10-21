@@ -1400,8 +1400,7 @@ static void prv_param_load(void)
 /* ---- overlay：预览直接写进显示 framebuffer -------------------------------- */
 
 /* SDK 显示端口的 pre-flush 钩子（lv_port_disp_internal.h，应用不直接包含它）。 */
-typedef void (*APP_CAM_PRE_FLUSH_CB)(TDL_DISP_FRAME_BUFF_T *fb,
-                                     const lv_area_t *dirty, uint8_t dirty_cnt);
+typedef void (*APP_CAM_PRE_FLUSH_CB)(TDL_DISP_FRAME_BUFF_T *fb);
 extern void lv_port_set_pre_flush_cb(APP_CAM_PRE_FLUSH_CB cb);
 
 /* 缓存回写：CPU 直接写 fb 之后，必须把这段刷回 PSRAM，DMA/面板才能看到。 */
@@ -1415,43 +1414,64 @@ static int      sg_ov_ox, sg_ov_oy;         /* 逻辑原点对应的面板点 */
 static int      sg_ov_ax, sg_ov_ay;         /* 逻辑 +x 在面板上的单位步进 */
 static int      sg_ov_bx, sg_ov_by;         /* 逻辑 +y 在面板上的单位步进 */
 static int      sg_ov_w, sg_ov_h;           /* 逻辑尺寸 */
-static lv_area_t sg_ov_lrect;               /* 逻辑矩形（含端点） */
 static BOOL_T   sg_ov_paused;               /* 弹窗盖在取景框上时暂停合成 */
 static uint16_t sg_ov_mx[APP_CAM_OV_MAX];   /* 逻辑 x -> 预览 x */
 static uint16_t sg_ov_my[APP_CAM_OV_MAX];   /* 逻辑 y -> 预览 y */
 
-/** 把**逻辑矩形** @a lr 对应的那块画面写进 fb（只写 lr 覆盖的面板包围盒）。 */
-static void prv_ov_paint(TDL_DISP_FRAME_BUFF_T *fb, const uint16_t *src, const lv_area_t *lr)
+/**
+ * pre-flush 回调：跑在 LVGL 线程的 flush 里，只做内存拷贝，不碰 LVGL API。
+ *
+ * **每次 flush 都重画，不只在"有新帧"时画。** 以前按帧代数跳过重复绘制，省下
+ * 一点 CPU，但代价是：LVGL 只要在这块区域里重绘了任何东西（按返回键时按钮的
+ * 按下态、阴影、chip 的动画），framebuffer 就被刷回页面底色，而预览要等到下一个
+ * 相机帧（≤100ms）才补回来 —— 用户看到的就是"点返回，画面上闪一下黑块"。
+ * 每次重画的代价是 54K 像素（约 1~1.5ms），换来的是"预览永远是这一层最上面的"。
+ */
+static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb)
 {
-    uint16_t *dst = (uint16_t *)fb->frame;
-    int       fw  = (int)fb->width;
-    int       cx[4], cy[4];
-    int       px0, px1, py0, py1;
+    const uint16_t *src;
+    uint16_t       *dst;
+    int             front;
+    int             fw;
+    int             px0, px1, py0, py1;
 
-    /* 四个角点映射到面板，取包围盒。 */
-    cx[0] = sg_ov_ox + lr->x1 * sg_ov_ax + lr->y1 * sg_ov_bx;
-    cy[0] = sg_ov_oy + lr->x1 * sg_ov_ay + lr->y1 * sg_ov_by;
-    cx[1] = sg_ov_ox + lr->x2 * sg_ov_ax + lr->y1 * sg_ov_bx;
-    cy[1] = sg_ov_oy + lr->x2 * sg_ov_ay + lr->y1 * sg_ov_by;
-    cx[2] = sg_ov_ox + lr->x1 * sg_ov_ax + lr->y2 * sg_ov_bx;
-    cy[2] = sg_ov_oy + lr->x1 * sg_ov_ay + lr->y2 * sg_ov_by;
-    cx[3] = sg_ov_ox + lr->x2 * sg_ov_ax + lr->y2 * sg_ov_bx;
-    cy[3] = sg_ov_oy + lr->x2 * sg_ov_ay + lr->y2 * sg_ov_by;
-
-    px0 = px1 = cx[0];
-    py0 = py1 = cy[0];
-    for (int i = 1; i < 4; i++) {
-        if (cx[i] < px0) px0 = cx[i];
-        if (cx[i] > px1) px1 = cx[i];
-        if (cy[i] < py0) py0 = cy[i];
-        if (cy[i] > py1) py1 = cy[i];
-    }
-    if (px0 < 0) px0 = 0;
-    if (py0 < 0) py0 = 0;
-    if (px1 >= fw) px1 = fw - 1;
-    if (py1 >= (int)fb->height) py1 = (int)fb->height - 1;
-    if (px0 > px1 || py0 > py1) {
+    if (!sg_ov_on || sg_ov_paused || NULL == fb || NULL == fb->frame) {
         return;
+    }
+    front = sg_front;
+    if (front < 0 || NULL == sg_buf[front]) {
+        return;
+    }
+    sg_ov_drawn_gen = sg_gen;
+    src = sg_buf[front];
+    dst = (uint16_t *)fb->frame;
+    fw  = (int)fb->width;
+
+    /* 面板包围盒：四个角点都映射一遍取 min/max。 */
+    {
+        int cx[4], cy[4];
+
+        cx[0] = sg_ov_ox;
+        cy[0] = sg_ov_oy;
+        cx[1] = sg_ov_ox + (sg_ov_w - 1) * sg_ov_ax;
+        cy[1] = sg_ov_oy + (sg_ov_w - 1) * sg_ov_ay;
+        cx[2] = sg_ov_ox + (sg_ov_h - 1) * sg_ov_bx;
+        cy[2] = sg_ov_oy + (sg_ov_h - 1) * sg_ov_by;
+        cx[3] = cx[1] + (sg_ov_h - 1) * sg_ov_bx;
+        cy[3] = cy[1] + (sg_ov_h - 1) * sg_ov_by;
+
+        px0 = px1 = cx[0];
+        py0 = py1 = cy[0];
+        for (int i = 1; i < 4; i++) {
+            if (cx[i] < px0) px0 = cx[i];
+            if (cx[i] > px1) px1 = cx[i];
+            if (cy[i] < py0) py0 = cy[i];
+            if (cy[i] > py1) py1 = cy[i];
+        }
+        if (px0 < 0) px0 = 0;
+        if (py0 < 0) py0 = 0;
+        if (px1 >= fw) px1 = fw - 1;
+        /* 面板高度由调用方保证；这里只钳 x。 */
     }
 
     /* 逐面板像素反查逻辑坐标：面板行连续写，源图是跨行读（可接受）。
@@ -1474,50 +1494,6 @@ static void prv_ov_paint(TDL_DISP_FRAME_BUFF_T *fb, const uint16_t *src, const l
         }
         /* 这一行已经写完整，刷回 PSRAM，供 DMA/面板读取。 */
         flush_dcache(drow, (long)(px1 - px0 + 1) * 2);
-    }
-}
-
-/**
- * pre-flush 回调：跑在 LVGL 线程的 flush 里，只做内存拷贝，不碰 LVGL API。
- *
- * **增量合成**：LVGL 把本次刷新真正重画过的矩形（dirty[]）一并传进来。
- *
- *   - 有新相机帧 -> 整块重画（10fps，一帧约 40KB）；
- *   - 没有新帧   -> 只补 dirty 里落在取景框内的那几块。
- *
- * 为什么不是"每次整块重画"：相机页每秒四十来次 flush，整块重画就是每秒往 PSRAM
- * 写 3MB 多 —— 和相机帧、面板扫描抢带宽，反而把刷屏拖慢（实测 `[disp] flush`
- * 从 1ms 涨到 10~13ms）。为什么也不能"只在新帧时画"：LVGL 在取景框里重绘任何
- * 东西（按返回键时按钮的按下态、阴影、chip 动画），那块会被刷回底色，要等下一帧
- * 相机数据才补回来 —— 用户看到的就是"点返回闪一下黑块"。增量补这几块两头都占。
- */
-static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb, const lv_area_t *dirty, uint8_t dirty_cnt)
-{
-    const uint16_t *src;
-    int             front;
-
-    if (!sg_ov_on || sg_ov_paused || NULL == fb || NULL == fb->frame) {
-        return;
-    }
-    front = sg_front;
-    if (front < 0 || NULL == sg_buf[front]) {
-        return;
-    }
-    src = sg_buf[front];
-
-    if (sg_ov_drawn_gen != sg_gen) {
-        sg_ov_drawn_gen = sg_gen;
-        prv_ov_paint(fb, src, &sg_ov_lrect);   /* 新帧：整块 */
-        return;
-    }
-
-    for (uint8_t i = 0; i < dirty_cnt; i++) {
-        lv_area_t r;
-
-        if (!_lv_area_intersect(&r, &dirty[i], &sg_ov_lrect)) {
-            continue;
-        }
-        prv_ov_paint(fb, src, &r);
     }
 }
 
@@ -1550,7 +1526,6 @@ BOOL_T app_camera_overlay_enable(int x, int y, int w, int h)
     sg_ov_by = (c.y1 - a.y1) / (h - 1);
     sg_ov_w  = w;
     sg_ov_h  = h;
-    sg_ov_lrect = (lv_area_t){ .x1 = x, .y1 = y, .x2 = x + w - 1, .y2 = y + h - 1 };
 
     /* cover 映射：逻辑矩形 -> 240×320 预览（比例不同就裁，不拉伸）。 */
     src_w = APP_CAM_PREVIEW_W;
