@@ -340,6 +340,29 @@ static BOOL_T prv_setup_lines(int lines)
 /* SDK 里写通路 DMA 的全局覆盖，见 sd_card_driver.c 的定义。 */
 extern int g_sd_card_dma_tx_override;
 
+/* 读用几线。**默认 1**：这块板子 + 这张卡 4 线读不稳（CRC 错、卡自己掉线、
+ * 文件尾部读不出来），1 线的信号完整性余量大得多 —— 慢，但先要能读出来。
+ * 换张好卡、或者确认 4 线稳了，把它改成 4。 */
+#define APP_STORAGE_READ_LINES   1
+
+/** 按 APP_STORAGE_READ_LINES 把"平时读"的线宽定下来（写档不受影响）。 */
+static void prv_read_lines_apply(void)
+{
+#if APP_STORAGE_READ_LINES == 1
+    if (4 == sg_fast_lines) {
+        if (prv_try_lines(1)) {
+            sg_sdio_lines = 1;
+            sg_fast_lines = 1;
+            PR_NOTICE("[sto] 读也改走 1 线（慢但稳；4 线读不稳时的对照）");
+        } else {
+            PR_WARN("[sto] 1 线读起不来，留在 4 线");
+        }
+    }
+#else
+    (void)0;
+#endif
+}
+
 /* 找一组"能写"的参数，然后把卡**停在读最快的那一档**上。
  *
  * 返回 TRUE = 找到了（sg_write_lines / sg_write_clk 有效）。
@@ -352,6 +375,7 @@ static BOOL_T prv_find_write_mode(void)
 {
     if (prv_setup_lines(4)) {
         sg_fast_lines = 4;              /* 4 线既能读又能写，最理想：永远不用切档 */
+        prv_read_lines_apply();         /* 但按配置可能要退到 1 线读 */
         return TRUE;
     }
     if (prv_setup_lines(1)) {
@@ -359,6 +383,7 @@ static BOOL_T prv_find_write_mode(void)
             sg_sdio_lines = 4;
             sg_fast_lines = 4;
             PR_NOTICE("[sto] 平时 4 线读（快），拍照时临时切 %d 线写", sg_write_lines);
+            prv_read_lines_apply();
         } else {
             sg_fast_lines = 1;
             PR_WARN("[sto] 切回 4 线失败，只能停在 1 线（动画会掉帧）");
