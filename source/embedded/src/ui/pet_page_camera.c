@@ -60,6 +60,7 @@
 #include "tal_api.h"            /* tal_psram_malloc —— 照片画布 */
 
 #include "app_camera.h"         /* 实时预览 + 快门存卡（src/modules） */
+#include "app_statusbar.h"      /* 顶栏弹窗会压住取景框，overlay 要给它让位 */
 
 #include "pet_demo.h"
 #include "pet_pet.h"
@@ -132,6 +133,7 @@ static lv_timer_t *sg_ai_timer;
  *   sg_cam_paused —— 弹窗盖在取景框上时让位中，见 __preview_pause。 */
 static BOOL_T sg_cam_placed;
 static BOOL_T sg_cam_paused;
+static lv_obj_t *sg_cam_scene;      /* **本页**的取景场景：它一变就说明页面被重建过 */
 
 static void __preview_pause(BOOL_T pause);
 
@@ -288,6 +290,18 @@ static void __count_cb(lv_timer_t *t)
 {
     (void)t;
 
+    /* 页面已经离开：这一拍作废。
+     *
+     * 离开拍照页有三条路（页内返回 / 页内设置按钮 / **P12 硬件键**），只有前两条
+     * 走 __leave_page()。走 P12 的时候倒计时还活着，到点会去 __shot_now() ——
+     * 而那时 pet_page_sheet() 的"当前页"已经是主页面了，于是**主页面上弹出一张
+     * 「拍照失败」的确认卡**。这里挡掉，也顺手挡住 sg_mode_label 已经随页面
+     * 释放之后再写它（use-after-free）。 */
+    if (NULL == sg_cam_scene || !lv_obj_is_visible(sg_cam_scene)) {
+        sg_count_tmr = NULL;
+        return;
+    }
+
     if (sg_count_left > 0) {
         sg_count_left--;
     }
@@ -347,6 +361,11 @@ static void __shot_now(void)
     lv_obj_t *sub;
     lv_obj_t *close;
 
+    /* 同 __count_cb：页面不在了就不许弹卡（P12 返回后倒计时到点会走到这里）。 */
+    if (NULL == sg_cam_scene || !lv_obj_is_visible(sg_cam_scene)) {
+        return;
+    }
+
     app_camera_set_compose(pet_demo_setting_get(PET_SET_COMPOSE) ? TRUE : FALSE,
                            (int)pet_demo_pos());
     app_camera_set_quality(pet_demo_setting_get(PET_SET_QUALITY) ? APP_CAM_QUALITY_HD
@@ -374,6 +393,10 @@ static void __shot_now(void)
     /* The scrim insets its sheet by the page margin and centres it, so this card comes
        out 240 px wide without the page writing the number — which is all CAM_MODAL_W was. */
     card = pui_card_create(sheet, NULL, PUI_TONE_NEUTRAL);
+    /* 卡片自己要吃点击：scrim 是 CLICKABLE 的，卡片和里面的文字不是 —— 点标题
+     * 或卡片留白时命中测试会一路往上找到 scrim，于是"点一下卡片"被当成"点遮罩
+     * 关闭"，照片直接被丢掉。 */
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
     body = pui_card_body(card);
 
     title = pui_text_create(body, ok ? "拍照成功！" : "拍照失败", PUI_TEXT_BODY);
@@ -389,12 +412,14 @@ static void __shot_now(void)
     lv_obj_set_style_text_align(sub, LV_TEXT_ALIGN_CENTER, 0);
     sg_shot_sub = sub;
 
+    /* 拍照失败时只留"关闭"：AI识别 / 新建备忘录当时会一本正经地报结果，
+     * 但根本没有照片可识别。 */
     if (ok) {
         __modal_button(body, "保存到相册", PUI_TONE_ACCENT, __save_shot_cb, NULL);
+        __modal_button(body, "AI识别", PUI_TONE_ACCENT, __ai_open_cb, NULL);
+        __modal_button(body, "新建备忘录", PUI_TONE_ACCENT, __modal_say_cb,
+                       "新建了一条备忘录，随时可以改");
     }
-    __modal_button(body, "AI识别", PUI_TONE_ACCENT, __ai_open_cb, NULL);
-    __modal_button(body, "新建备忘录", PUI_TONE_ACCENT, __modal_say_cb,
-                   "新建了一条备忘录，随时可以改");
 
     close = pui_button_create(body, "关闭", PUI_TONE_RED, PUI_FILL_OUTLINE, PUI_SIZE_MD);
     lv_obj_set_width(close, LV_PCT(100));
@@ -495,6 +520,7 @@ static lv_obj_t   *sg_cam_cv;
 static uint16_t   *sg_cam_buf;
 static int         sg_cam_w;
 static int         sg_cam_h;
+static BOOL_T      sg_cam_had_sheet; /* 上一拍 sheet 是不是开着（用来发现"被别人关掉"） */
 
 static void __cam_buf_free_cb(lv_event_t *e)
 {
@@ -592,6 +618,19 @@ static void __cam_place(void)
 
 static void __cam_tick_cb(lv_timer_t *t)
 {
+    lv_obj_t *scene = (lv_obj_t *)lv_timer_get_user_data(t);
+
+    /* 旧页的定时器（页面被重建过：字库晚到会触发 pet_ui_refresh）。
+     * 它认得出自己已经不是当前那页，直接退掉，**绝不能**去关新页的 overlay /
+     * 相机 —— 那样新页的预览会黑掉、快门也拍不了。 */
+    if (scene != sg_cam_scene) {
+        lv_timer_delete(t);
+        if (sg_cam_tmr == t) {
+            sg_cam_tmr = NULL;
+        }
+        return;
+    }
+
     /* 页面已经离开（隐藏进 trash）：关 overlay + 关流 + 停表。
      * 实时画面由 app_camera 的 pre-flush 钩子直接写 fb，这里不再做绘制。 */
     if (NULL == sg_cam_cv || !lv_obj_is_visible(sg_cam_cv)) {
@@ -617,15 +656,46 @@ static void __cam_tick_cb(lv_timer_t *t)
         __cam_place();
     }
 
+    /* 兜底画布：overlay 起不来时才走这条路（比如以后换传感器改了尺寸）。
+     * 以前这里没人喂画面，取景框是一块死黑 —— 现在每拍往里贴一帧。 */
+    if (NULL != sg_cam_buf && NULL != sg_cam_cv) {
+        if (app_camera_preview(sg_cam_buf, sg_cam_w, sg_cam_h)) {
+            lv_obj_invalidate(sg_cam_cv);
+        }
+    }
+
     /* 弹窗盖在取景框上时，overlay 必须让位 —— 它是 LVGL 画完之后直接写
      * framebuffer 的，否则会把确认卡整块糊掉。这里统一兜住所有打开/关闭路径
-     * （点关闭、点遮罩、点某一行、页面导航），不用每处都记得调。 */
-    __preview_pause(pet_page_sheet_open());
+     * （点关闭、点遮罩、点某一行、页面导航），不用每处都记得调。
+     *
+     * **顶栏弹窗也算**：天气窗 456×240、音量/时间/WiFi 窗都压在取景框上，
+     * 不暂停的话画完立刻被相机画面糊掉一块。 */
+    {
+        BOOL_T sheet = pet_page_sheet_open();
+
+        __preview_pause((sheet || app_statusbar_popup_visible()) ? TRUE : FALSE);
+
+        /* sheet 被**别人**关掉了（顶栏图标会顺手关掉模态卡、页面重建也会）：
+         * 那张等着确认的照片已经没人能再点"保存"了，直接丢掉，别让它一直占着
+         * 225KB 内存、下次按快门又被静默覆盖。 */
+        if (sg_cam_had_sheet && !sheet && sg_shot_pending) {
+            app_camera_discard();
+            sg_shot_pending = FALSE;
+        }
+        sg_cam_had_sheet = sheet;
+    }
 }
 
 static void __scene_del_cb(lv_event_t *e)
 {
-    (void)e;
+    /* **只有"当前这一页"的场景被删时才收尾。**
+     *
+     * 页面被重建过（字库晚到 -> pet_ui_refresh）时，旧页会先躺在回收站里，
+     * 等下一次开 sheet 才真正被删 —— 那时删的是旧页，而 overlay / 相机现在是
+     * 新页在用。不加这一句，删旧页会把新页的预览黑掉、相机也一起关掉。 */
+    if (lv_event_get_target(e) != sg_cam_scene) {
+        return;
+    }
 
     app_camera_overlay_disable();
 
@@ -638,7 +708,10 @@ static void __scene_del_cb(lv_event_t *e)
         lv_timer_delete(sg_count_tmr);
         sg_count_tmr = NULL;
     }
-    sg_cam_cv = NULL;                   /* 画布随页面一起删；它的 DELETE 回调释放缓冲 */
+    sg_cam_scene = NULL;
+    sg_cam_cv    = NULL;                /* 画布随页面一起删；它的 DELETE 回调释放缓冲 */
+    sg_mode_chip = NULL;                /* 跟着页面一起没了，别再写（倒计时会写它）*/
+    sg_mode_label = NULL;
 
     if (sg_shot_pending) {
         app_camera_discard();
@@ -661,11 +734,15 @@ static void __scene_del_cb(lv_event_t *e)
  */
 static void __build_preview(lv_obj_t *scene)
 {
+    sg_cam_scene  = scene;              /* **本页**的标识：下面所有回调先认它 */
     sg_cam_cv     = scene;              /* 生命周期判断（可见性）用场景本身 */
     sg_cam_placed = FALSE;
     sg_cam_paused = FALSE;
+    sg_cam_had_sheet = FALSE;
 
-    sg_cam_tmr = lv_timer_create(__cam_tick_cb, 100, NULL);
+    /* 定时器带上自己这一页的 scene：页面被重建之后，旧页的定时器还在跑，
+     * 它必须能认出"我已经不是当前那页了"然后自己退掉（见 __cam_tick_cb）。 */
+    sg_cam_tmr = lv_timer_create(__cam_tick_cb, 100, scene);
 }
 
 static void __build_viewfinder(lv_obj_t *parent)
@@ -893,6 +970,7 @@ static void __ai_open_cb(lv_event_t *e)
     __preview_pause(TRUE);
 
     card = pui_card_create(sheet, NULL, PUI_TONE_NEUTRAL);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);   /* 点卡片本身不该等于点遮罩 */
     body = pui_card_body(card);
 
     title = pui_text_create(body, "AI识别", PUI_TEXT_BODY);

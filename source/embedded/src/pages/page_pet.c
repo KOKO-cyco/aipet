@@ -691,7 +691,11 @@ static uint32_t sg_refr_at;
  *  抽搐排查用：兜底次数和抽搐同时出现，就说明是供给没跟上。 */
 static uint32_t sg_fb_n;
 
-/** @brief 记一次 lv_refr_now 的耗时，满 2 秒打一条。 */
+/** @brief 记一拍的耗时，满 2 秒打一条。
+ *
+ * **量的是"一拍"而不是"一次刷屏"**：刷屏已经交给 LVGL 自己的 32ms 定时器了，
+ * 这里量的是宠物 tick（推进精灵帧 + 状态机）花了多久。刷屏本身的耗时看
+ * `[disp] flush` 那条。 */
 static void prv_dbg_refr(uint32_t dt, uint32_t now)
 {
 #if PET_DBG_STAT
@@ -705,7 +709,7 @@ static void prv_dbg_refr(uint32_t dt, uint32_t now)
         sg_refr_max = dt;
     }
     if (now - sg_refr_at >= 2000u) {
-        PR_DEBUG("[pet] 刷新 %u 次/2s：平均 %u ms 最大 %u ms，兜底 %u 次",
+        PR_DEBUG("[pet] 拍 %u 次/2s：平均 %u ms 最大 %u ms，兜底 %u 次",
                  (unsigned)sg_refr_n,
                  (unsigned)(sg_refr_n ? sg_refr_sum / sg_refr_n : 0),
                  (unsigned)sg_refr_max,
@@ -1009,16 +1013,16 @@ static void prv_tick_cb(lv_timer_t *t)
         }
     }
 
-    /* ---- 拍末立刻刷一次 ----
-     * LVGL 自带的刷新定时器是 32ms、宠物 tick 是 42ms，两个周期不同步，相位
-     * 每拍漂 10ms；漂到"刷新压在下一拍上"，就把 42ms 顶成 50~60ms。渲染完
-     * 当拍刷掉，节奏就只由 tick 决定。 */
-    {
-        uint32_t t0 = (uint32_t)tal_system_get_millisecond();
-
-        lv_refr_now(NULL);
-        prv_dbg_refr((uint32_t)tal_system_get_millisecond() - t0, now);
-    }
+    /* ---- 刷屏交给 LVGL 自己的 32ms 定时器 ----
+     *
+     * 以前这里"拍末强制 lv_refr_now"，为的是消掉 42ms 拍子与 LVGL 32ms 刷新之间的
+     * 相位漂移。但那样刷屏节奏就被拍子的 24Hz 绑死了 —— 相机预览（overlay 只在
+     * flush 时才写 framebuffer）最多只能到 24fps。
+     *
+     * 现在要求的是"相机 10fps、宠物 24fps、刷屏 31fps"三个独立节奏：拍子只管
+     * 推进精灵帧，刷屏交给 LVGL 的 32ms 定时器（31Hz）。相位漂移的副作用是
+     * 偶尔一拍被刷新挤长一点，换来的是稳定的 31Hz 上屏。 */
+    prv_dbg_refr((uint32_t)tal_system_get_millisecond() - now, now);
 }
 
 /***********************************************************
@@ -1193,6 +1197,30 @@ static OPERATE_RET prv_pet_enter(void *arg)
     return OPRT_OK;
 }
 
+/**
+ * @brief 从"被盖住"回到前台。
+ *
+ * **必须有这个回调**：路由器在 `on_resume` 为空时会**重跑 `on_enter`**
+ * （`app_router.c`：`if (first || NULL == p->on_resume) on_enter()`），而
+ * `on_enter` 是"从零建一整套"—— 再跑一次会把旧的 tick、旧的 150KB 精灵画布、
+ * 旧的整棵屏幕树全留在那儿没人删，每插拔一次 SD 卡（门页盖上来再撤掉）就漏一整套。
+ *
+ * 这一页被盖住时并没有被拆（`on_pause` 是空的），所以回来只要把屏幕切回来。
+ */
+static OPERATE_RET prv_pet_resume(void)
+{
+    app_disp_lock();
+
+    if (NULL == sg_scr) {
+        app_disp_unlock();
+        return prv_pet_enter(NULL);     /* 万一真被拆了：老老实实重建 */
+    }
+    lv_screen_load(sg_scr);
+
+    app_disp_unlock();
+    return OPRT_OK;
+}
+
 static void prv_pet_exit(void)
 {
     app_disp_lock();
@@ -1252,24 +1280,42 @@ static void prv_pet_key(APP_KEY_E key, APP_KEY_EVT_E evt)
     }
 
     if (APP_KEY_EVT_SHORT == evt) {
+        BOOL_T had_sheet;
+
+        /* **面板 sheet 优先，而且一次按键只做一件事。**
+         *
+         * app_statusbar_close_popup() 内部会把面板 sheet 一起关掉，但它自己只
+         * 统计顶栏弹窗/遮罩 —— 所以"sheet 开着时按一下短按"以前会既关 sheet 又
+         * 继续往下走 pet_ui_back() 退回主页，一次按键做两件事。 */
+        app_disp_lock();
+        had_sheet = pet_ui_sheet_active();
+        if (had_sheet) {
+            pet_ui_close_sheet();       /* 模态卡优先于页面回退 */
+        }
+        app_disp_unlock();
+
+        if (had_sheet) {
+            return;
+        }
         if (app_statusbar_close_popup()) {
-            return;                     /* 弹窗优先：只关弹窗，不切页 */
+            return;                     /* 弹窗其次：只关弹窗，不切页 */
         }
 
         app_disp_lock();
-        if (pet_ui_sheet_active()) {
-            pet_ui_close_sheet();       /* 模态卡优先于页面回退 */
-        } else {
-            pet_ui_back();              /* 主页面时是空操作 */
-        }
+        pet_ui_back();                  /* 主页面时是空操作 */
         app_disp_unlock();
     } else if (APP_KEY_EVT_LONG == evt) {
-        /* 弹窗开着时长按也只关弹窗，不在弹窗底下偷偷换页。 */
+        /* 弹窗/模态卡开着时长按也只关它，不在底下偷偷换页。 */
         if (app_statusbar_close_popup()) {
             return;
         }
 
         app_disp_lock();
+        if (pet_ui_sheet_active()) {
+            pet_ui_close_sheet();
+            app_disp_unlock();
+            return;
+        }
         pet_ui_go(PET_PAGE_SETTINGS);
         app_disp_unlock();
     }
@@ -1279,7 +1325,7 @@ const APP_PAGE_T app_page_pet = {
     .name      = PAGE_PET,
     .flags     = APP_PAGE_NO_OVERLAY | APP_PAGE_NEEDS_SD,
     .on_enter  = prv_pet_enter,
-    .on_resume = NULL,
+    .on_resume = prv_pet_resume,
     .on_pause  = NULL,
     .on_exit   = prv_pet_exit,
     .on_key    = prv_pet_key,

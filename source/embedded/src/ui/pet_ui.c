@@ -56,7 +56,11 @@
 /* How deep the stack can get. 主页 is the root, 拍照 hangs off it and 相册 off 拍照, so
    three would do; four leaves room for a sub-page when one arrives, and a fixed array
    means navigation never allocates. */
-#define PET_PAGE_STACK_MAX 4
+/* 页面栈深度上限。
+ *
+ * 主页 -> 拍照 -> 相册 -> 添加笔记 正好四层，长按 P12 进设置是第五层 —— 上限
+ * 卡在 4 的时候那一下会被静默丢掉（只打一条 WARN），屏幕上什么都不发生。 */
+#define PET_PAGE_STACK_MAX 5
 
 /* 切页动画开关。
  *

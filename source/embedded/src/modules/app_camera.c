@@ -50,7 +50,15 @@
 #define APP_CAM_BMP_ROW_16  (APP_CAM_PREVIEW_W * 2)
 #define APP_CAM_BMP_LEN     (APP_CAM_BMP_HDR_24 + APP_CAM_BMP_ROW_24 * APP_CAM_PREVIEW_H)
 
-/* 预览刷新上限（帧/秒）。传感器可能跑得更快，这里按时间闸门丢掉多余的帧。 */
+/* 预览刷新上限（帧/秒）。
+ *
+ * **锁 10fps 是刻意的**：预览的每一帧都要走 ROTT（YUV→RGB565+旋转）、写一份
+ * 150KB 的 PSRAM、再由 overlay 在每次刷屏时写进 framebuffer —— 提到 30fps
+ * 只是把这三笔开销乘三倍，换来的流畅度提升有限。刷屏（LVGL）自己按 31Hz 走，
+ * 相机帧按 10fps 换，两者互不牵制。
+ *
+ * 注意闸门是"距上次转换 ≥ 1000/fps"，源帧率不是它的整数倍时会有额外损耗
+ * （以前设 10fps、源 15fps，实测只有 7.5fps）。 */
 #define APP_CAM_PREVIEW_FPS 10
 
 #define CAM_TAG             "[cam]"
@@ -93,6 +101,13 @@ static APP_YUV_ORDER_E sg_order = APP_YUV_VYUY;
 /* 快门：把当前预览帧拼成 BMP 放在这块缓冲里，等用户确认再写卡。 */
 static uint8_t  *sg_bmp;
 static uint32_t  sg_bmp_len;
+
+/* 抓图期间置位：帧回调看到它就跳过这一帧。
+ *
+ * 双缓冲只挡得住"下一帧"，挡不住"grab 正在读前缓冲时回调翻页又写它"——
+ * grab 要 20~40ms（拼 BMP + 合影），刚好一个帧周期。窗口里翻一次页，照片就是
+ * 上半张旧帧、下半张新帧。跳过一帧的代价远小于存出一张坏图。 */
+static volatile BOOL_T sg_grab_busy;
 
 /* 拍照设置：位深 / 是否把角色叠进照片 + 叠在哪。 */
 static APP_CAM_QUALITY_E sg_quality = APP_CAM_QUALITY_HD;
@@ -296,6 +311,11 @@ static OPERATE_RET prv_raw_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame
         return OPRT_INVALID_PARM;
     }
     if (TUYA_FRAME_FMT_YUV422 != frame->fmt) {
+        return OPRT_OK;
+    }
+
+    /* 快门正在读前缓冲：这一帧跳过（见 sg_grab_busy）。 */
+    if (sg_grab_busy) {
         return OPRT_OK;
     }
 
@@ -1000,6 +1020,7 @@ BOOL_T app_camera_grab(void)
     if (!sg_open || front < 0 || NULL == sg_buf[front] || NULL == sg_bmp) {
         return FALSE;
     }
+    sg_grab_busy = TRUE;                /* 从这一刻起回调不再翻缓冲（见它的注释） */
 
     t0  = tal_system_get_millisecond();
     src = sg_buf[front];
@@ -1060,6 +1081,8 @@ BOOL_T app_camera_grab(void)
 
     prv_bmp_header(sg_bmp, (uint32_t)(rsz * APP_CAM_PREVIEW_H), sg_quality);
     sg_bmp_len = (uint32_t)hdr + (uint32_t)rsz * APP_CAM_PREVIEW_H;
+
+    sg_grab_busy = FALSE;               /* 缓冲不用再护着了 */
 
     PR_NOTICE(CAM_TAG " 已拍照 %dx%d（BMP %u 位 %uKB%s，%u ms）",
               APP_CAM_PREVIEW_W, APP_CAM_PREVIEW_H,
@@ -1354,7 +1377,15 @@ static BOOL_T   sg_ov_paused;               /* 弹窗盖在取景框上时暂停
 static uint16_t sg_ov_mx[APP_CAM_OV_MAX];   /* 逻辑 x -> 预览 x */
 static uint16_t sg_ov_my[APP_CAM_OV_MAX];   /* 逻辑 y -> 预览 y */
 
-/** pre-flush 回调：跑在 LVGL 线程的 flush 里，只做内存拷贝，不碰 LVGL API。 */
+/**
+ * pre-flush 回调：跑在 LVGL 线程的 flush 里，只做内存拷贝，不碰 LVGL API。
+ *
+ * **每次 flush 都重画，不只在"有新帧"时画。** 以前按帧代数跳过重复绘制，省下
+ * 一点 CPU，但代价是：LVGL 只要在这块区域里重绘了任何东西（按返回键时按钮的
+ * 按下态、阴影、chip 的动画），framebuffer 就被刷回页面底色，而预览要等到下一个
+ * 相机帧（≤100ms）才补回来 —— 用户看到的就是"点返回，画面上闪一下黑块"。
+ * 每次重画的代价是 54K 像素（约 1~1.5ms），换来的是"预览永远是这一层最上面的"。
+ */
 static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb)
 {
     const uint16_t *src;
@@ -1365,9 +1396,6 @@ static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb)
 
     if (!sg_ov_on || sg_ov_paused || NULL == fb || NULL == fb->frame) {
         return;
-    }
-    if (sg_ov_drawn_gen == sg_gen) {
-        return;                             /* 没有新帧，别重复画 */
     }
     front = sg_front;
     if (front < 0 || NULL == sg_buf[front]) {
