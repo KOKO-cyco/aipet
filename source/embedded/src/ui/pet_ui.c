@@ -457,6 +457,11 @@ void pet_page_sheet_close(void)
     sg_sheet = NULL;
 }
 
+BOOL_T pet_page_sheet_open(void)
+{
+    return (NULL != sg_sheet) ? TRUE : FALSE;
+}
+
 /* ---- Shell ---------------------------------------------------------------- */
 
 void pet_ui_init(lv_obj_t *screen)

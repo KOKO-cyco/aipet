@@ -41,6 +41,7 @@ typedef enum {
     APP_SET_TIMEZONE,      /* 时区偏移（小时），-12..14，默认 8（北京）      */
     APP_SET_CITY,          /* 天气城市名（留空则按 IP 定位）                 */
     APP_SET_WEATHER_KEY,   /* 天气接口密钥（心知）                          */
+    APP_SET_CAM_TUNE,      /* 相机画面参数（"名字=值,名字=值"，空=出厂默认）  */
 
     APP_SET_COUNT
 } APP_SET_ID_E;

@@ -126,6 +126,15 @@ static lv_obj_t *sg_mode_label;
    next press and on the next build so two thoughts cannot be in flight at once. */
 static lv_timer_t *sg_ai_timer;
 
+/* 取景框的 overlay 状态（声明在这里是因为快门的回调也要用到）。
+ *   sg_cam_placed —— 预览是否已经接上；建页那一刻量出来的取景框偏高（下面那行按钮
+ *                    还没建出来），所以落位推迟到页面建完后的第一拍；
+ *   sg_cam_paused —— 弹窗盖在取景框上时让位中，见 __preview_pause。 */
+static BOOL_T sg_cam_placed;
+static BOOL_T sg_cam_paused;
+
+static void __preview_pause(BOOL_T pause);
+
 /***********************************************************
 ********************function define**************************
 ***********************************************************/
@@ -182,6 +191,7 @@ static void __modal_close_cb(lv_event_t *e)
         sg_shot_pending = FALSE;
     }
     pet_page_sheet_close();
+    __preview_pause(FALSE);
 }
 
 static void __modal_say_cb(lv_event_t *e)
@@ -193,22 +203,27 @@ static void __modal_say_cb(lv_event_t *e)
         sg_shot_pending = FALSE;
     }
     pet_page_sheet_close();
+    __preview_pause(FALSE);
     pet_say(line);
 }
 
 /**
- * @brief Add one full-width row to the confirmation card.
+ * @brief Add one full-width row to a sheet's card.
  *
- * Outline rather than solid: the sheet is a menu of four things the user might do with
- * the shot, and four saturated bars would each claim to be the page's action. The tone
- * is what says which of them is the destructive one.
+ * Outline rather than solid: the sheet is a menu of things the user might do with the
+ * shot, and saturated bars would each claim to be the page's action. The tone is what
+ * says which of them is the destructive one.
+ *
+ * @param[in] cb    clicked handler
+ * @param[in] user  handler's user data (a say-line for __modal_say_cb, NULL otherwise)
  */
-static void __modal_button(lv_obj_t *card, const char *text, PUI_TONE_E tone, const char *say)
+static void __modal_button(lv_obj_t *card, const char *text, PUI_TONE_E tone,
+                           lv_event_cb_t cb, const char *user)
 {
     lv_obj_t *btn = pui_button_create(card, text, tone, PUI_FILL_OUTLINE, PUI_SIZE_MD);
 
     lv_obj_set_width(btn, LV_PCT(100));
-    lv_obj_add_event_cb(btn, __modal_say_cb, LV_EVENT_CLICKED, (void *)say);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, (void *)user);
 }
 
 /**
@@ -242,7 +257,87 @@ static void __save_shot_cb(lv_event_t *e)
     }
 }
 
+static void __ai_open_cb(lv_event_t *e);
+static void __ai_pick_cb(lv_event_t *e);
+
+/* ---- 快门：倒计时 + 拍照 --------------------------------------------------- */
+
+static lv_timer_t *sg_count_tmr;
+static int         sg_count_left;
+
+/** 倒计时数字写在模式 chip 上（顶部那条不参与 overlay，不会被预览盖掉）。 */
+static void __count_show(int left)
+{
+    if (NULL == sg_mode_label) {
+        return;
+    }
+
+    if (left > 0) {
+        char buf[8];
+
+        lv_snprintf(buf, sizeof(buf), "%d", left);
+        pui_text_set(sg_mode_label, buf);
+    } else {
+        pui_text_set(sg_mode_label, pet_demo_mode_name(pet_demo_mode()));
+    }
+}
+
+static void __shot_now(void);
+
+static void __count_cb(lv_timer_t *t)
+{
+    (void)t;
+
+    if (sg_count_left > 0) {
+        sg_count_left--;
+    }
+    if (sg_count_left > 0) {
+        __count_show(sg_count_left);
+        return;
+    }
+
+    sg_count_tmr = NULL;                /* one-shot：这一拍之后定时器自己就没了 */
+    __count_show(0);
+    __shot_now();
+}
+
+/**
+ * @brief 按快门：先倒计时（设置里有秒数），到点再抓。
+ *
+ * **倒计时期间再按一律忽略。** 以前这里是"重新开始倒计时"，但连按的意思通常是
+ * "怎么还没拍"，重开只会让等待更长；而且它和"到点自动拍"叠在一起，会拍出两张。
+ */
 static void __shutter_cb(lv_event_t *e)
+{
+    int secs;
+
+    (void)e;
+
+    if (NULL != sg_count_tmr) {
+        return;                         /* 倒计时中：这一下不算 */
+    }
+
+    secs = pet_demo_setting_get(PET_SET_SHOT_TIMER);
+    if (secs <= 0) {
+        __shot_now();
+        return;
+    }
+    if (secs > 10) {
+        secs = 10;
+    }
+
+    sg_count_left = secs;
+    __count_show(sg_count_left);
+    sg_count_tmr = lv_timer_create(__count_cb, 1000, NULL);
+    lv_timer_set_repeat_count(sg_count_tmr, secs);
+}
+
+/**
+ * @brief 抓一张并弹确认卡。
+ *
+ * 合影 / 质量是拍照这一刻从设置里取的 —— 设置页只改模型，拍照时才真正生效。
+ */
+static void __shot_now(void)
 {
     BOOL_T    ok;
     lv_obj_t *sheet;
@@ -252,7 +347,10 @@ static void __shutter_cb(lv_event_t *e)
     lv_obj_t *sub;
     lv_obj_t *close;
 
-    (void)e;
+    app_camera_set_compose(pet_demo_setting_get(PET_SET_COMPOSE) ? TRUE : FALSE,
+                           (int)pet_demo_pos());
+    app_camera_set_quality(pet_demo_setting_get(PET_SET_QUALITY) ? APP_CAM_QUALITY_HD
+                                                                 : APP_CAM_QUALITY_STANDARD);
 
     /* 先抓一张到内存（不写卡）：等用户在确认卡上点「保存到相册」再落盘。 */
     ok = app_camera_grab();
@@ -266,6 +364,9 @@ static void __shutter_cb(lv_event_t *e)
         }
         return;
     }
+
+    /* 立刻让 overlay 让位（不等 200ms 那一拍），确认卡从第一帧起就是完整的。 */
+    __preview_pause(TRUE);
 
     /* The scrim swallows the tap that dismisses it. */
     lv_obj_add_event_cb(sheet, __modal_close_cb, LV_EVENT_CLICKED, NULL);
@@ -289,15 +390,11 @@ static void __shutter_cb(lv_event_t *e)
     sg_shot_sub = sub;
 
     if (ok) {
-        lv_obj_t *save = pui_button_create(body, "保存到相册", PUI_TONE_ACCENT,
-                                           PUI_FILL_SOLID, PUI_SIZE_MD);
-
-        lv_obj_set_width(save, LV_PCT(100));
-        lv_obj_add_event_cb(save, __save_shot_cb, LV_EVENT_CLICKED, NULL);
+        __modal_button(body, "保存到相册", PUI_TONE_ACCENT, __save_shot_cb, NULL);
     }
-
-    __modal_button(body, "AI识别图片文字", PUI_TONE_ACCENT, "文字已经识别出来，我帮你存好了");
-    __modal_button(body, "新建备忘录", PUI_TONE_ACCENT, "新建了一条备忘录，随时可以改");
+    __modal_button(body, "AI识别", PUI_TONE_ACCENT, __ai_open_cb, NULL);
+    __modal_button(body, "新建备忘录", PUI_TONE_ACCENT, __modal_say_cb,
+                   "新建了一条备忘录，随时可以改");
 
     close = pui_button_create(body, "关闭", PUI_TONE_RED, PUI_FILL_OUTLINE, PUI_SIZE_MD);
     lv_obj_set_width(close, LV_PCT(100));
@@ -314,10 +411,35 @@ static void __shutter_cb(lv_event_t *e)
  * The page has no header, so this is the only way off it: the arrow is the app's one pop
  * entry point wherever it is drawn, and here it is drawn on the preview's own corner.
  */
+/**
+ * @brief 离开这一页之前必须当场收掉的东西。
+ *
+ * 倒计时和 overlay 都是"这一页"的：倒计时到点会去拍，overlay 会在每次上屏前
+ * 直接往 framebuffer 里写像素。只靠 200ms 的定时器兜底的话，跳转之后的那次
+ * 重绘会先被 overlay 糊上一块取景画面 —— 实测就是"退出后主界面带出一块相机
+ * 画面"。所以**任何**离页动作都要先走这里。
+ */
+static void __leave_page(void)
+{
+    if (NULL != sg_count_tmr) {
+        lv_timer_delete(sg_count_tmr);
+        sg_count_tmr = NULL;
+    }
+    app_camera_overlay_disable();
+    if (sg_shot_pending) {
+        app_camera_discard();
+        sg_shot_pending = FALSE;
+    }
+    if (app_camera_is_open()) {
+        app_camera_close();
+    }
+}
+
 static void __back_cb(lv_event_t *e)
 {
     (void)e;
 
+    __leave_page();
     pet_ui_back();
 }
 
@@ -359,12 +481,13 @@ static void __build_note(lv_obj_t *frame)
 
 /* ---- 取景框里的实时预览 ----------------------------------------------------
  *
- * 进拍照页时打开摄像头（app_camera，src/modules），取景框里放一个画布，80ms
- * 刷一次最新帧；页面离开（被隐藏进 trash）就关流、停定时器 —— DVP 一直出帧
- * 会白占 PSRAM 带宽和 CPU。
+ * 进拍照页时打开摄像头（app_camera，src/modules），预览由 app_camera 的
+ * pre-flush 钩子直接写进显示 framebuffer（overlay，见 __cam_place）；页面离开
+ * （被隐藏进 trash）就关 overlay、关流、停定时器 —— DVP 一直出帧会白占 PSRAM
+ * 带宽和 CPU。
  *
- * 快门走 `app_camera_capture()`：同步等到一张完整 JPEG 并写进 /sdcard/pictures，
- * 然后弹出确认卡显示保存路径。
+ * 快门走 `app_camera_grab()`：把当前预览帧拼成一张 BMP 放在内存里，用户在确认卡
+ * 上点"保存"才写 /sdcard/pictures（app_camera_save）。
  */
 
 static lv_timer_t *sg_cam_tmr;
@@ -382,61 +505,63 @@ static void __cam_buf_free_cb(lv_event_t *e)
     }
 }
 
-static void __cam_tick_cb(lv_timer_t *t)
+/**
+ * @brief 让 overlay 暂停/恢复（弹窗盖住取景框时）。
+ *
+ * overlay 是 LVGL 画完之后直接写 framebuffer 的，看不见 LVGL 画了什么 —— 不停下
+ * 来就会把确认卡整块糊掉。恢复时顺手 invalidate 一次，overlay 在紧接着的那次
+ * flush 里就把画面补回去，不用等下一帧相机数据。
+ */
+static void __preview_pause(BOOL_T pause)
 {
-    /* 页面已经离开（隐藏进 trash）：关流 + 停表。回来后重建页面会重新开。 */
-    if (NULL == sg_cam_cv || !lv_obj_is_visible(sg_cam_cv)) {
-        if (sg_shot_pending) {
-            app_camera_discard();
-            sg_shot_pending = FALSE;
-        }
-        if (app_camera_is_open()) {
-            app_camera_close();
-        }
-        lv_timer_delete(t);
-        sg_cam_tmr = NULL;
+    pause = (TRUE == pause) ? TRUE : FALSE;
+    if (pause == sg_cam_paused) {
         return;
     }
+    sg_cam_paused = pause;
+    app_camera_overlay_pause(pause);
 
-    if (app_camera_preview(sg_cam_buf, sg_cam_w, sg_cam_h)) {
+    if (!pause && NULL != sg_cam_cv) {
         lv_obj_invalidate(sg_cam_cv);
     }
 }
 
-static void __scene_del_cb(lv_event_t *e)
+/**
+ * @brief 量一次取景框，把预览接上去（overlay 优先，失败退回 LVGL 画布）。
+ *
+ * **只能在布局定下来之后调**。建页那一刻，取景框的兄弟节点（快门那一行）还没
+ * 建出来，这时量出来的是"没有控制行"的高度 —— overlay 会多铺一条，正好压住
+ * 下方"相册 / 快门 / AI识别"那一行。所以第一次量放在页面建完后的第一拍。
+ */
+static void __cam_place(void)
 {
-    (void)e;
-
-    if (NULL != sg_cam_tmr) {
-        lv_timer_delete(sg_cam_tmr);
-        sg_cam_tmr = NULL;
-    }
-    sg_cam_cv = NULL;                   /* 画布随页面一起删；它的 DELETE 回调释放缓冲 */
-
-    if (sg_shot_pending) {
-        app_camera_discard();
-        sg_shot_pending = FALSE;
-    }
-    if (app_camera_is_open()) {
-        app_camera_close();
-    }
-}
-
-/** 建取景画布并起刷新定时器。 */
-static void __build_preview(lv_obj_t *scene)
-{
-    lv_obj_t *cv;
+    lv_area_t sc;
+    int       top = CAM_CORNER + CAM_CHIP_H + 8;    /* 顶部留给返回箭头 + 模式 chip */
     int       w;
     int       h;
+    lv_obj_t *cv;
 
-    /* 场景尺寸由 flex 布局给，建页那一刻可能还没算出来 —— 强制跑一次。 */
-    lv_obj_update_layout(scene);
-    w = (int)lv_obj_get_content_width(scene);
-    h = (int)lv_obj_get_content_height(scene);
-    if (w <= 0 || h <= 0) {
-        w = 226;                        /* 兜底：面板 250 减两侧留白 */
-        h = 174;
+    lv_obj_update_layout(sg_cam_cv);
+    lv_obj_get_coords(sg_cam_cv, &sc);
+    w = sc.x2 - sc.x1 + 1;
+    h = sc.y2 - sc.y1 + 1;
+
+    /* 高度连顶部那条控件都放不下，说明布局还没稳 —— 下一拍再量。 */
+    if (w <= 0 || h <= (top + 16)) {
+        return;
     }
+
+    sg_cam_placed = TRUE;
+    if (NULL != sg_cam_tmr) {
+        lv_timer_set_period(sg_cam_tmr, 200);
+    }
+
+    if (app_camera_overlay_enable(sc.x1, sc.y1 + top, w, h - top)) {
+        PR_NOTICE("[cam] 取景框 overlay %dx%d（顶部 %d 留给控件）", w, h - top, top);
+        return;
+    }
+
+    PR_WARN("[cam] overlay 没起来，退回 LVGL 画布");
 
     sg_cam_buf = (uint16_t *)tal_psram_malloc((size_t)w * (size_t)h * 2u);
     if (NULL == sg_cam_buf) {
@@ -451,7 +576,7 @@ static void __build_preview(lv_obj_t *scene)
         sg_cam_buf[i] = 0x10E5;         /* 0x141C2E */
     }
 
-    cv = lv_canvas_create(scene);
+    cv = lv_canvas_create(sg_cam_cv);
     lv_canvas_set_buffer(cv, sg_cam_buf, w, h, LV_COLOR_FORMAT_RGB565);
     lv_obj_set_pos(cv, 0, 0);
     lv_obj_remove_flag(cv, LV_OBJ_FLAG_SCROLLABLE);
@@ -462,9 +587,85 @@ static void __build_preview(lv_obj_t *scene)
     lv_obj_add_event_cb(cv, __cam_buf_free_cb, LV_EVENT_DELETE, sg_cam_buf);
     sg_cam_cv = cv;
 
-    sg_cam_tmr = lv_timer_create(__cam_tick_cb, 80, NULL);
-
     PR_NOTICE("[cam] 取景框实时预览 %dx%d", w, h);
+}
+
+static void __cam_tick_cb(lv_timer_t *t)
+{
+    /* 页面已经离开（隐藏进 trash）：关 overlay + 关流 + 停表。
+     * 实时画面由 app_camera 的 pre-flush 钩子直接写 fb，这里不再做绘制。 */
+    if (NULL == sg_cam_cv || !lv_obj_is_visible(sg_cam_cv)) {
+        app_camera_overlay_disable();
+        if (NULL != sg_count_tmr) {
+            lv_timer_delete(sg_count_tmr);
+            sg_count_tmr = NULL;
+        }
+        if (sg_shot_pending) {
+            app_camera_discard();
+            sg_shot_pending = FALSE;
+        }
+        if (app_camera_is_open()) {
+            app_camera_close();
+        }
+        lv_timer_delete(t);
+        sg_cam_tmr = NULL;
+        return;
+    }
+
+    /* 第一拍才落位：建页时那一刻的布局还不含下面那一行按钮。 */
+    if (!sg_cam_placed) {
+        __cam_place();
+    }
+
+    /* 弹窗盖在取景框上时，overlay 必须让位 —— 它是 LVGL 画完之后直接写
+     * framebuffer 的，否则会把确认卡整块糊掉。这里统一兜住所有打开/关闭路径
+     * （点关闭、点遮罩、点某一行、页面导航），不用每处都记得调。 */
+    __preview_pause(pet_page_sheet_open());
+}
+
+static void __scene_del_cb(lv_event_t *e)
+{
+    (void)e;
+
+    app_camera_overlay_disable();
+
+    if (NULL != sg_cam_tmr) {
+        lv_timer_delete(sg_cam_tmr);
+        sg_cam_tmr = NULL;
+    }
+    /* 倒计时中途离开：这一拍不能再落在已经没了的页面上。 */
+    if (NULL != sg_count_tmr) {
+        lv_timer_delete(sg_count_tmr);
+        sg_count_tmr = NULL;
+    }
+    sg_cam_cv = NULL;                   /* 画布随页面一起删；它的 DELETE 回调释放缓冲 */
+
+    if (sg_shot_pending) {
+        app_camera_discard();
+        sg_shot_pending = FALSE;
+    }
+    if (app_camera_is_open()) {
+        app_camera_close();
+    }
+}
+
+/**
+ * @brief 建取景框（登记场景，落位交给第一拍）。
+ *
+ * 首选 **overlay**：不建 lv_canvas，由 app_camera 的 pre-flush 钩子把预览直接写进
+ * 显示 framebuffer —— LVGL 逐像素画 236×264 的画布实测要 20~40ms，是拍照页里最贵
+ * 的一块。overlay 失败才退回原来的 canvas 路径（见 __cam_place）。
+ *
+ * **这里不量尺寸、也不接预览**：建页顺序是先建取景框、后建下面那一行按钮，
+ * 此刻量出来的高度是"没有控制行"的高度。等 100ms 后的第一拍再量。
+ */
+static void __build_preview(lv_obj_t *scene)
+{
+    sg_cam_cv     = scene;              /* 生命周期判断（可见性）用场景本身 */
+    sg_cam_placed = FALSE;
+    sg_cam_paused = FALSE;
+
+    sg_cam_tmr = lv_timer_create(__cam_tick_cb, 100, NULL);
 }
 
 static void __build_viewfinder(lv_obj_t *parent)
@@ -556,7 +757,13 @@ static void __build_viewfinder(lv_obj_t *parent)
     part = pui_label_create(scene,
                             app_camera_is_open() ? "实时预览" : "演示预览",
                             PET_FONT_CJK_SM, PET_COLOR_TEXT_SUB);
-    lv_obj_align(part, LV_ALIGN_BOTTOM_LEFT, 5, -3);
+    if (app_camera_is_open()) {
+        /* 实时画面由 overlay 直接写 fb，会把底部盖住 —— 标签挪到顶部右侧，
+         * 和返回箭头/模式 chip 同一条（那条不参与 overlay）。 */
+        lv_obj_align(part, LV_ALIGN_TOP_RIGHT, -CAM_CORNER, CAM_CORNER + 4);
+    } else {
+        lv_obj_align(part, LV_ALIGN_BOTTOM_LEFT, 5, -3);
+    }
 }
 
 /* ---- Shutter --------------------------------------------------------------- */
@@ -597,42 +804,111 @@ static void __gallery_cb(lv_event_t *e)
 {
     (void)e;
 
+    __leave_page();
     pet_ui_go(PET_PAGE_GALLERY);
 }
 
 /**
- * @brief Read the note in the frame.
+ * @brief 拍照页的「设置」：进设置页。
  *
- * The stand-in for the recognition pass: it says what it read. A hint under the shutter
- * used to caption this button — 识别后可生成备忘录 — and it is gone, because the control
- * row is the page's height budget and a button that needs a sentence beneath it to be
- * understood is a button whose label is the thing to fix.
+ * 相册、拍照都在这一行上，第三个位置放的就是"这页剩下的那件事"—— 相机自己的
+ * 参数、倒计时、质量、合影都在设置里。AI识别不是这一行的事，它是拍完之后对
+ * 照片做的事，所以留在确认卡上。
+ */
+static void __settings_cb(lv_event_t *e)
+{
+    (void)e;
+
+    __leave_page();                 /* 和返回一样：走之前先把取景画面收掉 */
+    pet_ui_go(PET_PAGE_SETTINGS);
+}
+
+/**
+ * @brief The stand-in for the recognition pass: it thinks, then answers.
  *
- * Two beats rather than one: it thinks, then it answers. The wait is the whole point of a
- * THINK line — the ellipsis is what says the character is still working — so the answer is
- * held back until it has run. The second line is the one that is HAPPY.
+ * Two beats rather than one. The wait is the whole point of a THINK line — the ellipsis
+ * is what says the character is still working — so the answer is held back until it has
+ * run. The answer line rides on the timer's user data, which is why the same callback
+ * serves both kinds of recognition.
  */
 static void __ai_done_cb(lv_timer_t *t)
 {
-    (void)t;
+    const char *line = (const char *)lv_timer_get_user_data(t);
 
     /* Cleared, not deleted: the timer is one-shot and clears itself the moment this
        returns. Only the handle has to go, so a later press does not try to cancel a dead
        timer. The next press and the next build both re-check it. */
     sg_ai_timer = NULL;
-    pet_say_mood("认出来了：牛奶、电池", PET_SAY_HAPPY);
+    pet_say_mood(line != NULL ? line : "认出来了：牛奶、电池", PET_SAY_HAPPY);
 }
 
-static void __ai_cb(lv_event_t *e)
+/**
+ * @brief 选了「AI识别图片」或「AI识别图片文字」。
+ *
+ * 两张卡共用一个流程：收起当前卡，想一下，再说结果。照片到这一步就用完了，
+ * 所以顺手丢掉内存里的那一张。
+ */
+static void __ai_pick_cb(lv_event_t *e)
 {
-    (void)e;
+    const char *line = (const char *)lv_event_get_user_data(e);
+
+    if (sg_shot_pending) {
+        app_camera_discard();
+        sg_shot_pending = FALSE;
+    }
+    pet_page_sheet_close();
+    __preview_pause(FALSE);
 
     if (sg_ai_timer != NULL) {
         lv_timer_delete(sg_ai_timer);
+        sg_ai_timer = NULL;
     }
     pet_say_mood("让我想想", PET_SAY_THINK);
-    sg_ai_timer = lv_timer_create(__ai_done_cb, 1300, NULL);
+    sg_ai_timer = lv_timer_create(__ai_done_cb, 1300, (void *)line);
     lv_timer_set_repeat_count(sg_ai_timer, 1);
+}
+
+/**
+ * @brief 确认卡上的「AI识别」：换成一张二选一的卡。
+ *
+ * `pet_page_sheet()` 会把上一张卡顶掉（旧卡进回收站），照片仍在内存里 ——
+ * 所以这里不丢 `sg_shot_pending`，什么时候真不用了由关闭回调来丢。
+ */
+static void __ai_open_cb(lv_event_t *e)
+{
+    lv_obj_t *sheet;
+    lv_obj_t *card;
+    lv_obj_t *body;
+    lv_obj_t *title;
+    lv_obj_t *close;
+
+    (void)e;
+
+    sheet = pet_page_sheet();
+    if (NULL == sheet) {
+        return;
+    }
+
+    lv_obj_add_event_cb(sheet, __modal_close_cb, LV_EVENT_CLICKED, NULL);
+    __preview_pause(TRUE);
+
+    card = pui_card_create(sheet, NULL, PUI_TONE_NEUTRAL);
+    body = pui_card_body(card);
+
+    title = pui_text_create(body, "AI识别", PUI_TEXT_BODY);
+    lv_obj_set_width(title, LV_PCT(100));
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+
+    __modal_button(body, "AI识别图片", PUI_TONE_ACCENT, __ai_pick_cb,
+                   "图里有一张桌子、一杯牛奶和一节电池");
+    __modal_button(body, "AI识别图片文字", PUI_TONE_ACCENT, __ai_pick_cb,
+                   "认出来了：牛奶 250ml，电池 5 号");
+
+    close = pui_button_create(body, "关闭", PUI_TONE_RED, PUI_FILL_OUTLINE, PUI_SIZE_MD);
+    lv_obj_set_width(close, LV_PCT(100));
+    lv_obj_add_event_cb(close, __modal_close_cb, LV_EVENT_CLICKED, NULL);
+
+    pui_anim_sheet_in(sheet);
 }
 
 /* ---- Page ------------------------------------------------------------------ */
@@ -696,9 +972,9 @@ void pet_page_camera_build(lv_obj_t *panel)
 
     __build_shutter(row);
 
-    btn = pui_tool_button_create(row, FONT_AWESOME_AI_CHIP, "AI识别", PUI_TONE_ACCENT, PUI_FILL_OUTLINE);
+    btn = pui_tool_button_create(row, FONT_AWESOME_GEAR, "设置", PUI_TONE_ACCENT, PUI_FILL_OUTLINE);
     pui_tool_button_set_stacked(btn, TRUE);
-    lv_obj_add_event_cb(btn, __ai_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn, __settings_cb, LV_EVENT_CLICKED, NULL);
 
     /* One card, so one band: index 0. The rise is what says the page has arrived rather
        than that it was always there — the page has no header to slide in. */

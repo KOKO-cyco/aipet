@@ -103,6 +103,15 @@ lv_obj_t *pet_page_sheet(void);
  */
 void pet_page_sheet_close(void);
 
+/**
+ * @brief Whether a sheet is currently up.
+ *
+ * The camera page needs this: its live preview is composited straight into the
+ * display framebuffer after LVGL has drawn, so it has to stand down while a sheet
+ * is on screen or it would paint over it.
+ */
+BOOL_T pet_page_sheet_open(void);
+
 #ifdef __cplusplus
 }
 #endif

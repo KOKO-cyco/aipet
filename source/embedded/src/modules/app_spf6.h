@@ -95,6 +95,8 @@ typedef struct {
     uint16_t     gw, gh;        /**< 锚点框尺寸 */
     uint32_t     data_off;      /**< 帧数据区起始（= offs[0]） */
     TUYA_FILE    f;             /**< 文件句柄；NULL = 没开 */
+    char         path[64];      /**< 打开时的路径（链路重挂后按它重开）*/
+    uint32_t     media_gen;     /**< 打开时/上次重开时的链路代次 */
 } SPF6_FILE_T;
 
 /**

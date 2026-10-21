@@ -16,15 +16,21 @@
  */
 
 #include <string.h>
+#include <stdlib.h>                     /* strtol：解析 flash 里存的参数串 */
 
 #include "tal_api.h"
+#include "lvgl.h"                       /* overlay：把预览直接写进显示 framebuffer */
 #include "tkl_fs.h"
 #include "tkl_dvp.h"                    /* 硬件 resize 的输出缓冲 */
 #include "tal_image_yuv422_to_rgb.h"    /* YUV422->RGB565：有 DMA2D 时走硬件 */
 
 #include "tdl_camera_manage.h"
+#include "tdl_display_manage.h"         /* TDL_DISP_FRAME_BUFF_T（overlay 直写 fb）*/
+#include "tdd_camera_gc2145.h"          /* 运行时读写传感器寄存器（调画面参数） */
 
 #include "app_camera.h"
+#include "app_cam_pet.h"                /* 合影立绘（绿幕抠像后编进 flash） */
+#include "app_settings.h"
 #include "app_storage.h"
 #include "app_time.h"
 
@@ -33,11 +39,16 @@
 #define CAMERA_NAME         "camera"
 #endif
 
-/* JPEG 暂存上限（`encoded_quality.jpeg_cfg.max_size` 要的是 25KB，留足余量）。 */
-#define APP_CAM_JPEG_MAX    (256 * 1024)
-
-/* 快门等一张完整 JPEG 的上限。出帧 15fps，正常 100ms 内就到。 */
-#define APP_CAM_CAP_WAIT_MS 2000
+/* 照片（BMP）缓冲：240×320。
+ *
+ * 高清 = 24 位（行 240×3 = 720 字节，本来就是 4 的倍数，不用补）；
+ * 标准 = 16 位 RGB565（BI_BITFIELDS，行 240×2 = 480 字节，也不用补），
+ * 文件小三分之一。缓冲按高清的大小开，标准档只用到前面一截。 */
+#define APP_CAM_BMP_HDR_24  (14 + 40)
+#define APP_CAM_BMP_HDR_16  (14 + 40 + 12)          /* 16 位要带 R/G/B 三个掩码 */
+#define APP_CAM_BMP_ROW_24  (APP_CAM_PREVIEW_W * 3)
+#define APP_CAM_BMP_ROW_16  (APP_CAM_PREVIEW_W * 2)
+#define APP_CAM_BMP_LEN     (APP_CAM_BMP_HDR_24 + APP_CAM_BMP_ROW_24 * APP_CAM_PREVIEW_H)
 
 /* 预览刷新上限（帧/秒）。传感器可能跑得更快，这里按时间闸门丢掉多余的帧。 */
 #define APP_CAM_PREVIEW_FPS 10
@@ -65,6 +76,8 @@ static uint32_t sg_fps_cnt;
 static uint32_t sg_fps_t0;
 static uint32_t sg_conv_ms_sum;             /* 每帧转换耗时累计（2 秒窗口） */
 static uint32_t sg_conv_ms_max;
+static uint32_t sg_rot_ms_sum;              /* 其中硬件 ROTT 那一拍的耗时 */
+static uint32_t sg_rot_ms_max;
 static uint32_t sg_last_conv_ms;            /* 预览限帧：上一帧转换的时间 */
 
 /* 应用层的 YUV422 排列。SDK 的 TUYA_YUV422_ORDER_E 只有 UYVY/YUYV 两种，
@@ -77,11 +90,14 @@ typedef enum {
 
 static APP_YUV_ORDER_E sg_order = APP_YUV_VYUY;
 
-/* 快门：主线程置 req，JPEG 回调拷完置 done。 */
-static volatile BOOL_T   sg_cap_req;
-static volatile BOOL_T   sg_cap_done;
-static uint8_t          *sg_jpeg;
-static volatile uint32_t sg_jpeg_len;
+/* 快门：把当前预览帧拼成 BMP 放在这块缓冲里，等用户确认再写卡。 */
+static uint8_t  *sg_bmp;
+static uint32_t  sg_bmp_len;
+
+/* 拍照设置：位深 / 是否把角色叠进照片 + 叠在哪。 */
+static APP_CAM_QUALITY_E sg_quality = APP_CAM_QUALITY_HD;
+static BOOL_T            sg_comp_on;
+static int               sg_comp_pos = APP_CAM_COMPOSE_RIGHT;
 
 /* ---- YUV422 -> RGB565（cover 裁切 + 最近邻缩放） -------------------------- */
 
@@ -323,21 +339,44 @@ static OPERATE_RET prv_raw_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame
             BOOL_T   rotated   = FALSE;
 
 #if APP_CAM_USE_HW_ROTATE
-            /* 硬件 ROTT：YUV -> RGB565 + 90° 旋转一次完成，输出 480×640。
-             * 输入按 YUYV + 字节翻转匹配传感器的 VYUY。 */
+            /* 硬件 ROTT：YUV -> RGB565 + 90° 一次完成。
+             *
+             * 旋转后的尺寸**正好等于预览缓冲**时，让 ROTT 直接写进后缓冲 ——
+             * 这时 preview 的 cover 映射是恒等映射，原来那趟"硬件写 150KB →
+             * CPU 再读 150KB 写 150KB"的整幅拷贝纯属白搬，每帧白占 300KB 的
+             * PSRAM 带宽（实测相机开着时整机 flush 从 1ms 涨到 7ms，就是这类
+             * 流量挤的）。尺寸对不上（换传感器/换分辨率）才退回拷贝那条路。 */
             {
-                uint32_t rot_ms  = 0;
-                uint32_t rot_w   = 0;
-                uint32_t rot_h   = 0;
+                uint32_t rot_ms   = 0;
+                uint32_t rot_w    = 0;
+                uint32_t rot_h    = 0;
                 uint16_t *rot_rgb = NULL;
+                BOOL_T   direct   = ((uint32_t)APP_CAM_PREVIEW_W == frame->height &&
+                                     (uint32_t)APP_CAM_PREVIEW_H == frame->width) ? TRUE : FALSE;
 
-                if (OPRT_OK == tkl_dvp_test_rotate(frame->data, frame->width, frame->height,
-                                                   &rot_ms, &rot_w, &rot_h, &rot_rgb) &&
-                    NULL != rot_rgb && rot_w > 0 && rot_h > 0) {
+                if (direct) {
+                    uint32_t rt0 = tal_system_get_millisecond();
+
+                    if (OPRT_OK == tkl_dvp_rotate_rgb565(frame->data, frame->width,
+                                                         frame->height, dst, &rot_w, &rot_h)) {
+                        converted = TRUE;
+                        rotated   = TRUE;
+                    }
+                    rot_ms = tal_system_get_millisecond() - rt0;
+                } else if (OPRT_OK == tkl_dvp_test_rotate(frame->data, frame->width, frame->height,
+                                                          &rot_ms, &rot_w, &rot_h, &rot_rgb) &&
+                           NULL != rot_rgb && rot_w > 0 && rot_h > 0) {
                     prv_rgb565_cover_scale(rot_rgb, (int)rot_w, (int)rot_h,
                                            dst, APP_CAM_PREVIEW_W, APP_CAM_PREVIEW_H);
                     converted = TRUE;
                     rotated   = TRUE;
+                }
+
+                if (converted) {
+                    sg_rot_ms_sum += rot_ms;
+                    if (rot_ms > sg_rot_ms_max) {
+                        sg_rot_ms_max = rot_ms;
+                    }
                 }
             }
 #endif
@@ -419,44 +458,141 @@ static OPERATE_RET prv_raw_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame
         } else if ((now - sg_fps_t0) >= 2000u) {
             uint32_t ms = now - sg_fps_t0;
 
-            PR_DEBUG(CAM_TAG " 预览 %u 帧/%ums（约 %u fps），转换 平均 %u ms 最大 %u ms",
+            PR_DEBUG(CAM_TAG " 预览 %u 帧/%ums（约 %u fps），转换 平均 %u ms 最大 %u ms（其中 ROTT %u/%u）",
                      (unsigned)sg_fps_cnt, (unsigned)ms,
                      (unsigned)(sg_fps_cnt * 1000u / ms),
                      (unsigned)(sg_conv_ms_sum / sg_fps_cnt),
-                     (unsigned)sg_conv_ms_max);
+                     (unsigned)sg_conv_ms_max,
+                     (unsigned)(sg_rot_ms_sum / sg_fps_cnt),
+                     (unsigned)sg_rot_ms_max);
 
             sg_fps_cnt     = 0;
             sg_fps_t0      = now;
             sg_conv_ms_sum = 0;
             sg_conv_ms_max = 0;
+            sg_rot_ms_sum  = 0;
+            sg_rot_ms_max  = 0;
         }
     }
     return OPRT_OK;
 }
 
-static OPERATE_RET prv_jpg_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame)
+/* ---- 拍照：把预览帧拼成一张 BMP ------------------------------------------ */
+
+static void prv_put_u16(uint8_t *p, uint32_t v)
 {
-    uint32_t n;
+    p[0] = (uint8_t)(v & 0xFF);
+    p[1] = (uint8_t)((v >> 8) & 0xFF);
+}
 
-    (void)hdl;
+static void prv_put_u32(uint8_t *p, uint32_t v)
+{
+    prv_put_u16(p, v & 0xFFFFu);
+    prv_put_u16(p + 2, (v >> 16) & 0xFFFFu);
+}
 
-    if (NULL == frame || NULL == frame->data || 0 == frame->data_len) {
-        return OPRT_INVALID_PARM;
+/**
+ * @brief 写 BMP 文件头（BITMAPFILEHEADER + BITMAPINFOHEADER [+ 三个掩码]）。
+ *
+ * 自下而上（height 为正）、无压缩。16 位用 BI_BITFIELDS 带 R/G/B 掩码，
+ * 因为 BMP 的 16 位 BI_RGB 是 5-5-5，和我们的 RGB565 对不上。
+ */
+static void prv_bmp_header(uint8_t *h, uint32_t data_len, APP_CAM_QUALITY_E q)
+{
+    const BOOL_T hd   = (APP_CAM_QUALITY_HD == q) ? TRUE : FALSE;
+    const int    hdr  = hd ? APP_CAM_BMP_HDR_24 : APP_CAM_BMP_HDR_16;
+
+    memset(h, 0, (size_t)hdr);
+
+    h[0] = 'B';
+    h[1] = 'M';
+    prv_put_u32(h + 2, (uint32_t)hdr + data_len);        /* 文件总长 */
+    prv_put_u32(h + 10, (uint32_t)hdr);                  /* 像素数据偏移 */
+    prv_put_u32(h + 14, 40);                             /* DIB 头长 */
+    prv_put_u32(h + 18, APP_CAM_PREVIEW_W);
+    prv_put_u32(h + 22, APP_CAM_PREVIEW_H);              /* 正数 = 自下而上 */
+    prv_put_u16(h + 26, 1);                              /* 平面数 */
+    prv_put_u16(h + 28, hd ? 24 : 16);                   /* 位深 */
+    prv_put_u32(h + 34, data_len);                       /* 像素数据长 */
+    prv_put_u32(h + 38, 2835);                           /* 横向 DPI（72dpi） */
+    prv_put_u32(h + 42, 2835);                           /* 纵向 DPI */
+
+    if (!hd) {
+        prv_put_u32(h + 30, 3);                          /* BI_BITFIELDS */
+        prv_put_u32(h + 54, 0xF800);                     /* R 掩码 */
+        prv_put_u32(h + 58, 0x07E0);                     /* G 掩码 */
+        prv_put_u32(h + 62, 0x001F);                     /* B 掩码 */
     }
-    /* 只有按下快门那次需要 JPEG；平时完整帧也来了，但直接丢掉，省一次拷贝。 */
-    if (!sg_cap_req || !frame->is_complete || NULL == sg_jpeg || sg_cap_done) {
-        return OPRT_OK;
+}
+
+/**
+ * @brief 合影：算角色贴在哪，返回立绘指针。
+ *
+ * 立绘是 RGB565A8 的常量表（`tools/make_compose_pet.py` 从绿幕 PNG 抠出来、缩到
+ * 180px 高），alpha 混合在写 BMP 的那一趟里逐像素做 —— 所以边缘是干净的，不是
+ * 一块方图。
+ *
+ * **贴边不放留白**：原图本身就是在右边缘切过的半身稿，留 8px 反而会把那条
+ * 切边悬在画面中间。放在右边就贴右边缘，放在左边就镜像后贴左边缘。
+ *
+ * @param[out] ox,oy 左上角（照片坐标）
+ */
+static const APP_CAM_PET_T *prv_compose_layout(int *ox, int *oy)
+{
+    const APP_CAM_PET_T *pet = app_cam_pet_get();
+
+    if (NULL == pet || NULL == pet->data || pet->w <= 0 || pet->h <= 0) {
+        return NULL;
+    }
+    if (pet->w > APP_CAM_PREVIEW_W || pet->h > APP_CAM_PREVIEW_H) {
+        return NULL;
     }
 
-    n = frame->data_len;
-    if (n > APP_CAM_JPEG_MAX) {
-        PR_WARN(CAM_TAG " JPEG 超上限 %u > %d，截断", (unsigned)n, APP_CAM_JPEG_MAX);
-        n = APP_CAM_JPEG_MAX;
+    *ox = (APP_CAM_COMPOSE_LEFT == sg_comp_pos) ? 0
+                                                : (APP_CAM_PREVIEW_W - pet->w);
+    *oy = APP_CAM_PREVIEW_H - pet->h - 12;
+
+    if (*ox < 0) {
+        *ox = 0;
     }
-    memcpy(sg_jpeg, frame->data, n);
-    sg_jpeg_len = n;
-    sg_cap_done = TRUE;
-    return OPRT_OK;
+    if (*oy < 0) {
+        *oy = 0;
+    }
+
+    return pet;
+}
+
+/**
+ * @brief RGB565 按 alpha 混合（a = 0 全取底，255 全取上）。
+ *
+ * 在 5/6 位通道里算就够：再展开到 8 位只是把误差摊薄，屏幕上看不出来，反而不如
+ * 少两次乘除。
+ */
+static uint16_t prv_blend565(uint16_t dst, uint16_t src, uint8_t a)
+{
+    int dr, dg, db;
+    int sr, sg, sb;
+    int r, g, b;
+
+    if (0 == a) {
+        return dst;
+    }
+    if (255 == a) {
+        return src;
+    }
+
+    dr = (dst >> 11) & 0x1F;
+    dg = (dst >> 5) & 0x3F;
+    db = dst & 0x1F;
+    sr = (src >> 11) & 0x1F;
+    sg = (src >> 5) & 0x3F;
+    sb = src & 0x1F;
+
+    r = (sr * a + dr * (255 - a)) / 255;
+    g = (sg * a + dg * (255 - a)) / 255;
+    b = (sb * a + db * (255 - a)) / 255;
+
+    return (uint16_t)((r << 11) | (g << 5) | b);
 }
 
 /* ---- 存卡 ---------------------------------------------------------------- */
@@ -469,7 +605,7 @@ static void prv_make_path(char *out, size_t out_sz)
     if (app_time_valid() &&
         OPRT_OK == app_time_format(stamp, sizeof(stamp), "%Y%m%d_%H%M%S") &&
         '\0' != stamp[0] && '-' != stamp[0]) {
-        snprintf(out, out_sz, "%s/%s/cam_%s.jpg", APP_STORAGE_MOUNT, APP_CAM_PIC_DIR, stamp);
+        snprintf(out, out_sz, "%s/%s/cam_%s.bmp", APP_STORAGE_MOUNT, APP_CAM_PIC_DIR, stamp);
         return;
     }
 
@@ -479,9 +615,9 @@ static void prv_make_path(char *out, size_t out_sz)
         BOOL_T ex = FALSE;
 
         if (1 == i) {
-            snprintf(name, sizeof(name), "cam.jpg");
+            snprintf(name, sizeof(name), "cam.bmp");
         } else {
-            snprintf(name, sizeof(name), "cam_%d.jpg", i);
+            snprintf(name, sizeof(name), "cam_%d.bmp", i);
         }
         snprintf(path, sizeof(path), "%s/%s/%s", APP_STORAGE_MOUNT, APP_CAM_PIC_DIR, name);
         if (OPRT_OK != tkl_fs_is_exist(path, &ex) || !ex) {
@@ -489,7 +625,7 @@ static void prv_make_path(char *out, size_t out_sz)
             return;
         }
     }
-    snprintf(out, out_sz, "%s/%s/cam_999.jpg", APP_STORAGE_MOUNT, APP_CAM_PIC_DIR);
+    snprintf(out, out_sz, "%s/%s/cam_999.bmp", APP_STORAGE_MOUNT, APP_CAM_PIC_DIR);
 }
 
 /* 落盘校验：把刚写的文件读回来逐字节比。
@@ -499,7 +635,7 @@ static void prv_make_path(char *out, size_t out_sz)
  * write() 的返回值，所以 `fwrite` 报满、`fsync` 报 OK，卡上却是坏数据。
  * 2026-10-20 实测就是"日志说照片已存、相册里打不开"。唯一可信的判据是
  * 自己读回来比一遍 —— 写 8KB 的代价，比让用户以为存上了小得多。 */
-static BOOL_T prv_verify_jpeg(const char *path)
+static BOOL_T prv_verify_shot(const char *path)
 {
     static uint8_t s_cmp[512];
     TUYA_FILE      f;
@@ -513,8 +649,8 @@ static BOOL_T prv_verify_jpeg(const char *path)
         return FALSE;
     }
 
-    while (done < sg_jpeg_len) {
-        uint32_t n = sg_jpeg_len - done;
+    while (done < sg_bmp_len) {
+        uint32_t n = sg_bmp_len - done;
 
         if (n > sizeof(s_cmp)) {
             n = sizeof(s_cmp);
@@ -522,7 +658,7 @@ static BOOL_T prv_verify_jpeg(const char *path)
         if ((int32_t)n != tkl_fread(s_cmp, (int32_t)n, f)) {
             break;
         }
-        if (0 != memcmp(s_cmp, sg_jpeg + done, n)) {
+        if (0 != memcmp(s_cmp, sg_bmp + done, n)) {
             break;
         }
         done += n;
@@ -530,22 +666,22 @@ static BOOL_T prv_verify_jpeg(const char *path)
 
     (void)tkl_fclose(f);
 
-    if (done != sg_jpeg_len) {
+    if (done != sg_bmp_len) {
         PR_WARN(CAM_TAG " 落盘校验失败：第 %u/%u 字节对不上（块写被 SD 吞了）",
-                (unsigned)done, (unsigned)sg_jpeg_len);
+                (unsigned)done, (unsigned)sg_bmp_len);
         return FALSE;
     }
 
     return TRUE;
 }
 
-static BOOL_T prv_save_jpeg(char *path, size_t path_sz)
+static BOOL_T prv_save_shot(char *path, size_t path_sz)
 {
     char      dir[64];
     char      full[160];
     BOOL_T    ok = FALSE;
 
-    if (0 == sg_jpeg_len || NULL == sg_jpeg) {
+    if (0 == sg_bmp_len || NULL == sg_bmp) {
         return FALSE;
     }
 
@@ -585,15 +721,15 @@ static BOOL_T prv_save_jpeg(char *path, size_t path_sz)
             PR_ERR(CAM_TAG " 建不了 %s（卡满 / 只读 / 目录项写不进）", full);
             break;
         }
-        if ((int)sg_jpeg_len != tkl_fwrite(sg_jpeg, (int)sg_jpeg_len, f)) {
-            PR_ERR(CAM_TAG " 写 %s 失败（要 %u 字节）", full, (unsigned)sg_jpeg_len);
+        if ((int)sg_bmp_len != tkl_fwrite(sg_bmp, (int)sg_bmp_len, f)) {
+            PR_ERR(CAM_TAG " 写 %s 失败（要 %u 字节）", full, (unsigned)sg_bmp_len);
             (void)tkl_fclose(f);
             break;
         }
         (void)tkl_fsync(tkl_fileno(f));
         (void)tkl_fclose(f);
 
-        ok = prv_verify_jpeg(full);
+        ok = prv_verify_shot(full);
         if (!ok) {
             PR_WARN(CAM_TAG " 第 %d 次落盘不合格，重写", attempt + 1);
             (void)tkl_fs_remove(full);
@@ -615,36 +751,27 @@ static BOOL_T prv_save_jpeg(char *path, size_t path_sz)
     if (NULL != path && path_sz > 0) {
         snprintf(path, path_sz, "%s", full);
     }
-    PR_NOTICE(CAM_TAG " 照片已存 %s（%u 字节，已校验）", full, (unsigned)sg_jpeg_len);
+    PR_NOTICE(CAM_TAG " 照片已存 %s（%u 字节，已校验）", full, (unsigned)sg_bmp_len);
     return TRUE;
 }
 
 /* ---- 开流 ---------------------------------------------------------------- */
 
 /**
- * @brief 打开/重开一路流。
+ * @brief 打开预览流（只 YUV422）。
  *
- * @param[in] with_jpeg TRUE = YUV422 + JPEG 双路（只在按快门的那一瞬间用）；
- *                      FALSE = 只出 YUV422（预览用）。
- *
- * **预览绝不能带 JPEG**：VGA@15fps 的 JPEG 编码流会把 PSRAM 带宽和 CPU 吃干
- * （实测精灵预取掉到 100KB/s、界面 2~4fps，还会刷 `size no match`）。
- * 快门那一下重开一次双路、拍完立刻切回 YUV，代价是快门瞬间预览停半秒。
+ * **不带 JPEG**：JPEG 编码流会把 PSRAM 带宽和 CPU 吃干（实测 VGA@15fps 下精灵
+ * 预取掉到 100KB/s、界面 2~4fps）。拍照不再需要它 —— 见 app_camera_grab()。
  */
-static OPERATE_RET prv_stream_open(BOOL_T with_jpeg)
+static OPERATE_RET prv_stream_open(void)
 {
     TDL_CAMERA_CFG_T cfg = { 0 };
 
-    cfg.fps                  = APP_CAM_FPS;
-    cfg.width                = APP_CAM_WANT_W;
-    cfg.height               = APP_CAM_WANT_H;
-    cfg.out_fmt              = with_jpeg ? TDL_CAMERA_FMT_JPEG_YUV422_BOTH
-                                         : TDL_CAMERA_FMT_YUV422;
-    cfg.get_frame_cb         = prv_raw_cb;
-    cfg.get_encoded_frame_cb = with_jpeg ? prv_jpg_cb : NULL;
-    cfg.encoded_quality.jpeg_cfg.enable   = with_jpeg ? 1 : 0;
-    cfg.encoded_quality.jpeg_cfg.max_size = 25;     /* KB */
-    cfg.encoded_quality.jpeg_cfg.min_size = 10;
+    cfg.fps          = APP_CAM_FPS;
+    cfg.width        = APP_CAM_WANT_W;
+    cfg.height       = APP_CAM_WANT_H;
+    cfg.out_fmt      = TDL_CAMERA_FMT_YUV422;
+    cfg.get_frame_cb = prv_raw_cb;
 
     return tdl_camera_dev_open(sg_hdl, &cfg);
 }
@@ -711,18 +838,16 @@ OPERATE_RET app_camera_open(void)
     }
 #endif
 
-    if (NULL == sg_jpeg) {
-        sg_jpeg = (uint8_t *)tal_psram_malloc(APP_CAM_JPEG_MAX);
+    if (NULL == sg_bmp) {
+        sg_bmp = (uint8_t *)tal_psram_malloc(APP_CAM_BMP_LEN);
     }
-    if (NULL == sg_jpeg) {
-        PR_WARN(CAM_TAG " JPEG 暂存分配失败：能预览，不能拍照");
+    if (NULL == sg_bmp) {
+        PR_WARN(CAM_TAG " 照片缓冲分配失败：能预览，不能拍照");
     }
 
     sg_front           = -1;
     sg_gen             = 0;
-    sg_cap_req         = FALSE;
-    sg_cap_done        = FALSE;
-    sg_jpeg_len        = 0;
+    sg_bmp_len         = 0;
     sg_first_frame_log = FALSE;
     sg_fps_cnt         = 0;
     sg_fps_t0          = 0;
@@ -730,7 +855,7 @@ OPERATE_RET app_camera_open(void)
     sg_conv_ms_max     = 0;
     sg_last_conv_ms    = 0;
 
-    rt = prv_stream_open(FALSE);            /* 预览：只 YUV */
+    rt = prv_stream_open();
     if (OPRT_OK != rt) {
         PR_ERR(CAM_TAG " 开流失败 %d", (int)rt);
         app_camera_close();
@@ -741,6 +866,10 @@ OPERATE_RET app_camera_open(void)
     PR_NOTICE(CAM_TAG " 已开流：%dx%d @%dfps（预览 YUV422），PSRAM 空闲 %uKB",
               APP_CAM_WANT_W, APP_CAM_WANT_H, APP_CAM_FPS,
               (unsigned)(tal_psram_get_free_heap_size() / 1024));
+
+    /* 画面参数：传感器此刻已经初始化完，把（存过 flash 的）参数下发一遍。
+     * 每次开流都下发，是因为关流时寄存器不保证保持。 */
+    app_camera_param_apply();
 
 #if APP_CAM_USE_HW_RESIZE
     {
@@ -780,9 +909,7 @@ void app_camera_close(void)
      *
      * 下次 app_camera_open() 只在指针为 NULL 时才分配。 */
     sg_front    = -1;
-    sg_cap_req  = FALSE;
-    sg_cap_done = FALSE;
-    sg_jpeg_len = 0;
+    sg_bmp_len  = 0;
     sg_fps_cnt  = 0;
     sg_fps_t0   = 0;
     sg_conv_ms_sum = 0;
@@ -841,52 +968,118 @@ BOOL_T app_camera_preview(uint16_t *dst, int w, int h)
     return TRUE;
 }
 
+/**
+ * @brief 拍一张：把**当前预览帧**拼成 BMP 放进内存，不碰流、不碰卡。
+ *
+ * 为什么不用硬件 JPEG
+ * -------------------
+ * 硬件 JPEG 只在开流那一刻定档（`TDL_CAMERA_FMT_JPEG_YUV422_BOTH`），而 TDD 的
+ * `is_inited` 早退让"关流重开成 JPEG"这条路走不通 —— 实测重开后 DVP 仍在 YUV
+ * 模式，等 2 秒也等不到一帧 JPEG（只刷 `sensor's yuyv data resoltion is not
+ * right`）。开流就带 JPEG 则会把预览和桌宠拖垮（见 prv_stream_open 注释）。
+ *
+ * 预览帧本来就是"屏上看到的那幅画"（240×320，已旋转、已裁好），把它按 24 位
+ * BMP 存下来最直接：所见即所得，不依赖编码器，也不再有快门时那 2 秒黑屏。
+ * 代价是文件大（约 225KB），换掉的是"拍了就有"。
+ */
 BOOL_T app_camera_grab(void)
 {
-    uint32_t t0;
-    BOOL_T   got = FALSE;
+    const BOOL_T         hd  = (APP_CAM_QUALITY_HD == sg_quality) ? TRUE : FALSE;
+    const int            hdr = hd ? APP_CAM_BMP_HDR_24 : APP_CAM_BMP_HDR_16;
+    const int            rsz = hd ? APP_CAM_BMP_ROW_24 : APP_CAM_BMP_ROW_16;
+    uint8_t             *out;
+    const uint16_t      *src;
+    const APP_CAM_PET_T *pet = NULL;
+    const uint8_t       *pet_px = NULL;
+    const uint8_t       *pet_a  = NULL;
+    int                  front = sg_front;
+    int                  cx = 0, cy = 0;
+    uint32_t             t0;
 
-    sg_jpeg_len = 0;
-    if (!sg_open || NULL == sg_jpeg) {
+    sg_bmp_len = 0;
+    if (!sg_open || front < 0 || NULL == sg_buf[front] || NULL == sg_bmp) {
         return FALSE;
     }
 
-    /* 预览是 YUV-only：先关掉，临时开双路拍一张，再切回来。 */
-    PR_NOTICE(CAM_TAG " 抓图：切到 JPEG 流");
-    (void)tdl_camera_dev_close(sg_hdl);
+    t0  = tal_system_get_millisecond();
+    src = sg_buf[front];
+    out = sg_bmp + hdr;
 
-    sg_cap_done = FALSE;
-    sg_cap_req  = TRUE;
-
-    if (OPRT_OK == prv_stream_open(TRUE)) {
-        t0 = tal_system_get_millisecond();
-        while (!sg_cap_done) {
-            if ((tal_system_get_millisecond() - t0) >= APP_CAM_CAP_WAIT_MS) {
-                PR_WARN(CAM_TAG " 抓图超时：%dms 内没等到完整 JPEG", APP_CAM_CAP_WAIT_MS);
-                break;
-            }
-            tal_system_sleep(10);
+    if (sg_comp_on) {
+        pet = prv_compose_layout(&cx, &cy);
+        if (NULL != pet) {
+            pet_px = pet->data;
+            pet_a  = pet->data + (size_t)pet->w * (size_t)pet->h * 2u;
         }
-        got = sg_cap_done;
-        (void)tdl_camera_dev_close(sg_hdl);
-    } else {
-        PR_ERR(CAM_TAG " 打不开 JPEG 流");
-    }
-    sg_cap_req = FALSE;
-
-    /* 切回预览流。这一步失败不影响已经抓到的 JPEG。 */
-    if (OPRT_OK != prv_stream_open(FALSE)) {
-        PR_ERR(CAM_TAG " 预览流恢复失败，退出页面再进会重开");
-        sg_open = FALSE;
     }
 
-    if (!got) {
-        sg_jpeg_len = 0;
-        return FALSE;
+    /* 放左边要镜像：原图是在右边缘切过的半身稿，镜像之后那条切边才落在左边缘。 */
+    const BOOL_T flip = (APP_CAM_COMPOSE_LEFT == sg_comp_pos) ? TRUE : FALSE;
+
+    /* BMP 自下而上：文件里的第一行是画面的最后一行。 */
+    for (int y = 0; y < APP_CAM_PREVIEW_H; y++) {
+        const int       py  = APP_CAM_PREVIEW_H - 1 - y;    /* 照片行号（自上而下） */
+        const uint16_t *row = src + (size_t)py * APP_CAM_PREVIEW_W;
+        uint8_t        *dst = out + (size_t)y * rsz;
+        const BOOL_T    in_cy = (NULL != pet_px && py >= cy && py < cy + pet->h) ? TRUE : FALSE;
+
+        for (int x = 0; x < APP_CAM_PREVIEW_W; x++) {
+            uint16_t px = row[x];
+
+            /* 合影：立绘按 alpha 混进来（不是盖一块方图）。 */
+            if (in_cy && x >= cx && x < cx + pet->w) {
+                int      sx = x - cx;
+                size_t   i;
+                uint16_t s;
+
+                if (flip) {
+                    sx = pet->w - 1 - sx;
+                }
+                i = (size_t)(py - cy) * (size_t)pet->w + (size_t)sx;
+                s = (uint16_t)pet_px[i * 2] | ((uint16_t)pet_px[i * 2 + 1] << 8);
+
+                px = prv_blend565(px, s, pet_a[i]);
+            }
+
+            if (hd) {
+                uint8_t r5 = (uint8_t)((px >> 11) & 0x1F);
+                uint8_t g6 = (uint8_t)((px >> 5) & 0x3F);
+                uint8_t b5 = (uint8_t)(px & 0x1F);
+
+                /* BMP 像素是 BGR；565 拉到 888 用"高位复制"补低位，比左移纯 0 更亮一点。 */
+                *dst++ = (uint8_t)((b5 << 3) | (b5 >> 2));
+                *dst++ = (uint8_t)((g6 << 2) | (g6 >> 4));
+                *dst++ = (uint8_t)((r5 << 3) | (r5 >> 2));
+            } else {
+                /* 16 位就是 RGB565 本身，小端两个字节。 */
+                *dst++ = (uint8_t)(px & 0xFF);
+                *dst++ = (uint8_t)(px >> 8);
+            }
+        }
     }
 
-    PR_NOTICE(CAM_TAG " 已抓图（%u 字节），等用户决定是否保存", (unsigned)sg_jpeg_len);
+    prv_bmp_header(sg_bmp, (uint32_t)(rsz * APP_CAM_PREVIEW_H), sg_quality);
+    sg_bmp_len = (uint32_t)hdr + (uint32_t)rsz * APP_CAM_PREVIEW_H;
+
+    PR_NOTICE(CAM_TAG " 已拍照 %dx%d（BMP %u 位 %uKB%s，%u ms）",
+              APP_CAM_PREVIEW_W, APP_CAM_PREVIEW_H,
+              hd ? 24u : 16u, (unsigned)(sg_bmp_len / 1024),
+              (NULL != pet_px) ? "，含角色合影" : "",
+              (unsigned)(tal_system_get_millisecond() - t0));
     return TRUE;
+}
+
+void app_camera_set_quality(APP_CAM_QUALITY_E q)
+{
+    sg_quality = (APP_CAM_QUALITY_HD == q) ? APP_CAM_QUALITY_HD : APP_CAM_QUALITY_STANDARD;
+}
+
+void app_camera_set_compose(BOOL_T on, int pos)
+{
+    sg_comp_on  = (TRUE == on) ? TRUE : FALSE;
+    sg_comp_pos = (pos < APP_CAM_COMPOSE_LEFT || pos > APP_CAM_COMPOSE_RIGHT)
+                      ? APP_CAM_COMPOSE_RIGHT
+                      : pos;
 }
 
 BOOL_T app_camera_save(char *path, size_t path_sz)
@@ -894,19 +1087,430 @@ BOOL_T app_camera_save(char *path, size_t path_sz)
     if (NULL != path && path_sz > 0) {
         path[0] = '\0';
     }
-    if (0 == sg_jpeg_len) {
+    if (0 == sg_bmp_len) {
         return FALSE;
     }
-    if (!prv_save_jpeg(path, path_sz)) {
+    if (!prv_save_shot(path, path_sz)) {
         return FALSE;
     }
 
     /* 存过就消费掉：同一张照片不能被"保存到相册"按两次写两份。 */
-    sg_jpeg_len = 0;
+    sg_bmp_len = 0;
     return TRUE;
 }
 
 void app_camera_discard(void)
 {
-    sg_jpeg_len = 0;
+    sg_bmp_len = 0;
+}
+
+/* ---- 画面参数（调色）------------------------------------------------------
+ *
+ * 参数就是 GC2145 的寄存器原值，表里每一行写明页/地址，改一个数就写一个寄存器。
+ * 取值依据是数据手册（`GC2145 CSP DataSheet`）：
+ *
+ *   P2:0xd5 Luma_offset     "Add offset on luma value. S7."      → 亮度
+ *   P2:0xd3 luma_contrast   "2.6bits, 0x40 = 1.0"                → 对比度
+ *   P2:0xd1/d2 Cb/Cr sat    "3.5bits, 0x20 = 1.0"                → 饱和度
+ *   P1:0x13 AEC_target_Y    "expected luminance value"           → 曝光目标
+ *
+ * 注意：另一份厂商参考代码（XRADIO 的 drv_gc2145.c）把亮度/对比度写在 P0:0x55/
+ * 0x56 上，但数据手册里 P0 根本没有这两个寄存器 —— 那套是别的传感器留下的，
+ * 照抄会静默无效。这里按手册的 P2 YCP 块来。
+ */
+
+typedef struct {
+    const char *name;
+    uint8_t     page;
+    uint8_t     reg;
+    uint8_t     reg2;      /* 0 = 只有一个寄存器（饱和度要写 Cb/Cr 两个） */
+    int16_t     def;
+    int16_t     min;
+    int16_t     max;
+} APP_CAM_PARAM_T;
+
+static const APP_CAM_PARAM_T sg_param_tab[APP_CAM_PARAM_COUNT] = {
+    /* bright   */ { "bright",   2, 0xd5, 0x00, 0x00, -64,   63  },
+    /* contrast */ { "contrast", 2, 0xd3, 0x00, 0x40, 0x20,  0x60 },
+    /* sat      */ { "sat",      2, 0xd1, 0xd2, 0x32, 0x10,  0x50 },
+    /* aec      */ { "aec",      1, 0x13, 0x00, 0x7b, 0x20,  0xc0 },
+};
+
+static int    sg_param_val[APP_CAM_PARAM_COUNT];
+static BOOL_T sg_param_ready;
+
+static void prv_param_load(void);
+
+static void prv_param_ensure(void)
+{
+    if (sg_param_ready) {
+        return;
+    }
+    for (int i = 0; i < APP_CAM_PARAM_COUNT; i++) {
+        sg_param_val[i] = sg_param_tab[i].def;
+    }
+    sg_param_ready = TRUE;
+    prv_param_load();
+}
+
+static int prv_param_clamp(APP_CAM_PARAM_E p, int v)
+{
+    const APP_CAM_PARAM_T *t = &sg_param_tab[p];
+
+    if (v < t->min) {
+        return t->min;
+    }
+    if (v > t->max) {
+        return t->max;
+    }
+    return v;
+}
+
+int app_camera_param_get(APP_CAM_PARAM_E p)
+{
+    if ((int)p < 0 || (int)p >= (int)APP_CAM_PARAM_COUNT) {
+        return 0;
+    }
+    prv_param_ensure();
+    return sg_param_val[p];
+}
+
+int app_camera_param_min(APP_CAM_PARAM_E p)
+{
+    return ((int)p >= 0 && (int)p < (int)APP_CAM_PARAM_COUNT) ? sg_param_tab[p].min : 0;
+}
+
+int app_camera_param_max(APP_CAM_PARAM_E p)
+{
+    return ((int)p >= 0 && (int)p < (int)APP_CAM_PARAM_COUNT) ? sg_param_tab[p].max : 0;
+}
+
+const char *app_camera_param_name(APP_CAM_PARAM_E p)
+{
+    return ((int)p >= 0 && (int)p < (int)APP_CAM_PARAM_COUNT) ? sg_param_tab[p].name : "?";
+}
+
+BOOL_T app_camera_param_find(const char *name, APP_CAM_PARAM_E *out)
+{
+    if (NULL == name || NULL == out) {
+        return FALSE;
+    }
+    for (int i = 0; i < APP_CAM_PARAM_COUNT; i++) {
+        if (0 == strcmp(name, sg_param_tab[i].name)) {
+            *out = (APP_CAM_PARAM_E)i;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+OPERATE_RET app_camera_reg_write(uint8_t page, uint8_t reg, uint8_t val)
+{
+    return tdd_camera_gc2145_reg_write(page, reg, val);
+}
+
+OPERATE_RET app_camera_reg_read(uint8_t page, uint8_t reg, uint8_t *val)
+{
+    return tdd_camera_gc2145_reg_read(page, reg, val);
+}
+
+static void prv_param_apply_one(APP_CAM_PARAM_E p)
+{
+    const APP_CAM_PARAM_T *t = &sg_param_tab[p];
+    uint8_t                v = (uint8_t)sg_param_val[p];
+
+    (void)tdd_camera_gc2145_reg_write(t->page, t->reg, v);
+    if (0 != t->reg2) {
+        (void)tdd_camera_gc2145_reg_write(t->page, t->reg2, v);
+    }
+}
+
+void app_camera_param_apply(void)
+{
+    uint8_t y = 0;
+
+    prv_param_ensure();
+    for (int i = 0; i < APP_CAM_PARAM_COUNT; i++) {
+        prv_param_apply_one((APP_CAM_PARAM_E)i);
+    }
+    /* 页复位到 P0：驱动后续按自己的表写寄存器，别让它以为还在 P1/P2。 */
+    (void)tdd_camera_gc2145_reg_write(0, 0xfe, 0x00);
+
+    (void)tdd_camera_gc2145_reg_read(1, 0x14, &y);      /* AEC 当前帧平均亮度 */
+
+    PR_NOTICE(CAM_TAG " 画面参数：bright=%d contrast=%d sat=%d aec=%d（实测 Y=%u）",
+              sg_param_val[APP_CAM_PARAM_BRIGHTNESS],
+              sg_param_val[APP_CAM_PARAM_CONTRAST],
+              sg_param_val[APP_CAM_PARAM_SATURATION],
+              sg_param_val[APP_CAM_PARAM_AEC_TARGET], (unsigned)y);
+}
+
+void app_camera_param_set(APP_CAM_PARAM_E p, int val)
+{
+    if ((int)p < 0 || (int)p >= (int)APP_CAM_PARAM_COUNT) {
+        return;
+    }
+    prv_param_ensure();
+
+    sg_param_val[p] = prv_param_clamp(p, val);
+
+    /* 传感器初始化过一次之后，I2C 就一直可用（关流只停 DVP，不拆 I2C），
+     * 所以这里不看 sg_open —— 在设置页里调，下次开流立刻就是新的。 */
+    prv_param_apply_one(p);
+}
+
+void app_camera_param_reset(void)
+{
+    for (int i = 0; i < APP_CAM_PARAM_COUNT; i++) {
+        sg_param_val[i] = sg_param_tab[i].def;
+    }
+    sg_param_ready = TRUE;
+
+    app_camera_param_apply();
+    PR_NOTICE(CAM_TAG " 画面参数已恢复默认");
+}
+
+void app_camera_param_save(void)
+{
+    char buf[64];
+    int  n = 0;
+
+    prv_param_ensure();
+
+    buf[0] = '\0';
+    for (int i = 0; i < APP_CAM_PARAM_COUNT && n < (int)sizeof(buf); i++) {
+        n += snprintf(buf + n, sizeof(buf) - (size_t)n, "%s%s=%d",
+                      (0 == i) ? "" : ",", sg_param_tab[i].name, sg_param_val[i]);
+    }
+
+    if (OPRT_OK == app_settings_set_str(APP_SET_CAM_TUNE, buf)) {
+        PR_NOTICE(CAM_TAG " 画面参数已存：%s", buf);
+    } else {
+        PR_WARN(CAM_TAG " 画面参数存不进去");
+    }
+}
+
+static void prv_param_load(void)
+{
+    char        buf[64];
+    const char *s;
+
+    if (OPRT_OK != app_settings_get_str(APP_SET_CAM_TUNE, buf, sizeof(buf))) {
+        return;
+    }
+
+    s = buf;
+    while ('\0' != *s) {
+        char name[16];
+        int  n = 0;
+        int  val;
+
+        while ('\0' != *s && '=' != *s && ',' != *s && n < (int)sizeof(name) - 1) {
+            name[n++] = *s++;
+        }
+        name[n] = '\0';
+
+        if ('=' != *s) {
+            break;
+        }
+        s++;
+        {
+            char *end = NULL;
+            val = (int)strtol(s, &end, 0);          /* 十进制或 0x 都认 */
+            s = (NULL != end) ? end : (s + strlen(s));
+        }
+        while (',' == *s) {
+            s++;
+        }
+
+        if (n > 0) {
+            APP_CAM_PARAM_E p;
+
+            if (app_camera_param_find(name, &p)) {
+                sg_param_val[p] = prv_param_clamp(p, val);
+            }
+        }
+    }
+}
+
+/* ---- overlay：预览直接写进显示 framebuffer -------------------------------- */
+
+/* SDK 显示端口的 pre-flush 钩子（lv_port_disp_internal.h，应用不直接包含它）。 */
+typedef void (*APP_CAM_PRE_FLUSH_CB)(TDL_DISP_FRAME_BUFF_T *fb);
+extern void lv_port_set_pre_flush_cb(APP_CAM_PRE_FLUSH_CB cb);
+
+/* 缓存回写：CPU 直接写 fb 之后，必须把这段刷回 PSRAM，DMA/面板才能看到。 */
+extern void flush_dcache(void *va, long size);
+
+#define APP_CAM_OV_MAX  320
+
+static BOOL_T   sg_ov_on;
+static uint32_t sg_ov_drawn_gen;            /* 上一次画进 fb 的帧代数 */
+static int      sg_ov_ox, sg_ov_oy;         /* 逻辑原点对应的面板点 */
+static int      sg_ov_ax, sg_ov_ay;         /* 逻辑 +x 在面板上的单位步进 */
+static int      sg_ov_bx, sg_ov_by;         /* 逻辑 +y 在面板上的单位步进 */
+static int      sg_ov_w, sg_ov_h;           /* 逻辑尺寸 */
+static BOOL_T   sg_ov_paused;               /* 弹窗盖在取景框上时暂停合成 */
+static uint16_t sg_ov_mx[APP_CAM_OV_MAX];   /* 逻辑 x -> 预览 x */
+static uint16_t sg_ov_my[APP_CAM_OV_MAX];   /* 逻辑 y -> 预览 y */
+
+/** pre-flush 回调：跑在 LVGL 线程的 flush 里，只做内存拷贝，不碰 LVGL API。 */
+static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb)
+{
+    const uint16_t *src;
+    uint16_t       *dst;
+    int             front;
+    int             fw;
+    int             px0, px1, py0, py1;
+
+    if (!sg_ov_on || sg_ov_paused || NULL == fb || NULL == fb->frame) {
+        return;
+    }
+    if (sg_ov_drawn_gen == sg_gen) {
+        return;                             /* 没有新帧，别重复画 */
+    }
+    front = sg_front;
+    if (front < 0 || NULL == sg_buf[front]) {
+        return;
+    }
+    sg_ov_drawn_gen = sg_gen;
+    src = sg_buf[front];
+    dst = (uint16_t *)fb->frame;
+    fw  = (int)fb->width;
+
+    /* 面板包围盒：四个角点都映射一遍取 min/max。 */
+    {
+        int cx[4], cy[4];
+
+        cx[0] = sg_ov_ox;
+        cy[0] = sg_ov_oy;
+        cx[1] = sg_ov_ox + (sg_ov_w - 1) * sg_ov_ax;
+        cy[1] = sg_ov_oy + (sg_ov_w - 1) * sg_ov_ay;
+        cx[2] = sg_ov_ox + (sg_ov_h - 1) * sg_ov_bx;
+        cy[2] = sg_ov_oy + (sg_ov_h - 1) * sg_ov_by;
+        cx[3] = cx[1] + (sg_ov_h - 1) * sg_ov_bx;
+        cy[3] = cy[1] + (sg_ov_h - 1) * sg_ov_by;
+
+        px0 = px1 = cx[0];
+        py0 = py1 = cy[0];
+        for (int i = 1; i < 4; i++) {
+            if (cx[i] < px0) px0 = cx[i];
+            if (cx[i] > px1) px1 = cx[i];
+            if (cy[i] < py0) py0 = cy[i];
+            if (cy[i] > py1) py1 = cy[i];
+        }
+        if (px0 < 0) px0 = 0;
+        if (py0 < 0) py0 = 0;
+        if (px1 >= fw) px1 = fw - 1;
+        /* 面板高度由调用方保证；这里只钳 x。 */
+    }
+
+    /* 逐面板像素反查逻辑坐标：面板行连续写，源图是跨行读（可接受）。
+     *
+     * (ax,ay)/(bx,by) 是正交单位基，点积即反解。px 每 +1，lx/ly 就各走一个常量
+     * 步进，所以两个乘法提到行首算一次，内层只剩加法和比较。 */
+    for (int py = py0; py <= py1; py++) {
+        uint16_t *drow = dst + (size_t)py * fw + px0;
+        int       dx0  = px0 - sg_ov_ox;
+        int       dy   = py - sg_ov_oy;
+        int       lx   = dx0 * sg_ov_ax + dy * sg_ov_ay;
+        int       ly   = dx0 * sg_ov_bx + dy * sg_ov_by;
+
+        for (int px = px0; px <= px1; px++, lx += sg_ov_ax, ly += sg_ov_bx) {
+            if (lx >= 0 && lx < sg_ov_w && ly >= 0 && ly < sg_ov_h) {
+                drow[px - px0] = src[(size_t)sg_ov_my[ly] * APP_CAM_PREVIEW_W + sg_ov_mx[lx]];
+            }
+        }
+        /* 这一行已经写完整，刷回 PSRAM，供 DMA/面板读取。 */
+        flush_dcache(drow, (long)(px1 - px0 + 1) * 2);
+    }
+}
+
+BOOL_T app_camera_overlay_enable(int x, int y, int w, int h)
+{
+    lv_display_t *disp = lv_display_get_default();
+    lv_area_t     a, b, c;
+    int           src_w, src_h, x0, y0;
+
+    if (NULL == disp || w <= 0 || h <= 0 || w > APP_CAM_OV_MAX || h > APP_CAM_OV_MAX) {
+        return FALSE;
+    }
+    if (w < 2 || h < 2 || 0 == (w - 1) || 0 == (h - 1)) {
+        return FALSE;
+    }
+
+    /* 用 LVGL 自己的旋转把三个角点映射到面板坐标，避免手写 90° 公式。 */
+    a = (lv_area_t){ .x1 = x,         .y1 = y,         .x2 = x,         .y2 = y         };
+    b = (lv_area_t){ .x1 = x + w - 1, .y1 = y,         .x2 = x + w - 1, .y2 = y         };
+    c = (lv_area_t){ .x1 = x,         .y1 = y + h - 1, .x2 = x,         .y2 = y + h - 1 };
+    lv_display_rotate_area(disp, &a);
+    lv_display_rotate_area(disp, &b);
+    lv_display_rotate_area(disp, &c);
+
+    sg_ov_ox = a.x1;
+    sg_ov_oy = a.y1;
+    sg_ov_ax = (b.x1 - a.x1) / (w - 1);
+    sg_ov_ay = (b.y1 - a.y1) / (w - 1);
+    sg_ov_bx = (c.x1 - a.x1) / (h - 1);
+    sg_ov_by = (c.y1 - a.y1) / (h - 1);
+    sg_ov_w  = w;
+    sg_ov_h  = h;
+
+    /* cover 映射：逻辑矩形 -> 240×320 预览（比例不同就裁，不拉伸）。 */
+    src_w = APP_CAM_PREVIEW_W;
+    src_h = (int)((int64_t)src_w * h / w);
+    if (src_h > APP_CAM_PREVIEW_H) {
+        src_h = APP_CAM_PREVIEW_H;
+        src_w = (int)((int64_t)src_h * w / h);
+    }
+    if (src_w <= 0 || src_h <= 0) {
+        return FALSE;
+    }
+    x0 = (APP_CAM_PREVIEW_W - src_w) / 2;
+    y0 = (APP_CAM_PREVIEW_H - src_h) / 2;
+    for (int i = 0; i < w; i++) {
+        sg_ov_mx[i] = (uint16_t)(x0 + i * src_w / w);
+    }
+    for (int i = 0; i < h; i++) {
+        sg_ov_my[i] = (uint16_t)(y0 + i * src_h / h);
+    }
+
+    sg_ov_drawn_gen = sg_gen;
+    sg_ov_paused    = FALSE;
+    sg_ov_on        = TRUE;
+    lv_port_set_pre_flush_cb(prv_overlay_cb);
+
+    PR_NOTICE(CAM_TAG " overlay 已启用：逻辑 %d,%d %dx%d -> 面板 %d,%d 步进(%d,%d)/(%d,%d)",
+              x, y, w, h, sg_ov_ox, sg_ov_oy,
+              sg_ov_ax, sg_ov_ay, sg_ov_bx, sg_ov_by);
+    return TRUE;
+}
+
+void app_camera_overlay_pause(BOOL_T pause)
+{
+    if (!sg_ov_on) {
+        return;
+    }
+
+    pause = (TRUE == pause) ? TRUE : FALSE;
+    if (sg_ov_paused == pause) {
+        return;
+    }
+    sg_ov_paused = pause;
+
+    if (!pause) {
+        /* 恢复的第一拍：哪怕暂停期间没有新帧，也要补画一次，否则要等下一次
+         * 相机出帧（最长 100ms）才回来，中间那一片是空的。 */
+        sg_ov_drawn_gen = sg_gen - 1;
+    }
+}
+
+void app_camera_overlay_disable(void)
+{
+    if (!sg_ov_on) {
+        return;
+    }
+    sg_ov_on     = FALSE;
+    sg_ov_paused = FALSE;
+    lv_port_set_pre_flush_cb(NULL);
 }

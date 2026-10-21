@@ -57,12 +57,12 @@ tos.py flash -p COM19      # 端口按实际改
 
 ```
 /sdcard/sprite/fish_elf.spf        精灵（待机整组常驻 PSRAM）
-/sdcard/font/puhui14.bin           正文/工作字号（14px，全 GB2312 + ASCII）
-/sdcard/font/puhui18.bin           正文（18px，全 GB2312 + ASCII）
-/sdcard/font/puhui16.bin           卡片标题（16px，子集即可）
-/sdcard/font/puhui20.bin           页面标题（20px，子集即可）
-/sdcard/font/puhui24.bin           大标题（24px，子集即可，可选）
-/sdcard/font/puhui32.bin           卡片大数字（32px，子集即可）
+/sdcard/font/puhui14.bin           正文/工作字号（14px，全 GB2312）
+/sdcard/font/puhui18.bin           正文（18px，全 GB2312）
+/sdcard/font/puhui16.bin           卡片标题（16px，全 GB2312）
+/sdcard/font/puhui20.bin           页面标题（20px，全 GB2312）
+/sdcard/font/puhui24.bin           大标题（24px，全 GB2312）
+/sdcard/font/puhui32.bin           卡片大数字（32px，全 GB2312）
 /sdcard/weather/<code>.bin         天气图标，code = 0..38 / 99（WXI1 格式）
 ```
 
@@ -71,10 +71,17 @@ tos.py flash -p COM19      # 端口按实际改
 `app_font_load_sync()`。
 
 **puhui 六档是新界面（`src/ui/`）的字体**，全部从 SD 加载（demo 把它们编进
-固件，合计 7.5MB，放不下）。14/18 要**全 GB2312 + ASCII**（用户/模型带来的文本
-都会用到）；16/20/24/32 是界面自己写死的字，子集码点见
-`tools/puhui_subset.txt`。缺哪份就退到内置字体（14/16/18 用 16px，20/24/32 用
-21px），界面不崩、只是字号不对。
+固件，合计 7.5MB，放不下）。**六档都是全 GB2312**（7540 个码点：符号区 +
+6763 个汉字 + ASCII）—— 界面里的字有一部分是运行时才出现的（天气描述、城市名、
+AI 回复、用户写的备忘录），静态子集永远会缺字，缺字就渲染成空白。
+
+**字形位图不占 PSRAM**：`app_font.c` 只把索引（cmap + 字形描述）读进来，位图
+按需从卡上读、读过的进 24 行缓存（一份字库约 15KB）。六档全集的索引约 850KB，
+比之前"14/18 全量 + 其余子集"的 1274KB 还少。
+
+改字库：`python tools/gen_font_sd.py`（要 node + `npm install lv_font_conv`），
+产物在 `third_party/font/sdcard_font/`，拷到卡上同名覆盖。**换文案不需要重新
+生成** —— 全集已经有了。
 
 天气图标是 8 字节头（`WXI1` + 宽 + 高）+ RGB565 平面 + A8 平面的 48x48 数据，
 见 `app_weather_icon.h`。顶栏里会把它**重着色成暗色单色**，详情弹窗里用原彩色。

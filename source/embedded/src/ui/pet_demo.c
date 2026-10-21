@@ -23,7 +23,7 @@ static PET_SHOT_T sg_shots[PET_SHOT_MAX];
 static uint32_t   sg_shot_count;
 
 static PET_CAMERA_MODE_E sg_mode = PET_MODE_SELFIE;
-static PET_POS_E         sg_pos  = PET_POS_CENTER;
+static PET_POS_E         sg_pos  = PET_POS_RIGHT;
 
 static int sg_settings[PET_SETTING_MAX];
 static int sg_remind_day  = 15;
@@ -53,10 +53,10 @@ static const char *const sg_mode_names[PET_MODE_MAX] = {
 };
 
 static const char *const sg_setting_names[PET_SETTING_MAX] = {
-    "动画速度", "宠物音量", "自动提取待办", "拍照倒计时", "拍照&AI识别", "OCR识别功能", "照片质量", "亮度",
+    "动画速度", "宠物音量", "自动提取待办", "拍照倒计时", "角色合影", "OCR识别功能", "照片质量", "亮度",
 };
 
-static const char *const sg_pos_names[PET_POS_MAX] = {"左侧", "居中", "右侧"};
+static const char *const sg_pos_names[PET_POS_MAX] = {"左侧", "右侧"};
 
 /***********************************************************
 ********************function define**************************
@@ -146,9 +146,9 @@ static void __seed_settings(void)
     sg_settings[PET_SET_VOLUME]     = 50;
     sg_settings[PET_SET_AUTO_TODO]  = 1;
     sg_settings[PET_SET_SHOT_TIMER] = 3;
-    sg_settings[PET_SET_SHOT_AI]    = 50;
+    sg_settings[PET_SET_COMPOSE]    = 1;
     sg_settings[PET_SET_OCR]        = 1;
-    sg_settings[PET_SET_QUALITY]    = 70;
+    sg_settings[PET_SET_QUALITY]    = 1;
     sg_settings[PET_SET_BRIGHTNESS] = 80;
 }
 
@@ -159,7 +159,7 @@ void pet_demo_init(void)
     __seed_settings();
 
     sg_mode        = PET_MODE_SELFIE;
-    sg_pos         = PET_POS_CENTER;
+    sg_pos         = PET_POS_RIGHT;
     sg_remind_day  = 15;
     sg_remind_hour = 19;
     sg_remind_min  = 0;
@@ -362,12 +362,17 @@ int pet_demo_setting_max(PET_SETTING_E id)
         return 10;
     }
 
+    /* 照片质量只有两档：0 标准（16 位 BMP）/ 1 高清（24 位 BMP）。 */
+    if (id == PET_SET_QUALITY) {
+        return 1;
+    }
+
     return 100;
 }
 
 BOOL_T pet_demo_setting_is_toggle(PET_SETTING_E id)
 {
-    return (id == PET_SET_AUTO_TODO || id == PET_SET_OCR) ? TRUE : FALSE;
+    return (id == PET_SET_AUTO_TODO || id == PET_SET_OCR || id == PET_SET_COMPOSE) ? TRUE : FALSE;
 }
 
 int pet_demo_setting_get(PET_SETTING_E id)
@@ -434,7 +439,7 @@ void pet_demo_pos_next(void)
 const char *pet_demo_pos_name(PET_POS_E pos)
 {
     if (pos >= PET_POS_MAX) {
-        pos = PET_POS_CENTER;
+        pos = PET_POS_RIGHT;
     }
 
     return sg_pos_names[pos];

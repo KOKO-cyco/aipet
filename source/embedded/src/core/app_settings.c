@@ -36,6 +36,7 @@ static const APP_SET_DESC_T sg_desc[APP_SET_COUNT] = {
     /* TIMEZONE  */ { "tz",      APP_SET_TYPE_INT, NULL,   8, -12,  14 },
     /* CITY      */ { "city",    APP_SET_TYPE_STR, "",     0,   0,   0 },
     /* WEATHER...*/ { "wkey",    APP_SET_TYPE_STR, "",     0,   0,   0 },
+    /* CAM_TUNE  */ { "camtune", APP_SET_TYPE_STR, "",     0,   0,   0 },
 };
 
 /* 顺序必须与 APP_SET_ID_E 一一对应。这条 typedef 是编译期断言：

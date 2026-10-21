@@ -239,9 +239,15 @@ lv_obj_t *pet_widget_switch_row(lv_obj_t *parent, const char *label, BOOL_T on)
     lv_obj_set_style_anim_duration(sw, PET_SWITCH_MS, LV_PART_MAIN);
     lv_obj_set_style_bg_color(sw, PET_COLOR_NEUTRAL, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, LV_PART_MAIN);
-    /* INDICATOR is the part that fills in when checked. */
-    lv_obj_set_style_bg_color(sw, PET_COLOR_ACCENT, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, LV_PART_INDICATOR);
+    /* INDICATOR is the part that fills in when checked.
+     *
+     * **开和关的颜色必须分开写。** 主题给 INDICATOR 的 CHECKED 状态配了主色，但
+     * 对象自己的样式优先级高于主题样式 —— 只写一条默认态的 `bg_opa = COVER` +
+     * `bg_color = ACCENT`，那条默认态就会把主题的 CHECKED 样式整个压掉，开关
+     * 开和关都是同一块蓝，只剩滑块在动。 */
+    lv_obj_set_style_bg_opa(sw, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(sw, PET_COLOR_ACCENT, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_set_style_bg_color(sw, PET_COLOR_TEXT, LV_PART_KNOB);
     lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, LV_PART_KNOB);
 

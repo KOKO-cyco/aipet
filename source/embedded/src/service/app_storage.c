@@ -59,6 +59,19 @@ static uint32_t       sg_damaged_ms = 0;    /* 最近一次判死的时刻（退
  * 不碰它（卡没换，内容就没变）。"还没扫过"在各模块那边用 0 表示，所以这里从 1 起。 */
 static uint32_t       sg_gen        = 1;
 
+/* 两次链路重建之间至少隔这么久。
+ *
+ * 重建要 unmount + 重新起卡（150ms 起），期间所有句柄作废。读坏如果是"偶发"的，
+ * 重建根本救不回来 —— 但每个读者都会各自触发一次，于是 A 的重建让 B 读坏、B 的
+ * 重建又让 A 读坏，滚成一整屏的"重建 SD 链路"，最后卡都起不来（实测还会触发
+ * FreeRTOS 断言重启）。限制频率是最直接的一道闸：真要坏了，慢一点重建也不会
+ * 更坏；只是偶发读错，等下一次重建的窗口里读往往就自己好了。 */
+#define STORAGE_RECOVER_MIN_MS   3000u
+static uint32_t sg_recover_ms = 0;
+
+/* 链路代次（见 app_storage.h）。**每次重挂都 +1**：切读写档、链路重建都算。
+ * 常开的读者（精灵 spf、字库 bin）读之前比一下，变了就先重开自己的文件。 */
+static volatile uint32_t sg_media_gen = 1;
 /* 预热标志（见 app_storage.h）。跟 sg_fault 是两回事：链路重建成功 ≠ 预热完了。 */
 static BOOL_T         sg_warming    = FALSE;
 
@@ -179,6 +192,7 @@ static BOOL_T prv_try_lines(int lines)
     }
 
     sg_mounted = TRUE;
+    sg_media_gen++;                 /* 重挂过了：所有已打开的句柄作废 */
     return TRUE;
 }
 
@@ -567,6 +581,11 @@ uint32_t app_storage_gen(void)
     return sg_gen;
 }
 
+uint32_t app_storage_media_gen(void)
+{
+    return sg_media_gen;
+}
+
 BOOL_T app_storage_warming(void)
 {
     return sg_warming;
@@ -766,6 +785,7 @@ static OPERATE_RET prv_remount(void)
     }
 
     (void)tkl_fs_mount(APP_STORAGE_MOUNT, DEV_SDCARD);
+    sg_media_gen++;                 /* 重挂过了：所有已打开的句柄作废 */
     return OPRT_OK;
 }
 
@@ -834,12 +854,24 @@ static OPERATE_RET prv_recover_locked(void)
 OPERATE_RET app_storage_recover(void)
 {
     OPERATE_RET rt;
+    uint32_t    now = tal_system_get_millisecond();
+
+    /* 频率闸：上一次重建还没过多久就再来一次，直接拒。
+     *
+     * 重建期间所有句柄作废，读者会跟着读坏、跟着再触发重建 —— 两个读者互相
+     * 踢起来就是死循环（实测整屏都是"重建 SD 链路"，最后卡都起不来）。
+     * 偶发读错靠重建是治不好的，等下一个窗口往往自己就好了。 */
+    if (sg_recover_ms != 0 && (now - sg_recover_ms) < STORAGE_RECOVER_MIN_MS) {
+        PR_DEBUG("[sto] 距上次重建 %u ms，跳过", (unsigned)(now - sg_recover_ms));
+        return OPRT_COM_ERROR;
+    }
 
     /* **等所有目录扫描跑完再动卷。** 重建会把整个卷 unmount 掉，扫描读到一半卷
      * 就没了 —— 真机上见过预热枚举 NES 目录时被重建打断，只扫出 6 个游戏。
      *
      * 等的是"秒级"的量（预热那一轮扫描），而重建本来就动辄一两秒，代价可以接受。 */
     app_storage_busy_enter();
+    sg_recover_ms = tal_system_get_millisecond();
     rt = prv_recover_locked();
     app_storage_busy_leave();
     return rt;

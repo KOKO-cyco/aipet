@@ -83,6 +83,22 @@ BOOL_T spf6_read_at(SPF6_FILE_T *pf, uint32_t off, uint32_t len, void *buf)
      * 正是叠在预取读卡上发生的。锁不可重入，本函数内部不再套第二层。 */
     app_storage_busy_enter();
 
+    /* 链路被重挂过（切读写档 / 重建）：句柄已经作废，先按路径重开再读。
+     * 不做这一步的话，重挂之后这一批必然读坏，攒够 6 批就去重建链路 ——
+     * 而重建又会作废别人的句柄，两个读者互相踢成一场风暴。 */
+    if (pf->media_gen != app_storage_media_gen()) {
+        if (NULL != pf->f) {
+            tkl_fclose(pf->f);
+            pf->f = NULL;
+        }
+        pf->f = tkl_fopen(pf->path, "rb");
+        if (NULL == pf->f) {
+            app_storage_busy_leave();
+            return FALSE;
+        }
+        pf->media_gen = app_storage_media_gen();
+    }
+
     if (tkl_fseek(pf->f, (int64_t)off, SEEK_SET) != 0) {
         app_storage_busy_leave();
         return FALSE;
@@ -219,6 +235,8 @@ OPERATE_RET spf6_open(SPF6_FILE_T *pf, const char *path, uint16_t max_w, uint16_
         PR_WARN("[spf6] 打不开 %s", path);
         return OPRT_NOT_FOUND;
     }
+    snprintf(pf->path, sizeof(pf->path), "%s", path);
+    pf->media_gen = app_storage_media_gen();
 
     /* 之后任何一条失败路径都走 spf6_close(pf) —— 它把句柄和表一起收干净，
      * 所以调用方拿到的永远是"要么全好、要么全空"。 */

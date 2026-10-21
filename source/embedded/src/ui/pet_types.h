@@ -77,30 +77,31 @@ typedef uint8_t PET_CAMERA_MODE_E;
 #define PET_MODE_MAX      4
 
 /**
- * @brief The settings page's rows. The first PET_SET_TOGGLE_FIRST entries are
- *        on/off switches and the rest are 0..100 sliders, so a caller can pick a
- *        widget from the index alone.
+ * @brief The settings page's rows. Whether a row is a switch, a slider or a cycling
+ *        choice is decided by the page (see pet_page_settings.c), not by the index.
  */
 typedef uint8_t PET_SETTING_E;
 #define PET_SET_ANIM_SPEED 0 /* 动画速度 */
 #define PET_SET_VOLUME     1 /* 宠物音量 */
 #define PET_SET_AUTO_TODO  2 /* 自动提取待办 */
-#define PET_SET_SHOT_TIMER 3 /* 拍照倒计时 */
-#define PET_SET_SHOT_AI    4 /* 拍照&AI识别 */
+#define PET_SET_SHOT_TIMER 3 /* 拍照倒计时（秒，0 = 关） */
+#define PET_SET_COMPOSE    4 /* 角色合影（拍进照片） */
 #define PET_SET_OCR        5 /* OCR识别功能 */
-#define PET_SET_QUALITY    6 /* 照片质量 */
+#define PET_SET_QUALITY    6 /* 照片质量（0 标准 / 1 高清） */
 #define PET_SET_BRIGHTNESS 7 /* 亮度 */
 #define PET_SETTING_MAX    8
 
 /**
  * @brief Where the pet stands in a composite photo. A cycling choice rather than a
  *        slider, so it gets its own enum instead of a PET_SETTING_E slot.
+ *
+ * 只有左右：合影的角色图是一张立绘，居中会把照片里的人挡在正中间，实际没有
+ * 人这么构图。
  */
 typedef uint8_t PET_POS_E;
-#define PET_POS_LEFT   0 /* 左侧 */
-#define PET_POS_CENTER 1 /* 居中 */
-#define PET_POS_RIGHT  2 /* 右侧 */
-#define PET_POS_MAX    3
+#define PET_POS_LEFT  0 /* 左侧 */
+#define PET_POS_RIGHT 1 /* 右侧 */
+#define PET_POS_MAX   2
 
 #ifdef __cplusplus
 }

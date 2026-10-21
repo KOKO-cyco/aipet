@@ -93,20 +93,63 @@ typedef struct {
     uint8_t  padding;
 } APP_FONT_CMAP_BIN_T;
 
-/** 一份从 SD 卡加载出来的字库。font/dsc 是静态的，大块指到 PSRAM。 */
+/** 单字形位图字节上限：实测 32px 最大的一笔是 33×33 × 4bpp = 545 字节，留点余量。 */
+#define APP_FONT_GLYPH_MAX   640
+
+/**
+ * @brief 字形缓存行数（**六份字库共用**）。
+ *
+ * 原来每份字库各 24 行，实测不够：一屏 14px 的字就有几十个，24 行会来回踢，
+ * 于是每一帧都在读卡 —— `[pet] 刷新` 从 30ms 涨到 50ms 就是这么来的。
+ * 改成六份共用一张 256 行的表：14px 用得最多，就该多占几行，而不是被平均分。
+ * 内存 256 × 645B ≈ 165KB，比"每份 24 行 × 6"只多 70KB。
+ */
+#define APP_FONT_CACHE_N     256
+
+/** 一行缓存：字形号 + 字节数 + 原始位流（**不展开**，展开成 A8 是每次画的时候
+ *  现做 —— 展开很便宜，省下的是 8 倍的内存）。 */
+typedef struct {
+    uint8_t  font;      /* 哪份字库（s_fpx 下标 + 1）；0 = 空行 */
+    uint16_t gid;
+    uint16_t len;
+    uint8_t  data[APP_FONT_GLYPH_MAX];
+} APP_FONT_CACHE_LINE_T;
+
+/**
+ * @brief 一份从 SD 卡加载出来的字库。
+ *
+ * **字形位图不进 PSRAM**：GB2312 全集 × 6 个字号 ≈ 5MB，全装进来放不下，所以只把
+ * "索引"（cmap + 字形描述）留在 PSRAM，位图按需从卡上读、读过的进 `cache`。
+ * 描述符里的 `bitmap_index` 因此改存**文件里的绝对偏移**（不是内存偏移）。
+ */
 typedef struct {
     lv_font_t                     font;
-    lv_font_fmt_txt_dsc_t         dsc;
     lv_font_fmt_txt_cmap_t       *cmaps;      /* PSRAM：子表数组本体 */
     lv_font_fmt_txt_glyph_dsc_t  *glyphs;     /* PSRAM：字形描述数组 */
-    uint8_t                      *bmp;        /* PSRAM：重排后的字形位图 */
-    uint32_t                      bmp_bytes;
     uint32_t                      glyph_cnt;
     uint32_t                      cmap_num;
     uint32_t                      psram_bytes;
+    uint8_t                       bpp;
+    uint8_t                       desc_bits;    /* 每个字形描述符占多少位（位图紧跟在后面，
+                                                 * **不是字节对齐的**） */
     int                           px;
     BOOL_T                        ok;
+
+    /* 按需读字形：文件一直开着，读的时候 seek 过去 */
+    TUYA_FILE                     fp;
+    char                          path[48];   /* 重开用（SD 切档/重建会作废句柄）*/
+    uint8_t                       idx;        /* 在 s_fpx[] 里的下标（缓存行的键）*/
+    uint32_t                      media_gen;  /* 打开/上次重开时的链路代次 */
+    uint16_t                      cache_next; /* 轮转指针（简单的近似 LRU） */
+    uint32_t                      last_letter;/* 最近一次查过的字，cmap 查表缓存 */
+    uint32_t                      last_gid;
 } APP_SDFONT_T;
+
+/* 六份字库共用的一张字形缓存（见 APP_FONT_CACHE_N 的说明）。 */
+static APP_FONT_CACHE_LINE_T *s_cache;
+static uint16_t               s_cache_next;
+static uint32_t               s_cache_hit;
+static uint32_t               s_cache_miss;
 
 /* 代理字体：地址恒定，UI 的 style 里存的就是它们的地址 */
 static lv_font_t    s_proxy16;
@@ -274,13 +317,14 @@ static void prv_slot_free(APP_SDFONT_T *f)
         tal_psram_free(f->glyphs);
         f->glyphs = NULL;
     }
-    if (NULL != f->bmp) {
-        tal_psram_free(f->bmp);
-        f->bmp = NULL;
+    if (NULL != f->fp) {
+        tkl_fclose(f->fp);
+        f->fp = NULL;
     }
     f->cmap_num    = 0;
-    f->bmp_bytes   = 0;
     f->psram_bytes = 0;
+    f->last_letter = 0;
+    f->last_gid    = 0;
     f->ok          = FALSE;
 }
 
@@ -466,7 +510,7 @@ static BOOL_T prv_load_glyf(APP_FONT_CUR_T *c, APP_SDFONT_T *f,
         }
     }
 
-    /* ---- 第一遍：展开描述符，顺便累加位图总长 ---- */
+    /* ---- 第一遍：展开描述符，顺便累加位图总长（只用于日志） ---- */
     nbits = (uint32_t)h->advance_width_bits + 2u * (uint32_t)h->xy_bits
             + 2u * (uint32_t)h->wh_bits;
     /* 描述符在文件里占几个**整字节**：lv_font_conv 把 [描述符][位图] 当一个连续
@@ -519,38 +563,320 @@ static BOOL_T prv_load_glyf(APP_FONT_CUR_T *c, APP_SDFONT_T *f,
         next = (i + 1 < loca_count) ? ofs[i + 1] : glyph_len;
         size = (next > ofs[i] + desc_bytes) ? (next - ofs[i] - desc_bytes) : 0;
 
-        g->bitmap_index = total;
         if (0 != g->box_w * g->box_h) {
             total += size;
         }
     }
 
-    /* ---- 第二遍：把错位位流重排成连续位图 ---- */
-    f->bmp = (uint8_t *)tal_psram_malloc(total);
-    if (NULL == f->bmp) {
-        PR_ERR("[font] 位图区分配失败（%u 字节）", (unsigned)total);
-        tal_psram_free(ofs);
-        return FALSE;
-    }
-    f->bmp_bytes   = total;
-    f->psram_bytes += total;
-
+    /* ---- 第二遍：不再把位图搬进 PSRAM，只记下每个字形在文件里的位置 ----
+     *
+     * 以前这里会分配 total（GB2312 全集下 0.7~1.4MB）并把错位位流重排进去。
+     * 现在 `bitmap_index` 存**字形在文件里的起始偏移**，画的时候按需 seek+read
+     * （见 prv_glyph_bits），一份字库只多占 24 行的缓存（约 14KB）。
+     *
+     * 位图从描述符后面紧接着开始，而描述符是 nbits 位（实测 23 位）—— **不是
+     * 字节对齐的**，所以读回来之后还得按位拼一次。 */
+    f->desc_bits = (uint8_t)nbits;
     for (i = 1; i < loca_count; i++) {
-        uint32_t next, size;
-
-        if (0 == f->glyphs[i].box_w * f->glyphs[i].box_h) {
-            continue;
-        }
-        next = (i + 1 < loca_count) ? ofs[i + 1] : glyph_len;
-        size = (next > ofs[i] + desc_bytes) ? (next - ofs[i] - desc_bytes) : 0;
-
-        prv_bits_to_bytes(c->blob, c->size,
-                          (glyph_start + ofs[i]) * 8u + nbits,
-                          f->bmp + f->glyphs[i].bitmap_index, size);
+        f->glyphs[i].bitmap_index = glyph_start + ofs[i];
     }
+
+    PR_DEBUG("[font] 字形 %u 个，位图共 %uKB（留在卡上，按需读）",
+             (unsigned)loca_count, (unsigned)(total / 1024u));
 
     tal_psram_free(ofs);
     return TRUE;
+}
+
+/*****************************************************************************
+ * 字形查表 + 按需读位图
+ *
+ * LVGL 只要求两个回调：get_glyph_dsc（量尺寸）和 get_glyph_bitmap（拿位图）。
+ * 前者查 PSRAM 里的 cmap + 描述数组，后者才去卡上读那几十~几百字节。
+ ****************************************************************************/
+
+/** 没有缓存行可用时的临时缓冲（一份字库 24 行缓存用完的情况），以及读卡的原始
+ *  字节缓冲（按位拼接时 src/dst 不能是同一块）。 */
+static uint8_t s_glyph_scratch[APP_FONT_GLYPH_MAX];
+static uint8_t s_glyph_raw[APP_FONT_GLYPH_MAX + 1];
+
+/** 在 unicode_list 里二分（列表升序）。返回下标，找不到 -1。 */
+static int prv_ulist_find(const uint16_t *list, uint16_t n, uint16_t key)
+{
+    int lo = 0;
+    int hi = (int)n - 1;
+
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+
+        if (list[mid] == key) {
+            return mid;
+        }
+        if (list[mid] < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return -1;
+}
+
+/** 码点 -> 字形号（0 = 没有）。四种 cmap 格式的处理和 LVGL 内置的一样。 */
+static uint32_t prv_gid(APP_SDFONT_T *f, uint32_t letter)
+{
+    if (0 == letter) {
+        return 0;
+    }
+    if (letter == f->last_letter) {
+        return f->last_gid;
+    }
+
+    for (uint32_t i = 0; i < f->cmap_num; i++) {
+        const lv_font_fmt_txt_cmap_t *cm = &f->cmaps[i];
+        uint32_t gid = 0;
+        uint32_t rcp;
+
+        if (letter < cm->range_start) {
+            continue;
+        }
+        rcp = letter - cm->range_start;
+        if (rcp >= cm->range_length) {
+            continue;
+        }
+
+        switch (cm->type) {
+        case LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY:
+            gid = cm->glyph_id_start + rcp;
+            break;
+        case LV_FONT_FMT_TXT_CMAP_FORMAT0_FULL:
+            /* **只加表里的偏移，不要再加 rcp。** `glyph_id_ofs_list[rcp]` 里存的
+             * 已经是相对 glyph_id_start 的字形号了；多加一个 rcp 会让字形整体
+             * 往后偏 —— 实测「设」显示成「诞」、「今」显示成「傻」，就是这个。 */
+            gid = cm->glyph_id_start + ((const uint8_t *)cm->glyph_id_ofs_list)[rcp];
+            break;
+        case LV_FONT_FMT_TXT_CMAP_SPARSE_TINY: {
+            int k = prv_ulist_find(cm->unicode_list, cm->list_length, (uint16_t)rcp);
+
+            if (k >= 0) {
+                gid = cm->glyph_id_start + (uint32_t)k;
+            }
+            break;
+        }
+        case LV_FONT_FMT_TXT_CMAP_SPARSE_FULL: {
+            int k = prv_ulist_find(cm->unicode_list, cm->list_length, (uint16_t)rcp);
+
+            if (k >= 0) {
+                gid = cm->glyph_id_start + ((const uint16_t *)cm->glyph_id_ofs_list)[k];
+            }
+            break;
+        }
+        default:
+            break;
+        }
+
+        if (0 != gid) {
+            f->last_letter = letter;
+            f->last_gid    = gid;
+            return gid;
+        }
+    }
+
+    return 0;
+}
+
+/** 重开字库文件。
+ *
+ *  为什么需要：SD 卡每次切线宽（存照片时切 1 线写）、以及链路重建，都会
+ *  unmount/remount，**所有已经打开的句柄一起作废**。精灵那边有同样的处理
+ *  （`app_storage_recover_reopen`），字库这里也得跟上，否则存完第一张照片之后
+ *  新出现的字就全是空白。 */
+static BOOL_T prv_font_reopen(APP_SDFONT_T *f)
+{
+    if (NULL != f->fp) {
+        tkl_fclose(f->fp);
+        f->fp = NULL;
+    }
+
+    /* **只试一次，不在这里等、也不在这里重建链路。**
+     *
+     * 这个函数跑在 LVGL 线程里（画字的那一刻），等 80ms 会把整个界面卡住。
+     * 链路重挂之后卡是挂着的，直接 fopen 一般就成；不成就是这一帧的字不画，
+     * 下一帧再来 —— 大不了晚 16ms 出现，比卡住强。 */
+    f->fp = tkl_fopen(f->path, "rb");
+    if (NULL != f->fp) {
+        f->media_gen = app_storage_media_gen();
+    }
+    return (NULL != f->fp) ? TRUE : FALSE;
+}
+
+/** 取一个字形对应的原始位流：先查缓存，没有再读卡。
+ *
+ *  位图在文件里紧跟在描述符后面、**不按字节对齐**（描述符 23 位），所以读的时候
+ *  要从 `字形偏移 + 描述符字节数` 起多读一个字节，再按位拼成 n 个字节。 */
+static const uint8_t *prv_glyph_bits(APP_SDFONT_T *f, uint32_t gid, uint32_t n)
+{
+    APP_FONT_CACHE_LINE_T *line = NULL;
+    const lv_font_fmt_txt_glyph_dsc_t *g;
+    uint8_t               *dst;
+    uint32_t               byte_ofs, sh, need;
+    int32_t                rd;
+
+    if (0 == n || n > APP_FONT_GLYPH_MAX || gid >= f->glyph_cnt) {
+        return NULL;
+    }
+
+    if (NULL != s_cache) {
+        const uint8_t fk = (uint8_t)(f->idx + 1u);
+
+        for (uint32_t i = 0; i < APP_FONT_CACHE_N; i++) {
+            if (s_cache[i].font == fk && s_cache[i].gid == gid && s_cache[i].len == n) {
+                s_cache_hit++;
+                return s_cache[i].data;
+            }
+        }
+        s_cache_miss++;
+        if (0 == (s_cache_miss & 0x3Fu)) {
+            PR_DEBUG("[font] 字形缓存：命中 %u 缺失 %u（%u 行）",
+                     (unsigned)s_cache_hit, (unsigned)s_cache_miss,
+                     (unsigned)APP_FONT_CACHE_N);
+        }
+        line = &s_cache[s_cache_next];
+        s_cache_next = (uint16_t)((s_cache_next + 1) % APP_FONT_CACHE_N);
+    }
+
+    g        = &f->glyphs[gid];
+    sh       = f->desc_bits & 7u;
+    byte_ofs = g->bitmap_index + (f->desc_bits >> 3);
+    need     = n + ((0 != sh) ? 1u : 0u);
+    if (need > APP_FONT_GLYPH_MAX + 1u) {
+        return NULL;
+    }
+
+    /* 链路重挂过（切读写档 / 重建）：句柄已作废，先重开再读。
+     * 这一步让"存完照片读不到字"在下一个字上就恢复，不用等重建。 */
+    if (f->media_gen != app_storage_media_gen() && !prv_font_reopen(f)) {
+        return NULL;
+    }
+
+    if (0 != tkl_fseek(f->fp, (int32_t)byte_ofs, SEEK_SET)) {
+        rd = -1;
+    } else {
+        rd = tkl_fread(s_glyph_raw, (int32_t)need, f->fp);
+    }
+    if ((int32_t)need != rd) {
+        /* 句柄多半被重挂作废了：重开一次再试；还不行就放弃这一帧。 */
+        if (!prv_font_reopen(f) || 0 != tkl_fseek(f->fp, (int32_t)byte_ofs, SEEK_SET) ||
+            (int32_t)need != tkl_fread(s_glyph_raw, (int32_t)need, f->fp)) {
+            PR_WARN("[font] 读字形 %u 失败（偏移 %u，%u 字节）",
+                    (unsigned)gid, (unsigned)byte_ofs, (unsigned)need);
+            return NULL;
+        }
+    }
+
+    dst = (NULL != line) ? line->data : s_glyph_scratch;
+    prv_bits_to_bytes(s_glyph_raw, need, sh, dst, n);
+
+    if (NULL != line) {
+        line->font = (uint8_t)(f->idx + 1u);
+        line->gid  = (uint16_t)gid;
+        line->len  = (uint16_t)n;
+    }
+
+    return dst;
+}
+
+/** 把位流按 bpp 展开成 LVGL 要的 A8。 */
+static void prv_unpack(const uint8_t *src, uint32_t n, uint8_t bpp,
+                       uint8_t *dst, int w, int h, uint32_t stride)
+{
+    const uint32_t mask = (1u << bpp) - 1u;
+    uint32_t       bit  = 0;
+
+    for (int y = 0; y < h; y++) {
+        uint8_t *row = dst + (size_t)y * stride;
+
+        for (int x = 0; x < w; x++, bit += bpp) {
+            uint32_t byte = bit >> 3;
+            uint32_t sh   = 8u - (uint32_t)bpp - (bit & 7u);
+            uint32_t v    = (byte < n) ? ((src[byte] >> sh) & mask) : 0;
+
+            row[x] = (uint8_t)(v * 255u / mask);
+        }
+    }
+}
+
+static bool prv_font_get_glyph_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *out,
+                                   uint32_t letter, uint32_t letter_next)
+{
+    APP_SDFONT_T *f = (APP_SDFONT_T *)font->dsc;
+    const lv_font_fmt_txt_glyph_dsc_t *g;
+    uint32_t gid;
+
+    (void)letter_next;
+
+    if (NULL == f || !f->ok) {
+        return false;
+    }
+    if ('\t' == letter) {
+        letter = ' ';
+    }
+
+    gid = prv_gid(f, letter);
+    if (0 == gid || gid >= f->glyph_cnt) {
+        return false;
+    }
+
+    g = &f->glyphs[gid];
+    out->adv_w  = (uint16_t)((g->adv_w + 8u) >> 4);   /* 28.4 -> 整数 */
+    out->box_w  = g->box_w;
+    out->box_h  = g->box_h;
+    out->ofs_x  = g->ofs_x;
+    out->ofs_y  = g->ofs_y;
+    out->format = LV_FONT_GLYPH_FORMAT_A8;             /* 我们自己展开成 A8 */
+    out->is_placeholder = false;
+    out->glyph_index    = gid;                         /* 位图回调靠它定位 */
+    return true;
+}
+
+static const void *prv_font_get_glyph_bitmap(lv_font_glyph_dsc_t *g_dsc, uint32_t letter,
+                                             lv_draw_buf_t *draw_buf)
+{
+    const lv_font_fmt_txt_glyph_dsc_t *g;
+    const uint8_t *bits;
+    APP_SDFONT_T  *f;
+    uint32_t       n;
+
+    (void)letter;
+
+    if (NULL == g_dsc || NULL == g_dsc->resolved_font || NULL == draw_buf) {
+        return NULL;
+    }
+    f = (APP_SDFONT_T *)g_dsc->resolved_font->dsc;
+    if (NULL == f || g_dsc->glyph_index >= f->glyph_cnt) {
+        return NULL;
+    }
+
+    g = &f->glyphs[g_dsc->glyph_index];
+    n = ((uint32_t)g->box_w * (uint32_t)g->box_h * f->bpp + 7u) / 8u;
+    if (0 == n) {
+        return NULL;
+    }
+
+    bits = prv_glyph_bits(f, g_dsc->glyph_index, n);
+    if (NULL == bits) {
+        return NULL;
+    }
+
+    /* 行距用 **LVGL 给的这个缓冲自己的 stride**：它是按 LV_STRIDE_AUTO 建的，
+     * 不一定等于"宽度 × 1 字节"，自己算一个就会写歪。 */
+    prv_unpack(bits, n, f->bpp, (uint8_t *)draw_buf->data,
+               (int)g->box_w, (int)g->box_h, draw_buf->header.stride);
+
+    /* **返回 draw_buf 本身，不是 draw_buf->data。** 调用方
+     * （lv_draw_sw_letter.c 的 draw_letter_cb）拿它当 `lv_draw_buf_t *`，
+     * 自己再取 `->data` 和 `->header.stride`；返回 data 的话它会去解引用那块
+     * 像素内存，直接踩到野地址（实测 MemFault @0x44bb）。 */
+    return draw_buf;
 }
 
 /** 读整个文件 -> 解析 -> 释放 blob。成功时 f->ok 置位。 */
@@ -603,11 +929,11 @@ static OPERATE_RET prv_load(APP_SDFONT_T *f, const char *path)
         got  += (uint32_t)rd;
         left -= (uint32_t)rd;
     }
-    tkl_fclose(fp);
 
     if (got != (uint32_t)fsize) {
         PR_ERR("[font] %s 短读 %u/%u", path, (unsigned)got, (unsigned)fsize);
         tal_psram_free(blob);
+        tkl_fclose(fp);
         return OPRT_COM_ERROR;
     }
 
@@ -620,10 +946,12 @@ static OPERATE_RET prv_load(APP_SDFONT_T *f, const char *path)
     if (head_len < (int32_t)sizeof(h)) {
         PR_ERR("[font] %s 不是 lv_font_conv 的 bin（head 表不对）", path);
         tal_psram_free(blob);
+        tkl_fclose(fp);
         return OPRT_COM_ERROR;
     }
     if (!prv_seek(&cur, 8) || !prv_take(&cur, &h, sizeof(h))) {
         tal_psram_free(blob);
+        tkl_fclose(fp);
         return OPRT_COM_ERROR;
     }
     if (1 != h.version || 0 != h.compression_id ||
@@ -632,6 +960,7 @@ static OPERATE_RET prv_load(APP_SDFONT_T *f, const char *path)
                path, (unsigned)h.version, (unsigned)h.bits_per_pixel,
                (unsigned)h.compression_id);
         tal_psram_free(blob);
+        tkl_fclose(fp);
         return OPRT_NOT_SUPPORTED;
     }
 
@@ -641,6 +970,7 @@ static OPERATE_RET prv_load(APP_SDFONT_T *f, const char *path)
     if (cmap_len < 0) {
         PR_ERR("[font] %s 缺 cmap 表", path);
         tal_psram_free(blob);
+        tkl_fclose(fp);
         return OPRT_COM_ERROR;
     }
     loca_start = cmaps_start + (uint32_t)cmap_len;
@@ -648,6 +978,7 @@ static OPERATE_RET prv_load(APP_SDFONT_T *f, const char *path)
     if (loca_len < 0) {
         PR_ERR("[font] %s 缺 loca 表", path);
         tal_psram_free(blob);
+        tkl_fclose(fp);
         return OPRT_COM_ERROR;
     }
     glyph_start = loca_start + (uint32_t)loca_len;
@@ -655,6 +986,7 @@ static OPERATE_RET prv_load(APP_SDFONT_T *f, const char *path)
     if (glyf_len < 0) {
         PR_ERR("[font] %s 缺 glyf 表", path);
         tal_psram_free(blob);
+        tkl_fclose(fp);
         return OPRT_COM_ERROR;
     }
 
@@ -668,25 +1000,41 @@ static OPERATE_RET prv_load(APP_SDFONT_T *f, const char *path)
         PR_ERR("[font] %s 解析失败", path);
         prv_slot_free(f);
         tal_psram_free(blob);
+        tkl_fclose(fp);
         return OPRT_COM_ERROR;
     }
 
-    /* 到这一步 blob 用完了：字形数据已经重排进 f->bmp，释放掉省一份 */
+    /* 解析用完了，但**文件不关** —— 字形位图要按需回来读（prv_glyph_bits）。
+     * 路径也记下来：SD 重挂之后要靠它把句柄重开。 */
     tal_psram_free(blob);
+    f->fp = fp;
+    snprintf(f->path, sizeof(f->path), "%s", path);
+    f->media_gen = app_storage_media_gen();
+
+    if (NULL == s_cache) {
+        s_cache = (APP_FONT_CACHE_LINE_T *)tal_psram_malloc(
+                      APP_FONT_CACHE_N * sizeof(APP_FONT_CACHE_LINE_T));
+        if (NULL == s_cache) {
+            PR_WARN("[font] 字形缓存分配失败：能显示，但每画一次读一次卡");
+        } else {
+            for (uint32_t k = 0; k < APP_FONT_CACHE_N; k++) {
+                s_cache[k].font = 0;            /* 0 = 空行 */
+                s_cache[k].gid  = 0xFFFFu;
+                s_cache[k].len  = 0;
+            }
+            s_cache_next = 0;
+            s_cache_hit  = 0;
+            s_cache_miss = 0;
+        }
+    }
+    f->cache_next  = 0;
+    f->bpp         = h.bits_per_pixel;
+    f->last_letter = 0;
+    f->last_gid    = 0;
 
     /* ---- 填 lv_font_t（其余字段照官方 loader 的写法） ---- */
-    f->dsc.glyph_bitmap  = f->bmp;
-    f->dsc.glyph_dsc     = f->glyphs;
-    f->dsc.cmaps         = f->cmaps;
-    f->dsc.cmap_num      = (uint16_t)f->cmap_num;
-    f->dsc.kern_dsc      = NULL;
-    f->dsc.kern_classes  = 0;
-    f->dsc.kern_scale    = h.kerning_scale;
-    f->dsc.bpp           = h.bits_per_pixel;
-    f->dsc.bitmap_format = h.compression_id;
-
-    f->font.get_glyph_dsc    = lv_font_get_glyph_dsc_fmt_txt;
-    f->font.get_glyph_bitmap = lv_font_get_bitmap_fmt_txt;
+    f->font.get_glyph_dsc    = prv_font_get_glyph_dsc;
+    f->font.get_glyph_bitmap = prv_font_get_glyph_bitmap;
     f->font.release_glyph    = NULL;
     f->font.line_height      = (int32_t)h.ascent - (int32_t)h.descent;
     f->font.base_line        = -(int32_t)h.descent;
@@ -694,14 +1042,14 @@ static OPERATE_RET prv_load(APP_SDFONT_T *f, const char *path)
     f->font.kerning          = LV_FONT_KERNING_NONE;
     f->font.underline_position  = (int8_t)h.underline_position;
     f->font.underline_thickness = (int8_t)h.underline_thickness;
-    f->font.dsc             = &f->dsc;
-    f->font.fallback        = NULL;
-    f->font.user_data       = NULL;
-    f->ok                   = TRUE;
+    f->font.dsc              = f;           /* 回调里靠它找回 APP_SDFONT_T */
+    f->font.fallback         = NULL;
+    f->font.user_data        = NULL;
+    f->ok                    = TRUE;
 
-    PR_NOTICE("[font] %s 加载完成：%upx 字形 %u 个，位图 %uKB，PSRAM 共 %uKB",
+    PR_NOTICE("[font] %s 加载完成：%upx 字形 %u 个（位图按需读），索引 %uKB",
               path, (unsigned)h.font_size, (unsigned)f->glyph_cnt,
-              (unsigned)(f->bmp_bytes / 1024u), (unsigned)(f->psram_bytes / 1024u));
+              (unsigned)(f->psram_bytes / 1024u));
     return OPRT_OK;
 }
 
@@ -895,6 +1243,7 @@ static void prv_font_task(void *arg)
         int loaded = 0;
 
         for (int i = 0; i < APP_FONT_PX_N; i++) {
+            s_fpx[i].idx = (uint8_t)i;      /* 字形缓存用它区分是哪份字库 */
             if (OPRT_OK != prv_load(&s_fpx[i], sg_px_tab[i].path)) {
                 PR_WARN("[font] %s 没加载上，%dpx 用内置占位",
                         sg_px_tab[i].path, sg_px_tab[i].px);
@@ -975,6 +1324,7 @@ OPERATE_RET app_font_load_sync(int px, const char *path)
         path = (16 == px) ? APP_FONT_FILE_16 : APP_FONT_FILE_21;
     }
 
+    f->idx = (16 == px) ? 6 : 7;    /* 字形缓存的键：别和 s_fpx[] 的 0..5 撞 */
     rt = prv_load(f, path);
     prv_attach();
     return rt;

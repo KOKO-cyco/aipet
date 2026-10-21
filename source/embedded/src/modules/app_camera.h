@@ -4,18 +4,18 @@
  *
  * 数据流
  * ------
- *   摄像头 --YUV422--> 相机线程里转成 320x240 RGB565（双缓冲）
+ *   摄像头 --YUV422--> 相机线程里转成 240x320 RGB565（双缓冲，已旋转）
  *                              |
  *                              v
- *   拍照页的取景框 <--cover采样-- 最新一帧
+ *   拍照页取景框 <--overlay 直写 framebuffer-- 最新一帧
  *
- *   快门 --请求--> 下一张完整 JPEG（相机线程拷贝到 PSRAM）--> 主线程写 /sdcard/pictures
+ *   快门 --拼 BMP--> 内存里一张 240x320 24 位照片 --> 用户确认后写 /sdcard/pictures
  *
- * 为什么预览和拍照用两路
- * ----------------------
- * `TDL_CAMERA_FMT_JPEG_YUV422_BOTH` 同时给两路回调：
- *   - YUV422 自己转 RGB565 给 LVGL 画（不依赖 JPEG 解码器 / 文件系统驱动）；
- *   - JPEG 直接存卡（体积小，手机/电脑都能看）。
+ * 为什么不用 JPEG
+ * ---------------
+ * 硬件 JPEG 只在开流那一刻定档，TDD 的 `is_inited` 让"关流重开成 JPEG"不生效；
+ * 开流就带 JPEG 又会把 PSRAM 带宽和 CPU 吃干（VGA 实测预览掉到 2~4fps）。
+ * 所以拍照直接用预览帧拼 BMP：所见即所得、不依赖编码器、快门也不黑屏。
  *
  * 线程
  * ----
@@ -37,8 +37,9 @@ extern "C" {
 #endif
 
 /** 预览源图尺寸：**竖屏**（摄像头模组是转 90° 装的，见 APP_CAM_ROTATE_CW）。
- *  320×240 经 ROTT 旋转后是 240×320；取景框 236×264 再做一次 cover。
- *  双缓冲 2 × 240×320×2 = 300KB PSRAM，另有一块 320×240 的旋转暂存 150KB。 */
+ *  320×240 经 ROTT 旋转后就是 240×320，正好铺满这块缓冲；取景框再按 cover 采样。
+ *  双缓冲 2 × 240×320×2 = 300KB PSRAM，另有一块 320×240 的旋转暂存 150KB。
+ *  照片也直接取自这块缓冲（240×320 的 BMP）。 */
 #define APP_CAM_PREVIEW_W   240
 #define APP_CAM_PREVIEW_H   320
 
@@ -91,29 +92,143 @@ uint32_t app_camera_gen(void);
 BOOL_T app_camera_preview(uint16_t *dst, int w, int h);
 
 /**
- * @brief 抓一张照片到内存（**不写卡**）。
+ * @brief 打开预览 overlay：把相机画面直接合成进显示 framebuffer。
  *
- * 同步：关预览流 → 临时开 YUV+JPEG 双路 → 等一张完整 JPEG（≤2s）→ 关流 →
- * 切回 YUV 预览。整个过程约 0.5~1 秒，期间界面会停一下。
+ * 取景框不再用 lv_canvas（LVGL 逐像素画一块 236×264 的画布很贵，实测把
+ * `lv_refr_now` 从 11ms 顶到 40~80ms）。改成注册 SDK 显示端口的 pre-flush
+ * 钩子：每次上屏前，如果相机有新帧，就把预览按 cover 缩放着写进当前
+ * framebuffer 的对应矩形。
  *
- * 成功后 JPEG 一直留在内存里，直到 `app_camera_save()` 或 `app_camera_discard()`
+ * @param[in] x,y,w,h 取景区域在**逻辑坐标**（480×320）下的矩形。
+ * @return TRUE = 已启用。
+ * @note 逻辑矩形会按当前显示旋转（90°）映射到面板坐标，映射由
+ *       `lv_display_rotate_area()` 现算，不写死旋转公式。
+ */
+BOOL_T app_camera_overlay_enable(int x, int y, int w, int h);
+
+/** @brief 关闭 overlay（离开拍照页时调；关掉后请对原区域 invalidate 让 LVGL 重画）。 */
+void app_camera_overlay_disable(void);
+
+/**
+ * @brief 暂停/恢复 overlay 的合成。
+ *
+ * overlay 是在 LVGL 画完之后直接往 framebuffer 里写像素的，它看不见 LVGL 画了
+ * 什么 —— 所以任何盖在取景框上的东西（确认卡那种 sheet）都会被预览糊掉。弹窗
+ * 打开时暂停，关掉后恢复；恢复时会强制补画一次，不用等下一帧相机数据。
+ *
+ * @note 暂停期间那一片会保留上一帧的画面（或 LVGL 重画后的底色），这是预期的：
+ *       弹窗下面本来就是"定格"的取景画面。
+ */
+void app_camera_overlay_pause(BOOL_T pause);
+
+/**
+ * @brief 拍一张照片到内存（**不写卡**）。
+ *
+ * 同步，但很快（约 20ms）：把当前预览帧按 24 位 BMP 拼进内存，不切流、不等帧、
+ * 不碰 SD，快门按下去界面不卡、预览也不黑屏。
+ *
+ * 成功后照片一直留在内存里，直到 `app_camera_save()` 或 `app_camera_discard()`
  * —— 快门的语义是"先拍，用户在确认卡上点保存再落盘"。
  *
- * @return TRUE = 内存里已经有一张照片；FALSE = 没开流 / 等帧超时 / 分配失败。
+ * @return TRUE = 内存里已经有一张照片；FALSE = 没开流 / 还没有帧 / 分配失败。
  */
 BOOL_T app_camera_grab(void);
 
 /**
- * @brief 把 `app_camera_grab()` 抓到的照片写进 /sdcard/pictures。
+ * @brief 把 `app_camera_grab()` 拍到的照片写进 /sdcard/pictures。
+ *
+ * 同步，且慢（约 1~3 秒）：要切 SD 线宽、写 225KB、再读回来校验。只能在用户
+ * 明确点"保存"的路径上调。
  *
  * @param[out] path     存下来的完整路径（失败时为空串）。可以为 NULL。
  * @param[in]  path_sz  @a path 的容量。
- * @return TRUE = 已保存；FALSE = 没有待保存的照片 / 卡打不开。
+ * @return TRUE = 已保存；FALSE = 没有待保存的照片 / 卡打不开 / 校验不过。
  */
 BOOL_T app_camera_save(char *path, size_t path_sz);
 
 /** @brief 丢掉抓到的照片（用户关掉确认卡 / 离开页面时调）。 */
 void app_camera_discard(void);
+
+/* ---- 画面参数（调色）------------------------------------------------------
+ *
+ * 传感器是 GC2145，参数就是数据手册里的寄存器，值都按寄存器原值给：
+ *
+ *   bright    P2:0xd5  Luma_offset     亮度偏移，S7 有符号，-64..63，默认 0
+ *   contrast  P2:0xd3  luma_contrast   对比度，0x40 = 1.0，0x20..0x60
+ *   sat       P2:0xd1/0xd2  Cb/Cr 饱和度，0x20 = 1.0，0x10..0x50
+ *   aec       P1:0x13  AEC_target_Y    自动曝光的目标亮度，越大越亮，0x20..0xc0
+ *
+ * **背光/点光源太亮（画面里那盏 LED）先动 aec**：目标亮度是 AEC 平均下来的
+ * 期望值，调低整幅就压暗，过曝的光斑会缩。默认 0x7b 是驱动出厂值，数据手册
+ * 的默认是 0x50。
+ *
+ * 改完 `app_camera_param_save()` 才写 flash；不保存的话重启回默认。
+ */
+
+typedef enum {
+    APP_CAM_PARAM_BRIGHTNESS = 0,
+    APP_CAM_PARAM_CONTRAST,
+    APP_CAM_PARAM_SATURATION,
+    APP_CAM_PARAM_AEC_TARGET,
+    APP_CAM_PARAM_COUNT
+} APP_CAM_PARAM_E;
+
+/** @brief 读一个参数当前值（内存里的，未必等于传感器里的）。 */
+int app_camera_param_get(APP_CAM_PARAM_E p);
+
+/** @brief 改一个参数：夹到合法范围，相机开着就立刻写进传感器。 */
+void app_camera_param_set(APP_CAM_PARAM_E p, int val);
+
+/** @brief 参数名（`cam set <名字> <值>` 用的就是它）。 */
+const char *app_camera_param_name(APP_CAM_PARAM_E p);
+
+/** @brief 按名字找参数；找不到返回 FALSE。 */
+BOOL_T app_camera_param_find(const char *name, APP_CAM_PARAM_E *out);
+
+int app_camera_param_min(APP_CAM_PARAM_E p);
+int app_camera_param_max(APP_CAM_PARAM_E p);
+
+/** @brief 把所有参数写进传感器（开流后自动调一次；也可手动重放）。 */
+void app_camera_param_apply(void);
+
+/** @brief 全部恢复出厂默认（不写 flash）。 */
+void app_camera_param_reset(void);
+
+/** @brief 把当前参数存进 flash（下次开机自动加载）。 */
+void app_camera_param_save(void);
+
+/**
+ * @brief 直接读写传感器寄存器（逃逸口：表里没有的都能这么试）。
+ * @param[in] page 0..2（P0/P1/P2）
+ */
+OPERATE_RET app_camera_reg_write(uint8_t page, uint8_t reg, uint8_t val);
+OPERATE_RET app_camera_reg_read(uint8_t page, uint8_t reg, uint8_t *val);
+
+/** @brief 照片质量：标准 = 16 位 BMP（约 150KB），高清 = 24 位 BMP（约 225KB）。 */
+typedef enum {
+    APP_CAM_QUALITY_STANDARD = 0,
+    APP_CAM_QUALITY_HD       = 1,
+} APP_CAM_QUALITY_E;
+
+void app_camera_set_quality(APP_CAM_QUALITY_E q);
+
+/** @brief 合影时角色站的位置（数值与 PET_POS_E 一致：0 左 / 1 右）。 */
+#define APP_CAM_COMPOSE_LEFT  0
+#define APP_CAM_COMPOSE_RIGHT 1
+
+/**
+ * @brief 设置拍照时是否把角色叠进去、叠在哪一边。
+ *
+ * 角色用的是 `third_party/my_pet/右侧半身比耶.png` 抠像后编进 flash 的立绘
+ * （见 app_cam_pet.h / tools/make_compose_pet.py），**带 alpha 混合** ——
+ * 是叠上去的，不是贴一块方图。
+ *
+ * 站位：原图是在右边缘切过的半身稿，所以**贴边不放留白** —— 右边贴右边缘，
+ * 左边镜像后贴左边缘；竖直方向底边离照片底 12px。
+ *
+ * 只在按快门那一刻合成，预览不受影响。
+ */
+void app_camera_set_compose(BOOL_T on, int pos);
 
 #ifdef __cplusplus
 }
