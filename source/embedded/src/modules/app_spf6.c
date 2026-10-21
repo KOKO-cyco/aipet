@@ -395,5 +395,28 @@ OPERATE_RET spf6_open(SPF6_FILE_T *pf, const char *path, uint16_t max_w, uint16_
         pf->clips[i].data_off = pf->offs[pf->clips[i].first];
     }
 
+    /* ---- 文件大小自检：最后一帧的末尾必须真的在文件里 ----
+     *
+     * 拷贝被截断 / 卡把尾部写坏了的时候，偏移表（在文件开头）是完好的，只有
+     * 读到靠后的帧才短读。而短读会被精灵当成"卡读坏"去重建链路 —— 于是表现成
+     * "每次播到某个动作就重建 SD"，很难往"文件是残的"上想。
+     *
+     * 这里直接比一次大小，把结论打进日志。**不判失败**：前面的动作还能用，
+     * 让它们继续播，总比整只宠物起不来强。 */
+    {
+        int64_t fsz = -1;
+
+        if (0 == tkl_fseek(pf->f, 0, SEEK_END)) {
+            fsz = tkl_ftell(pf->f);
+        }
+        if (fsz > 0 && (uint64_t)fsz < (uint64_t)pf->offs[pf->total_frames]) {
+            PR_ERR("[spf6] %s 被**截断**：实际 %u 字节，偏移表要求 %u 字节 "
+                   "（差 %u）—— 卡上这份是残的，重新拷一遍；"
+                   "靠后的动作会读不出来并反复触发链路重建",
+                   path, (unsigned)fsz, (unsigned)pf->offs[pf->total_frames],
+                   (unsigned)(pf->offs[pf->total_frames] - (uint32_t)fsz));
+        }
+    }
+
     return OPRT_OK;
 }
