@@ -43,13 +43,17 @@
 LV_FONT_DECLARE(lv_font_SourceHanSerifSC_Regular_16)
 LV_FONT_DECLARE(lv_font_SourceHanSerifSC_Regular_21)
 
-#define APP_FONT_TASK_STACK     8192
-#define APP_FONT_TASK_PRIO      THREAD_PRIO_4      /* 低于路由(3)和 LVGL(2)：不抢 UI */
-#define APP_FONT_BOOT_DELAY_MS  1500               /* 让开机流程先跑完，别和它抢 SD 卡 */
+/* 开机流水线由 app_preload 那条线程串起来（读字库 -> 读精灵 -> 挂字库），
+ * 字库这边不再自带线程：见 app_font_sd_load() / app_font_sd_attach()。 */
 
-/* 等卡：每 2 秒试一次，最多 75 次（2.5 分钟）。真机上见过卡 2 分 18 秒才挂上 */
-#define APP_FONT_TRY_GAP_MS     2000
-#define APP_FONT_TRY_MAX        75
+/* 等字库文件：每 200ms 试一次，最多 5 次（1 秒）。
+ *
+ * **不能再等 2.5 分钟。** 这段现在跑在开机 SD 初始化流水线里、挡在页面门控
+ * 前面：卡已经由 app_storage_prepare() 验过能读，这里只需要确认"字库文件在不在"。
+ * 文件真缺时（卡上没拷字库）必须很快放过，否则整机停在门页上两分半 —— 以前是
+ * 独立线程，等多久都不影响进页面，合并之后必须收短。 */
+#define APP_FONT_TRY_GAP_MS     200
+#define APP_FONT_TRY_MAX        5
 
 /* 单个字库文件的上限：现在是 1.5MB，给到 8MB 防的是"拿错文件去 malloc 一大块" */
 #define APP_FONT_FILE_MAX       (8u * 1024u * 1024u)
@@ -159,8 +163,6 @@ static BOOL_T       s_proxied = FALSE;
 
 static APP_SDFONT_T  s_f16;
 static APP_SDFONT_T  s_f21;
-static BOOL_T        s_loading  = FALSE;
-static THREAD_HANDLE s_task_hdl = NULL;
 
 /* ---- 新 UI 的六个字号（SD 卡上的 puhui<px>.bin） -------------------------
  *
@@ -685,13 +687,13 @@ static uint32_t prv_gid(APP_SDFONT_T *f, uint32_t letter)
     return 0;
 }
 
-/** 重开字库文件。
+/** 重开字库文件。**调用方必须已持有 SD 临界区**（app_storage_busy_enter）。
  *
  *  为什么需要：SD 卡每次切线宽（存照片时切 1 线写）、以及链路重建，都会
  *  unmount/remount，**所有已经打开的句柄一起作废**。精灵那边有同样的处理
  *  （`app_storage_recover_reopen`），字库这里也得跟上，否则存完第一张照片之后
  *  新出现的字就全是空白。 */
-static BOOL_T prv_font_reopen(APP_SDFONT_T *f)
+static BOOL_T prv_font_reopen_locked(APP_SDFONT_T *f)
 {
     uint32_t now = tal_system_get_millisecond();
 
@@ -770,8 +772,14 @@ static const uint8_t *prv_glyph_bits(APP_SDFONT_T *f, uint32_t gid, uint32_t n)
     }
 
     /* 链路重挂过（切读写档 / 重建）：句柄已作废，先重开再读。
-     * 这一步让"存完照片读不到字"在下一个字上就恢复，不用等重建。 */
-    if (f->media_gen != app_storage_media_gen() && !prv_font_reopen(f)) {
+     * 这一步让"存完照片读不到字"在下一个字上就恢复，不用等重建。
+     *
+     * 整段读（重开 + seek + read）关进 SD 临界区：见 prv_slurp() 上方的说明。
+     * 锁不可重入，所以里面只用 *_locked 变体。 */
+    app_storage_busy_enter();
+
+    if (f->media_gen != app_storage_media_gen() && !prv_font_reopen_locked(f)) {
+        app_storage_busy_leave();
         return NULL;
     }
 
@@ -782,13 +790,17 @@ static const uint8_t *prv_glyph_bits(APP_SDFONT_T *f, uint32_t gid, uint32_t n)
     }
     if ((int32_t)need != rd) {
         /* 句柄多半被重挂作废了：重开一次再试；还不行就放弃这一帧。 */
-        if (!prv_font_reopen(f) || 0 != tkl_fseek(f->fp, (int32_t)byte_ofs, SEEK_SET) ||
+        if (!prv_font_reopen_locked(f) ||
+            0 != tkl_fseek(f->fp, (int32_t)byte_ofs, SEEK_SET) ||
             (int32_t)need != tkl_fread(s_glyph_raw, (int32_t)need, f->fp)) {
+            app_storage_busy_leave();
             PR_WARN("[font] 读字形 %u 失败（偏移 %u，%u 字节）",
                     (unsigned)gid, (unsigned)byte_ofs, (unsigned)need);
             return NULL;
         }
     }
+
+    app_storage_busy_leave();       /* 下面全是内存操作，不占卡 */
 
     dst = (NULL != line) ? line->data : s_glyph_scratch;
     prv_bits_to_bytes(s_glyph_raw, need, sh, dst, n);
@@ -896,66 +908,91 @@ static const void *prv_font_get_glyph_bitmap(lv_font_glyph_dsc_t *g_dsc, uint32_
     return draw_buf;
 }
 
+/** 打开并整份读进内存（读的整段占住 SD 临界区）。
+ *
+ *  **为什么字库也要抢那把锁**：字库是唯一在 **LVGL 线程**里读 SD 的模块
+ *  （精灵预取在自己的线程，spf6_read_at() 里有锁）。以前字形是开机一次性读进
+ *  PSRAM 的，LVGL 线程根本不碰卡；改成按需读之后，它和预取线程、和写档切换会
+ *  同时戳 FatFs / SDIO —— FatFs 虽然开了 FF_FS_REENTRANT，那只保证"文件对象"
+ *  层面的互斥，挡不住 SDIO 控制器上命令/数据阶段的交错。实测形态正是随机的短读、
+ *  CRC 错、`SDCARD driver not init`，最后卡自己掉线；而"早上好好的、下午不行了"
+ *  的时间点，正好就是字库改成按需读的那次提交。
+ *
+ *  成功时返回**保持打开**的句柄（字形位图要按需回来读），blob 交给调用方释放。
+ *  失败返回 NULL 并已自行收尾。 */
+static TUYA_FILE prv_slurp(const char *path, uint8_t **blob_out, uint32_t *len_out)
+{
+    TUYA_FILE fp    = NULL;
+    uint8_t  *blob  = NULL;
+    int64_t   fsize = 0;
+    uint32_t  got   = 0;
+    BOOL_T    ok    = FALSE;
+
+    app_storage_busy_enter();
+
+    fp = tkl_fopen(path, "rb");
+    if (NULL == fp) {
+        PR_WARN("[font] 打不开 %s", path);
+    } else if (0 != tkl_fseek(fp, 0, SEEK_END)) {
+        /* 收尾统一在下面 */
+    } else if ((fsize = tkl_ftell(fp)) <= 0 || (uint64_t)fsize > APP_FONT_FILE_MAX) {
+        PR_ERR("[font] %s 大小异常: %d", path, (int)fsize);
+    } else if (0 != tkl_fseek(fp, 0, SEEK_SET)) {
+        /* 同上 */
+    } else if (NULL == (blob = (uint8_t *)tal_psram_malloc((uint32_t)fsize))) {
+        PR_ERR("[font] 读 %s 需要 %uKB，PSRAM 不够", path, (unsigned)(fsize / 1024));
+    } else {
+        while (got < (uint32_t)fsize) {
+            int32_t rd = tkl_fread(blob + got, (int32_t)((uint32_t)fsize - got), fp);
+
+            if (rd <= 0) {
+                break;
+            }
+            got += (uint32_t)rd;
+        }
+        if (got != (uint32_t)fsize) {
+            PR_ERR("[font] %s 短读 %u/%u", path, (unsigned)got, (unsigned)fsize);
+        } else {
+            ok = TRUE;
+        }
+    }
+
+    app_storage_busy_leave();
+
+    if (!ok) {
+        if (NULL != blob) {
+            tal_psram_free(blob);
+        }
+        if (NULL != fp) {
+            tkl_fclose(fp);
+        }
+        return NULL;
+    }
+
+    *blob_out = blob;
+    *len_out  = (uint32_t)fsize;
+    return fp;
+}
+
 /** 读整个文件 -> 解析 -> 释放 blob。成功时 f->ok 置位。 */
 static OPERATE_RET prv_load(APP_SDFONT_T *f, const char *path)
 {
     APP_FONT_CUR_T    cur;
     APP_FONT_HEAD_T   h;
     TUYA_FILE         fp;
-    int64_t           fsize;
     uint8_t          *blob;
+    uint32_t          fsize;
     int32_t           head_len, cmap_len, loca_len, glyf_len;
     uint32_t          cmaps_start, loca_start, glyph_start;
-    uint32_t          left, got;
 
-    fp = tkl_fopen(path, "rb");
+    /* 文件 I/O 全在 prv_slurp 里（带 SD 临界区）；回来之后只剩纯内存解析。 */
+    fp = prv_slurp(path, &blob, &fsize);
     if (NULL == fp) {
-        PR_WARN("[font] 打不开 %s", path);
-        return OPRT_NOT_FOUND;
-    }
-    if (0 != tkl_fseek(fp, 0, SEEK_END)) {
-        tkl_fclose(fp);
-        return OPRT_COM_ERROR;
-    }
-    fsize = tkl_ftell(fp);
-    if (fsize <= 0 || (uint64_t)fsize > APP_FONT_FILE_MAX) {
-        PR_ERR("[font] %s 大小异常: %d", path, (int)fsize);
-        tkl_fclose(fp);
-        return OPRT_INVALID_PARM;
-    }
-    if (0 != tkl_fseek(fp, 0, SEEK_SET)) {
-        tkl_fclose(fp);
-        return OPRT_COM_ERROR;
-    }
-
-    blob = (uint8_t *)tal_psram_malloc((uint32_t)fsize);
-    if (NULL == blob) {
-        PR_ERR("[font] 读 %s 需要 %uKB，PSRAM 不够", path, (unsigned)(fsize / 1024));
-        tkl_fclose(fp);
-        return OPRT_MALLOC_FAILED;
-    }
-
-    left = (uint32_t)fsize;
-    got  = 0;
-    while (got < (uint32_t)fsize) {
-        int32_t rd = tkl_fread(blob + got, (int32_t)(left), fp);
-
-        if (rd <= 0) {
-            break;
-        }
-        got  += (uint32_t)rd;
-        left -= (uint32_t)rd;
-    }
-
-    if (got != (uint32_t)fsize) {
-        PR_ERR("[font] %s 短读 %u/%u", path, (unsigned)got, (unsigned)fsize);
-        tal_psram_free(blob);
-        tkl_fclose(fp);
         return OPRT_COM_ERROR;
     }
 
     cur.blob = blob;
-    cur.size = (uint32_t)fsize;
+    cur.size = fsize;
     cur.pos  = 0;
 
     /* ---- head ---- */
@@ -1227,8 +1264,8 @@ static BOOL_T prv_wait_card(void)
         if (app_storage_probe(APP_FONT_PUHUI_18, NULL) ||
             app_storage_probe(APP_FONT_PUHUI_14, NULL)) {
             if (0 != i) {
-                PR_NOTICE("[font] SD 卡在第 %u 次探测后可用（等了约 %u 秒）",
-                          (unsigned)(i + 1), (unsigned)(i * APP_FONT_TRY_GAP_MS / 1000u));
+                PR_NOTICE("[font] SD 字库在第 %u 次探测后可用（等了约 %u ms）",
+                          (unsigned)(i + 1), (unsigned)(i * APP_FONT_TRY_GAP_MS));
             }
             return TRUE;
         }
@@ -1237,96 +1274,96 @@ static BOOL_T prv_wait_card(void)
     return FALSE;
 }
 
-static void prv_font_task(void *arg)
+/** 开机流水线的**第一步**：把 6 档字库读进 PSRAM（索引），**先不挂到 LVGL**。
+ *
+ *  为什么不在这里挂：挂上之后 LVGL 立刻开始按需读字形（顶栏时间、页面文字），
+ *  而这时 SD 上后面还有"精灵 .spf + idle 常驻 RLE"要读。开机阶段只允许**一个**
+ *  读者，所以"挂"单独放在流水线的最后一步（app_font_sd_attach）。
+ *
+ *  每一档单独成败：缺哪份就留内置占位，界面照样起。已经读好的档（换卡后重跑）
+ *  直接跳过，不重复读。
+ *
+ *  调用者：app_preload 的初始化线程（**唯一**的开机 SD 使用者）。 */
+OPERATE_RET app_font_sd_load(void)
 {
-    (void)arg;
-
-    /* 等开机流程跑完（首页已经建好），再动 SD 卡 */
-    tal_system_sleep(APP_FONT_BOOT_DELAY_MS);
-
-    if (!prv_wait_card()) {
-        PR_WARN("[font] SD 卡上没有 %s / %s，沿用固件内置字库",
-                APP_FONT_PUHUI_14, APP_FONT_PUHUI_18);
-        s_loading = FALSE;
-        return;
-    }
-
-    /* 新 UI 的六个字号。**每一档单独成败**：缺哪份就留内置占位，界面照样起。
-     * 换代理要拿显示锁 —— 换的这一刻 LVGL 可能正在用这个字体画字。
-     *
-     * cn16 / cn21 不再加载：全产品的中文都走 puhui14 / puhui18 了，那两份
-     * 完整字库是 2.4MB PSRAM，白占。要它们的时候用 app_font_load_sync()。 */
-    {
-        int loaded = 0;
-
-        for (int i = 0; i < APP_FONT_PX_N; i++) {
-            s_fpx[i].idx = (uint8_t)i;      /* 字形缓存用它区分是哪份字库 */
-            if (OPRT_OK != prv_load(&s_fpx[i], sg_px_tab[i].path)) {
-                PR_WARN("[font] %s 没加载上，%dpx 用内置占位",
-                        sg_px_tab[i].path, sg_px_tab[i].px);
-                continue;
-            }
-
-            app_disp_lock();
-            memcpy(&s_px[i], &s_fpx[i].font, sizeof(lv_font_t));
-            /* 兜底：字库缺的字（最常见的是生成时没带 ASCII 的子集字号）回退到
-             * 内置子集，而不是画一个空白。完整的字库永远走不到这一层。 */
-            s_px[i].fallback = prv_px_fallback(i);
-            app_disp_unlock();
-
-            if (!prv_has_cp(&s_fpx[i], '0')) {
-                PR_WARN("[font] %s 没有 ASCII 数字（顶栏时间/电量会回退内置字体）。"
-                        "生成时请带上 0x20-0x7e", sg_px_tab[i].path);
-            }
-            loaded++;
-        }
-
-        if (loaded > 0) {
-            /* 已经画在屏上的字是内置字体的形状，得让它们用新字库重画一遍。 */
-            app_disp_lock();
-            lv_obj_invalidate(lv_screen_active());
-            app_disp_unlock();
-
-            /* 换字体不只是重画：已经按内置字体量过尺寸的标签（标题、状态栏、
-             * 行内省略号）得重新排一次。页面订阅这个事件，在 LVGL 线程里重建
-             * 当前页 —— 这里只发事件，不碰界面。 */
-            app_event_publish(APP_EVT_FONT_READY, NULL);
-        }
-        PR_NOTICE("[font] puhui 字号加载 %d/%d 档", loaded, APP_FONT_PX_N);
-    }
-
-    app_font_stat();
-    s_loading = FALSE;
-
-    /* 一次性任务，干完自退 —— 和 app_speaker / movie_audio 一个套路：
-     * tal_thread_delete 只是打一个异步标记，所以放在最后一行。 */
-    tal_thread_delete(s_task_hdl);
-    s_task_hdl = NULL;
-}
-
-OPERATE_RET app_font_load_async(void)
-{
-    THREAD_CFG_T cfg = {0};
+    int loaded = 0;
 
     if (!s_proxied) {
         return OPRT_COM_ERROR;
     }
-    if (s_loading) {
-        return OPRT_OK;
-    }
-    s_loading = TRUE;
 
-    cfg.stackDepth = APP_FONT_TASK_STACK;
-    cfg.priority   = APP_FONT_TASK_PRIO;
-    cfg.thrdname   = "app_font";
-
-    if (OPRT_OK != tal_thread_create_and_start(&s_task_hdl, NULL, NULL,
-                                               prv_font_task, NULL, &cfg)) {
-        PR_ERR("[font] 后台任务创建失败");
-        s_loading = FALSE;
+    if (!prv_wait_card()) {
+        PR_WARN("[font] SD 卡上没有 %s / %s，沿用固件内置字库",
+                APP_FONT_PUHUI_14, APP_FONT_PUHUI_18);
         return OPRT_COM_ERROR;
     }
-    return OPRT_OK;
+
+    /* cn16 / cn21 不再加载：全产品的中文都走 puhui14 / puhui18 了，那两份
+     * 完整字库是 2.4MB PSRAM，白占。要它们的时候用 app_font_load_sync()。 */
+    for (int i = 0; i < APP_FONT_PX_N; i++) {
+        s_fpx[i].idx = (uint8_t)i;      /* 字形缓存用它区分是哪份字库 */
+
+        if (s_fpx[i].ok) {
+            loaded++;
+            continue;
+        }
+        if (OPRT_OK != prv_load(&s_fpx[i], sg_px_tab[i].path)) {
+            PR_WARN("[font] %s 没加载上，%dpx 用内置占位",
+                    sg_px_tab[i].path, sg_px_tab[i].px);
+            continue;
+        }
+        if (!prv_has_cp(&s_fpx[i], '0')) {
+            PR_WARN("[font] %s 没有 ASCII 数字（顶栏时间/电量会回退内置字体）。"
+                    "生成时请带上 0x20-0x7e", sg_px_tab[i].path);
+        }
+        loaded++;
+    }
+
+    PR_NOTICE("[font] puhui 字号读入 %d/%d 档（还没挂上）", loaded, APP_FONT_PX_N);
+    return (loaded > 0) ? OPRT_OK : OPRT_COM_ERROR;
+}
+
+/** 开机流水线的**最后一步**：把读好的字库挂到 LVGL 上。
+ *
+ *  挂的那一刻起，LVGL 线程就会按需读字形 —— 所以必须等 SD 上的初始化全读完
+ *  （字库 + 精灵）再调，否则刚"合并成一条流水线"又被自己拆开了。
+ *
+ *  换字体要拿显示锁：换的这一刻 LVGL 可能正在用这个字体画字。 */
+void app_font_sd_attach(void)
+{
+    int loaded = 0;
+
+    if (!s_proxied) {
+        return;
+    }
+
+    for (int i = 0; i < APP_FONT_PX_N; i++) {
+        if (!s_fpx[i].ok) {
+            continue;
+        }
+        app_disp_lock();
+        memcpy(&s_px[i], &s_fpx[i].font, sizeof(lv_font_t));
+        /* 兜底：字库缺的字（最常见的是生成时没带 ASCII 的子集字号）回退到
+         * 内置子集，而不是画一个空白。完整的字库永远走不到这一层。 */
+        s_px[i].fallback = prv_px_fallback(i);
+        app_disp_unlock();
+        loaded++;
+    }
+
+    if (loaded > 0) {
+        /* 已经画在屏上的字是内置字体的形状，得让它们用新字库重画一遍。 */
+        app_disp_lock();
+        lv_obj_invalidate(lv_screen_active());
+        app_disp_unlock();
+
+        /* 换字体不只是重画：已经按内置字体量过尺寸的标签（标题、状态栏、
+         * 行内省略号）得重新排一次。页面订阅这个事件，在 LVGL 线程里重建
+         * 当前页 —— 这里只发事件，不碰界面。 */
+        app_event_publish(APP_EVT_FONT_READY, NULL);
+    }
+
+    app_font_stat();
+    PR_NOTICE("[font] puhui 字号挂上 %d/%d 档", loaded, APP_FONT_PX_N);
 }
 
 OPERATE_RET app_font_load_sync(int px, const char *path)

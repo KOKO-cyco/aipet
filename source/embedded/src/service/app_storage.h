@@ -125,16 +125,20 @@ int32_t app_storage_sdio_lines(void);
  * 不会有人在卷消失的瞬间去读它。
  *
  * @note **锁不可重入**：本函数内部自己取放临界区，调用方别再包一层。
- * @note 开机扫描没找到任何能写的档时返回 OPRT_COM_ERROR（那时 write_end 是空操作）。
+ * @note 卡根本没起来（`app_storage_write_lines() == 0`）时返回 OPRT_COM_ERROR
+ *       （那时 write_end 是空操作）。
  *
- * @return OPRT_OK 现在可以写；其它值：这张卡没有能写的档位 / 切档失败。
+ * @return OPRT_OK 现在可以写；其它值：卡没起来 / 切档失败。
  */
 OPERATE_RET app_storage_write_begin(void);
 
 /** @brief 切回读最快的那一档。必须与 `app_storage_write_begin()` 成对调用。 */
 void app_storage_write_end(void);
 
-/** @brief 开机扫到的"能写"线宽；**0 = 这张卡写不进**（照片一定存不上）。 */
+/** @brief "能写"的线宽；**0 = 卡没起来**（照片一定存不上）。
+ *
+ *  2026-10-21 起是固定常量（1 线），不再开机逐个试写 —— 理由见 app_storage.c
+ *  里 APP_STORAGE_WRITE_LINES 上方的说明。 */
 int32_t app_storage_write_lines(void);
 
 /** @brief 挂载 SD 卡（幂等，已挂载时直接成功）。 */
@@ -254,7 +258,15 @@ uint32_t app_storage_media_gen(void);
  *
  * 所以两边互斥：扫描包 busy，`app_storage_recover()` 内部也包 busy。
  *
- * 锁是**普通互斥，不可重入**：扫描函数内部包一层就够，调用方**别再套第二层**。
+ * **谁碰 SD 谁包。** 除了扫描和重建，还有：写照片（`app_storage_write_begin()`
+ * 切档那一段 + 落盘）、精灵预取（`spf6_read_at()`）、**字库按需读字形**
+ * （`app_font.c` 的 `prv_glyph_bits()`）和打开 .spf（`spf6_open()`）。
+ * 后两个是 2026-10-21 补上的：字库和精灵分别在 LVGL 线程与预取线程上读同一根
+ * SDIO，FatFs 的 FF_FS_REENTRANT 只护住文件对象，护不住控制器上的命令交错 ——
+ * 症状就是随机的短读 / CRC 错 / `SDCARD driver not init` / 卡掉线。
+ *
+ * 锁是**普通互斥，不可重入**：加锁只在最外层做，内部一律走 `*_locked` 变体，
+ * 调用方**别再套第二层**。
  * 锁在 `app_storage_cd_init()` 里建；那之前调用是空操作（那时还没有并发者）。
  */
 void app_storage_busy_enter(void);

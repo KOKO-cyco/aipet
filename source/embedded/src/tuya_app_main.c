@@ -49,6 +49,7 @@
 #include "app_cam_test.h"
 #include "app_cam_snapshot.h"   /* 开机快照测试（src/tests） */
 #include "app_sd_test.h"
+#include "app_sd_hw_test.h"     /* SD 读通路 A/B（CPU 轮询 vs GDMA），src/tests */
 #include "app_disp.h"
 #include "app_event.h"
 #include "app_font.h"
@@ -340,6 +341,14 @@ static void user_main(void)
     }
     app_mem_sram("boot: sdio");
 
+#if APP_SD_HW_TEST
+    /* SD 读通路 A/B（CPU 轮询 vs GDMA）—— 驱动层测试，**不跑任何业务代码**：
+     * 这一句不返回，显示 / 网络 / 字库 / 精灵 / AI 全都不启动，串口日志就是结论。
+     * 位置同样在 app_storage_sdio_setup() 之后：SDIO 引脚已映射、卡已起来，
+     * 测试自己会 deinit/init 切换通路。开关在 app_sd_hw_test.h。 */
+    app_sd_hw_test_run();
+#endif
+
 #if APP_SD_TEST
     /* 纯 SD 读压力测试：只读卡，不带视频解码 / 音频 / LVGL。
      *
@@ -414,20 +423,16 @@ static void user_main(void)
     app_mem_sram("boot: splash");
     app_disp_start(APP_LVGL_PRIO, APP_LVGL_STACK);
 
-    /* ---- 5.5 SD 卡完整字库（后台） ----
-     * 界面先用内置子集；这个低优先级任务睡 1.5 秒再读 SD 卡，读完挂到代理的
-     * fallback 上并重绘当前屏。卡不在 / 文件缺失都只是缺字，不影响别的。
-     *
-     * 挪到 splash 之后启动：反正这段时间界面是 logo，字库早点晚点都看不出来，
-     * 而它会和下面的预热抢 SD —— 让它先跑完（预热那边自己让路 3 秒）。 */
-    if (OPRT_OK != app_font_load_async()) {
-        PR_WARN("[main] SD 字库加载任务没起来，沿用内置子集");
-    }
+    /* ---- 5.5 SD 卡完整字库 ----
+     * 界面先用内置子集。字库不再自己起线程：它现在是**开机 SD 初始化流水线**的
+     * 第一步，由下面 5.6 那条线程串行执行（读字库 -> 读精灵 -> 挂字库 -> 放行），
+     * 理由见 app_preload.c 的 prv_boot_pipeline()：开机的 SD 访问只能有一个读者。 */
 
-    /* ---- 5.6 目录索引后台预热 ----
-     * 把电影 / 音乐 / 游戏列表的目录先扫好，用户点进去时 on_enter 直接命中缓存
-     * （真机上电影目录现场扫要 1.4 秒，那段时间 LVGL 是挂起的）。最低优先级，
-     * 且自己会等卡可用，所以放在最后、不占启动时间。见 app_preload.h。 */
+    /* ---- 5.6 SD 初始化 + 目录索引后台预热 ----
+     * 这条线程现在负责整条开机 SD 初始化流水线（挂卡 -> 字库 -> 精灵 -> 挂字库），
+     * 做完才放行需要 SD 的页面；顺带把目录索引扫好，用户点进去时 on_enter 直接
+     * 命中缓存。最低优先级，且自己会等卡可用，所以放在最后、不占启动时间。
+     * 见 app_preload.h。 */
     if (OPRT_OK != app_preload_init()) {
         PR_WARN("[main] 后台预热没起来，各页面照旧自己扫");
         /* **必须解除门控**：预热是"SD 页面放行"的唯一出口（见 app_storage_warming），

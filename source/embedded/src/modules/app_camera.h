@@ -100,11 +100,14 @@ BOOL_T app_camera_preview(uint16_t *dst, int w, int h);
  * framebuffer 的对应矩形。
  *
  * @param[in] x,y,w,h 取景区域在**逻辑坐标**（480×320）下的矩形。
+ * @param[in] radius  四角圆角半径（像素）；0 = 直角。角上的像素按覆盖率与
+ *                    framebuffer 里已有的内容（卡片底色）混合，和 LVGL 的抗
+ *                    锯齿一致；只影响 4 个 radius² 的小方块，代价可忽略。
  * @return TRUE = 已启用。
  * @note 逻辑矩形会按当前显示旋转（90°）映射到面板坐标，映射由
  *       `lv_display_rotate_area()` 现算，不写死旋转公式。
  */
-BOOL_T app_camera_overlay_enable(int x, int y, int w, int h);
+BOOL_T app_camera_overlay_enable(int x, int y, int w, int h, int radius);
 
 /** @brief 关闭 overlay（离开拍照页时调；关掉后请对原区域 invalidate 让 LVGL 重画）。 */
 void app_camera_overlay_disable(void);

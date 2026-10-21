@@ -34,9 +34,14 @@
  *
  * 加载时机
  * --------
- * app_font_load_async() 起一个低优先级后台任务：先睡 1.5 秒让开机流程跑完（避免
- * 和开机时的 SD 卡访问抢），再依次加载六档。每档单独成败，缺的就留内置占位；
- * 卡不在 / 文件缺失都只是打日志，界面退回内置子集，功能不受影响。
+ * 由开机的**单条 SD 初始化流水线**调用（app_preload 的线程），分两步：
+ *
+ *   1) `app_font_sd_load()`   —— 依次读六档进 PSRAM，**不挂到 LVGL**；
+ *   2) `app_font_sd_attach()` —— 流水线的最后一步，挂上并通知界面重建。
+ *
+ * 之所以拆成两步：挂上之后 LVGL 立刻开始按需读字形，而这时流水线后面还有
+ * 精灵的数据要读。开机阶段只允许一个读者（见 app_storage.h 的 busy 锁）。
+ * 每档单独成败，缺的就留内置占位；卡不在 / 文件缺失只打日志，界面退回内置子集。
  */
 
 #ifndef __APP_FONT_H__
@@ -105,11 +110,19 @@ const lv_font_t *app_font_21(void);
 OPERATE_RET app_font_init(void);
 
 /**
- * @brief 起后台任务从 SD 卡加载字库（失败只打日志，不影响其它功能）。
- *        调用前 SD 卡可以还没挂载 —— 任务自己会调 app_storage_init()（幂等）并按
- *        2 秒一次探测字库文件能不能打开，最多等 2.5 分钟。
+ * @brief 开机流水线第一步：从 SD 卡读入六档字库，**不挂到 LVGL**。
+ *        阻塞调用；调用前 SD 卡可以还没挂载 —— 自己会调 app_storage_init()
+ *        （幂等）并按 2 秒一次探测字库文件能不能打开，最多等 2.5 分钟。
+ *        **唯一调用者**：app_preload 的初始化线程。
  */
-OPERATE_RET app_font_load_async(void);
+OPERATE_RET app_font_sd_load(void);
+
+/**
+ * @brief 开机流水线最后一步：把读好的字库挂到 LVGL 并通知界面重排。
+ *        必须在 SD 上的初始化读（字库 + 精灵）全部做完之后调用 ——
+ *        挂上之后 LVGL 会按需读字形，提前挂就等于把流水线又拆成两路。
+ */
+void app_font_sd_attach(void);
 
 /**
  * @brief 同步加载一份字库（调试 / 测试用）。@a path 为 NULL 时用默认路径。

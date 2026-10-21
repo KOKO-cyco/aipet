@@ -70,7 +70,7 @@ void spf6_close(SPF6_FILE_T *pf)
 
 BOOL_T spf6_read_at(SPF6_FILE_T *pf, uint32_t off, uint32_t len, void *buf)
 {
-    BOOL_T ok;
+    int32_t got;
 
     if (NULL == pf || NULL == pf->f) {
         return FALSE;
@@ -100,15 +100,56 @@ BOOL_T spf6_read_at(SPF6_FILE_T *pf, uint32_t off, uint32_t len, void *buf)
     }
 
     if (tkl_fseek(pf->f, (int64_t)off, SEEK_SET) != 0) {
-        app_storage_busy_leave();
-        return FALSE;
+        got = -1;
+    } else {
+        got = tkl_fread(buf, (int32_t)len, pf->f);
     }
 
-    ok = ((int32_t)len == tkl_fread(buf, (int32_t)len, pf->f)) ? TRUE : FALSE;
+    /* ---- 读坏了就**关掉重开**，别在同一个句柄上接着试 ----
+     *
+     * 这条是 2026-10-21 从真机日志里挖出来的，解释了一个很反直觉的现象：
+     * 开机时精灵那 790KB 读失败、之后同一个文件的所有读都**立刻**失败（每次
+     * 三十几毫秒就返回），而**同一时间**字库那几个文件的读一点事没有；链路整体
+     * 重建一次之后，同一个文件、同样的读法又全好了。
+     *
+     * 原因在 FatFs：一次读盘失败会把**文件对象**标成错误态（`fp->err`），之后
+     * 在这个句柄上 f_read 直接返回 0 字节、根本不碰盘。所以
+     *
+     *   - 失败是**句柄级**的，不是链路级的：别的文件（字库）用别的句柄，毫发无损；
+     *   - 第一次失败之后的重试全是空转（30ms 的"失败"就是它）；
+     *   - 只有关掉重开能清掉错误态 —— 这正解释了"重建链路（顺带重开了所有句柄）
+     *     之后一切正常"。
+     *
+     * 所以在这一层自愈：失败一次就重开句柄再读一遍。第一遍的失败本身多半是
+     * SDIO 的一次偶发超时（驱动是 CPU 轮询 FIFO，平台层超时只有几百 us），
+     * 第二遍通常就过了 —— 没必要为一次偶发错误把整条链路重建掉。 */
+    if (got != (int32_t)len) {
+        PR_WARN("[spf6] 读 %s 失败（off=%u len=%u got=%d）：句柄已进错误态，重开再试",
+                pf->path, (unsigned)off, (unsigned)len, (int)got);
+
+        /* 卡不在就别重开：FatFs 对着一张拔掉的卡 fopen 一次要两秒。 */
+        if (app_storage_card_present()) {
+            if (NULL != pf->f) {
+                tkl_fclose(pf->f);
+                pf->f = NULL;
+            }
+            pf->f = tkl_fopen(pf->path, "rb");
+            if (NULL != pf->f) {
+                pf->media_gen = app_storage_media_gen();
+                if (0 == tkl_fseek(pf->f, (int64_t)off, SEEK_SET)) {
+                    got = tkl_fread(buf, (int32_t)len, pf->f);
+                }
+                if (got == (int32_t)len) {
+                    PR_NOTICE("[spf6] 重开句柄后读成功（%u 字节）—— 是句柄错误态，不是链路坏",
+                              (unsigned)len);
+                }
+            }
+        }
+    }
 
     app_storage_busy_leave();
 
-    return ok;
+    return (got == (int32_t)len) ? TRUE : FALSE;
 }
 
 int spf6_frame_span(const SPF6_FILE_T *pf, uint32_t idx, uint32_t *off, uint32_t *len)
@@ -218,7 +259,9 @@ void spf6_build_spans(const uint16_t *px, sp2d_span_t *spans,
     }
 }
 
-OPERATE_RET spf6_open(SPF6_FILE_T *pf, const char *path, uint16_t max_w, uint16_t max_h)
+/** 真正干活的版本：**调用方必须已持有 SD 临界区**（见下面的 spf6_open）。 */
+static OPERATE_RET prv_open_locked(SPF6_FILE_T *pf, const char *path,
+                                   uint16_t max_w, uint16_t max_h)
 {
     uint8_t  hdr[SPF6_HDR_LEN];
     uint16_t nc;
@@ -404,10 +447,21 @@ OPERATE_RET spf6_open(SPF6_FILE_T *pf, const char *path, uint16_t max_w, uint16_
      * 这里直接比一次大小，把结论打进日志。**不判失败**：前面的动作还能用，
      * 让它们继续播，总比整只宠物起不来强。 */
     {
-        int64_t fsz = -1;
+        /* **另开一个句柄量大小，别动 pf->f。**
+         *
+         * fseek(END) 之后 FatFs 的文件指针停在 55MB 的尾部；下一次读要 seek 回
+         * 数据区（~1.4MB），在 FAT 上这是一次长距离**回退** seek —— 要沿簇链把
+         * FAT 走一遍。真机上紧跟着的第一次大块读就是从这里开始的，读坏之后
+         * 句柄被标成错误态、后面全空转（见 spf6_read_at 的说明）。
+         * 用临时句柄量，pf->f 就停在刚打开的 0 位置，第一次读只是短距离前进。 */
+        TUYA_FILE fsz_fp = tkl_fopen(pf->path, "rb");
+        int64_t   fsz    = -1;
 
-        if (0 == tkl_fseek(pf->f, 0, SEEK_END)) {
-            fsz = tkl_ftell(pf->f);
+        if (NULL != fsz_fp) {
+            if (0 == tkl_fseek(fsz_fp, 0, SEEK_END)) {
+                fsz = tkl_ftell(fsz_fp);
+            }
+            (void)tkl_fclose(fsz_fp);
         }
         if (fsz > 0 && (uint64_t)fsz < (uint64_t)pf->offs[pf->total_frames]) {
             PR_ERR("[spf6] %s 被**截断**：实际 %u 字节，偏移表要求 %u 字节 "
@@ -419,4 +473,22 @@ OPERATE_RET spf6_open(SPF6_FILE_T *pf, const char *path, uint16_t max_w, uint16_
     }
 
     return OPRT_OK;
+}
+
+/** 打开 .spf：头、动作表、名字表、偏移表、大小自检。
+ *
+ *  **整段读关进 SD 临界区。** 这里读的是几 KB 的表，但和"按需读字形"
+ *  （app_font.c 的 prv_glyph_bits）是同一个病：都在**非预取线程**上碰卡，
+ *  而预取线程正在同一根 SDIO 上连读。开卡/换动作的瞬间叠在一起，就是随机的
+ *  短读与 CRC 错 —— 表现成"动作读不出来"、"待机常驻 0/14 组"。
+ *
+ *  锁不可重入：内部一律走 prv_open_locked()。 */
+OPERATE_RET spf6_open(SPF6_FILE_T *pf, const char *path, uint16_t max_w, uint16_t max_h)
+{
+    OPERATE_RET rt;
+
+    app_storage_busy_enter();
+    rt = prv_open_locked(pf, path, max_w, max_h);
+    app_storage_busy_leave();
+    return rt;
 }

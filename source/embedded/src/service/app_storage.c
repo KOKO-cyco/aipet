@@ -120,9 +120,9 @@ static BOOL_T prv_readable(void)
 static BOOL_T  sg_sdio_done = FALSE;
 static int32_t sg_sdio_lines = 0;       /* 4 / 1；0 = 没起来 */
 
-/* **"能写"的那一档**，开机扫出来记在这里，之后不再重扫。
+/* **"能写"的那一档**（固定常量，不再开机扫）。
  *
- *   sg_write_lines  能写的线宽；**0 = 扫遍所有档位都写不进**（照片一定存不上）
+ *   sg_write_lines  能写的线宽；**0 = 卡没起来**（照片一定存不上）
  *   sg_write_clk    能写的时钟档
  *   sg_fast_lines   读最快的线宽（平时停在这一档）
  *
@@ -144,6 +144,11 @@ static int32_t                sg_fast_lines  = 4;
  * 它是唯一能改运行期线宽的入口（理由见 app_storage.h 里的说明）。 */
 extern OPERATE_RET tkl_sdio_init(int port, const TUYA_SDIO_BASE_CFG_T *cfg);
 
+/* 读通路是 GDMA 还是 CPU 轮询，由编译期 CONFIG_SDIO_GDMA_EN 决定（见
+ * sd_card_driver.c）。这里只读出来打一条日志 —— 换卡/换板排查时第一眼要知道
+ * 数据是走哪条路进来的。 */
+extern int g_sd_card_dma_rx_compiled;
+
 /* 按给定线宽起一次 SD 链路。
  *
  * 顺序不能变：tkl_sdio_init() 只改运行期变量，真正生效在 bk_sd_card_init()
@@ -152,7 +157,15 @@ extern OPERATE_RET tkl_sdio_init(int port, const TUYA_SDIO_BASE_CFG_T *cfg);
  *
  * 开头的 unmount / deinit 是无条件的：没挂载、没初始化过时它们各返回非 0、无害，
  * 换来的是"上一轮 4 线起了个半死状态"也能被清干净。 */
-static BOOL_T prv_try_lines(int lines)
+/* 按给定线宽起一次卡（单次尝试）。
+ *
+ * 顺序不能变：tkl_sdio_init() 只改运行期变量，真正生效在 bk_sd_card_init()
+ * （ACMD6 + sdio host 配置），而它是在 mount 内部的 disk_initialize 里触发的。
+ * 已经起来的卡不会自己换线宽 ⇒ 换线宽之前必须把卡整个拆掉。
+ *
+ * 开头的 unmount / deinit 是无条件的：没挂载、没初始化过时它们各返回非 0、无害，
+ * 换来的是"上一轮 4 线起了个半死状态"也能被清干净。 */
+static BOOL_T prv_try_lines_once(int lines)
 {
     TUYA_SDIO_BASE_CFG_T cfg = {
         .bus_width  = (4 == lines) ? TUYA_SDIO_BUS_WIDTH_4BIT
@@ -162,7 +175,7 @@ static BOOL_T prv_try_lines(int lines)
         /* clock_hz / speed_mode 都是空参数：tkl_sdio_init() 只读 bus_width，
          * 全 SDK 没有任何代码读 clock_hz。真正生效的时钟是建卡时
          * CONFIG_SDCARD_DEFAULT_CLOCK_FREQ（BK7258 上是 0 = 13M），运行期要改
-         * 只能走 bk_sd_card_set_clock() —— 见 prv_scan_clock_write()。 */
+         * 只能走 bk_sd_card_set_clock() —— 见 app_storage_write_begin()。 */
         .clock_hz   = 0,
         .flags      = 0,
     };
@@ -196,176 +209,82 @@ static BOOL_T prv_try_lines(int lines)
     return TRUE;
 }
 
-/* 写探针：写 4KB 再读回逐字节比，返回这组参数能不能写。
+/* 起卡**必须重试**（2026-10-21 真机：拍照切 1 线写时一次就失败，卷被拆掉，
+ * 紧接着字库的 fopen 全部失败）。
  *
- * 为什么值得单独做一次：照片落盘失败时，最难判的是"卡写不进去"还是"读写打架"。
- * 开机这一刻精灵还没开始预取、相机没开、也没有任何并发读者 —— 2026-10-20 实测
- * 在这个零并发窗口下写也照样失败（19 条 wr_status=0x7），所以问题不在并发，
- * 而在"主机 → 卡"这个方向本身。这个探针就是把那个结论变成一行日志的工具。
+ * 连续 deinit -> init 本身就是会偶发失败的：`sd card unsupport voltage` /
+ * CMD55 超时，SDK 自己的 disk_initialize 也是靠重试才起来的。每次重试前再
+ * deinit 一次 + 退让，把上一次"起了个半死状态"清干净。
  *
- * 4KB 而不是几个字节：一次块写至少 512B，写 8 个块能把"首块能写、后续块挂"
- * 这种半死状态也照出来。写完立刻读回逐字节比，比完删掉，不留垃圾文件。
- *
- * 失败分支用 WARN 不用 ERR：它会被时钟扫描连续调用好几次，失败的档位是预期
- * 结果，不是故障。 */
-#define STORAGE_WTEST_PATH   APP_STORAGE_MOUNT "/_wtest.bin"
-#define STORAGE_WTEST_LEN    4096
-
-static BOOL_T prv_write_probe(void)
+ * **AI 回复时命中率最高**（现场：AI 说话 + 按快门必现）：AEC 常驻吃满一个核、
+ * TTS 音频 DMA 同时在跑，建卡那几条命令（CMD0/8/55/41/2/3/7）的响应容易超时。
+ * 所以退让做成递增的，给卡和总线都留出恢复时间。 */
+#define STORAGE_LINE_TRY_TIMES  5
+static BOOL_T prv_try_lines(int lines)
 {
-    static uint8_t wr[STORAGE_WTEST_LEN];
-    static uint8_t rd[STORAGE_WTEST_LEN];
-    TUYA_FILE      f;
-    uint32_t       i;
+    static const uint32_t backoff_ms[STORAGE_LINE_TRY_TIMES] = { 0, 50, 100, 150, 200 };
 
-    for (i = 0; i < STORAGE_WTEST_LEN; i++) {
-        wr[i] = (uint8_t)(i * 31u + (i >> 3));
-    }
-
-    f = tkl_fopen(STORAGE_WTEST_PATH, "w");
-    if (NULL == f) {
-        PR_WARN("[sto] 写探针：建不了 %s（只读卷或卡满）", STORAGE_WTEST_PATH);
-        return FALSE;
-    }
-    if ((int)STORAGE_WTEST_LEN != tkl_fwrite(wr, (int)STORAGE_WTEST_LEN, f)) {
-        PR_WARN("[sto] 写探针：写入返回长度不对");
-        (void)tkl_fclose(f);
-        (void)tkl_fs_remove(STORAGE_WTEST_PATH);
-        return FALSE;
-    }
-    (void)tkl_fsync(tkl_fileno(f));
-    (void)tkl_fclose(f);
-
-    f = tkl_fopen(STORAGE_WTEST_PATH, "r");
-    if (NULL == f) {
-        PR_WARN("[sto] 写探针：写完打不开读（目录项没落盘）");
-        (void)tkl_fs_remove(STORAGE_WTEST_PATH);
-        return FALSE;
-    }
-    if ((int)STORAGE_WTEST_LEN != tkl_fread(rd, (int)STORAGE_WTEST_LEN, f)) {
-        PR_WARN("[sto] 写探针：读回长度不对");
-        (void)tkl_fclose(f);
-        (void)tkl_fs_remove(STORAGE_WTEST_PATH);
-        return FALSE;
-    }
-    (void)tkl_fclose(f);
-
-    for (i = 0; i < STORAGE_WTEST_LEN; i++) {
-        if (wr[i] != rd[i]) {
-            break;
+    for (int i = 0; i < STORAGE_LINE_TRY_TIMES; i++) {
+        if (i > 0) {
+            (void)bk_sd_card_deinit();
+            tal_system_sleep(backoff_ms[i]);
         }
-    }
-
-    (void)tkl_fs_remove(STORAGE_WTEST_PATH);
-
-    if (i != STORAGE_WTEST_LEN) {
-        PR_WARN("[sto] 写探针：第 %u 字节对不上", (unsigned)i);
-        return FALSE;
-    }
-    return TRUE;
-}
-
-/* SDIO 时钟档位表，从当前默认档往下走。
- *
- * 为什么逐个试：日志给出的形态是"读 1~2.7MB/s 很稳、每个块写都失败"，
- * `wr_status = 0x7` 是卡返回的 CRC status token 不对 —— 这是"主机 → 卡"
- * 方向时序/信号余量不足的典型表现（读是卡 → 主机方向，方向不同，余量不同）。
- * 降时钟是唯一不改硬件就能验证这一点的手段：能写通的最高档就是这块板的实际上
- * 限，扫到就定格在那里用，照片就能存了。
- *
- * 注意两个坑：
- * ① BK7258 的 CONFIG_SDCARD_DEFAULT_CLOCK_FREQ=0 对应 SDIO_HOST_CLK_13M，
- *    不是 20M。而 app_storage 过去一直写的 `.clock_hz = 20000000` 是**死参
- *    数** —— tkl_sdio_init() 只读 bus_width，全 SDK 没人读 clock_hz。所以
- *    "20MHz 就绪"那条日志一直是假的，实际跑 13M。
- * ② 13M 是已实测失败的档，所以从它开始往下扫，没有 20M 的必要（更高只会更差）。 */
-typedef struct {
-    sdio_host_clock_freq_t clk;
-    const char            *name;
-} storage_wclk_t;
-
-static const storage_wclk_t sg_wclk_tab[] = {
-    { SDIO_HOST_CLK_13M,  "13M"  },
-    { SDIO_HOST_CLK_6_5M, "6.5M" },
-    { SDIO_HOST_CLK_3_2M, "3.2M" },
-    { SDIO_HOST_CLK_1_6M, "1.6M" },
-};
-
-/* 在当前线宽下逐档降时钟，第一档写通就定格返回。
- *
- * 不改线宽、不 unmount：bk_sd_card_set_clock() 只重配 host 分频并更新
- * s_sd_card_obj.clock_freq（后者决定后续命令的超时参数），卷本身不动，所以比
- * 重新起卡快得多，也不会把已经挂好的 FAT 卷拆掉。 */
-static BOOL_T prv_scan_clock_write(int lines)
-{
-    size_t i;
-
-    for (i = 0; i < sizeof(sg_wclk_tab) / sizeof(sg_wclk_tab[0]); i++) {
-        if (BK_OK != bk_sd_card_set_clock(sg_wclk_tab[i].clk)) {
-            PR_WARN("[sto] 时钟切到 %s 失败，跳过", sg_wclk_tab[i].name);
-            continue;
-        }
-        tal_system_sleep(20);       /* 等新分频稳定，也让卡侧空出一两个周期 */
-
-        if (prv_write_probe()) {
-            /* 记下这一档，给 app_storage_write_begin() 用 —— 平时并不停在这一档上。 */
-            sg_write_lines = lines;
-            sg_write_clk   = sg_wclk_tab[i].clk;
-            PR_NOTICE("[sto] 写卡可用：%d 线 @%s —— 记下这一档",
-                      lines, sg_wclk_tab[i].name);
+        if (TRUE == prv_try_lines_once(lines)) {
+            if (i > 0) {
+                PR_NOTICE("[sto] %d 线第 %d 次起卡成功（退了 %ums）",
+                          lines, i + 1, (unsigned)backoff_ms[i]);
+            }
             return TRUE;
         }
-        PR_WARN("[sto] %d 线 @%s 写不进，降一档再试", lines, sg_wclk_tab[i].name);
     }
+    PR_WARN("[sto] %d 线连续 %d 次起卡失败", lines, STORAGE_LINE_TRY_TIMES);
     return FALSE;
 }
 
-/* 起卡 + 在该线宽下找能写的时钟档。TRUE = 这组参数读写都通。 */
-static BOOL_T prv_setup_lines(int lines)
-{
-    if (!prv_try_lines(lines)) {
-        PR_WARN("[sto] %d 线起卡失败", lines);
-        return FALSE;
-    }
-    sg_sdio_lines = lines;
-    PR_NOTICE("[sto] SDIO %d 线起卡成功（能读）", lines);
-
-    if (prv_scan_clock_write(lines)) {
-        return TRUE;
-    }
-    PR_WARN("[sto] %d 线各档时钟都写不进", lines);
-    return FALSE;
-}
-
-/* SDK 里写通路 DMA 的全局覆盖，见 sd_card_driver.c 的定义。 */
-extern int g_sd_card_dma_tx_override;
-
-/* 找一组"能写"的参数，然后把卡**停在读最快的那一档**上。
+/* 写档是**固定**的：1 线 @13M，不再开机扫。
  *
- * 返回 TRUE = 找到了（sg_write_lines / sg_write_clk 有效）。
+ * 2026-10-20 把这几种组合都试过一遍（4/1 线 × 13M/6.5M/3.2M/1.6M）：4 线每一档
+ * 都写不进（卡返回的 `wr_status = 0x7`），只有 1 线 @13M 通过。结论定下来之后，
+ * "开机逐个写探针"就只剩坏处了 —— 它每次开机要往卡上写/读/删 4KB × 最多 8 轮，
+ * 还要反复 unmount + 重挂，卡在这种反复起卡/写删之后容易进半死状态（读失败、
+ * 自己掉线、CRC 错），是我们当时"隔一阵 SD 链路就出事"的最大噪声源。
+ * 所以 2026-10-21 整段删掉，直接采用实测档。
  *
- * 关键在最后那句"切回快档"：扫完写档之后卡是停在 sg_write_lines 上的，就此返回
- * 就等于方案 A（常驻慢档、动画一直掉帧）。多起一次 4 线把它换回来，之后动画继续
- * 跑满速，只有按快门那一刻才切走。换不回去（这张卡 4 线根本起不来）就认了 ——
- * 那时"读档 == 写档"，begin/end 退化成不切换的空操作。 */
-static BOOL_T prv_find_write_mode(void)
+ * 代价很小：换一张 4 线也能写的卡时，会在按快门那一下白切一次档（1~1.5 秒），
+ * 而抓图本身要等 2 秒，用户感知不到。要重开扫描：见提交 83bc5c7 里的
+ * prv_write_probe() / prv_scan_clock_write()。 */
+#define APP_STORAGE_WRITE_LINES  1
+#define APP_STORAGE_WRITE_CLK    SDIO_HOST_CLK_13M
+
+/* 读档线宽：**4 线**（这块板读得最快的那一档）。
+ * 1 线的读带宽只有 4 线的 1/6~1/10，常驻 1 线桌宠会肉眼可见掉帧；之前那次
+ * "1 线读"是对照实验，已经撤掉。只有 4 线**起不来**时才退 1 线。 */
+#define APP_STORAGE_READ_LINES   4
+
+/* 起卡：4 线优先（读快），不行退 1 线，然后直接定格写档常量。
+ * 不试写 —— 见上面固定写档的理由。 */
+static BOOL_T prv_bring_up(void)
 {
-    if (prv_setup_lines(4)) {
-        sg_fast_lines = 4;              /* 4 线既能读又能写，最理想：永远不用切档 */
-        return TRUE;
+    if (prv_try_lines(APP_STORAGE_READ_LINES)) {
+        sg_sdio_lines = APP_STORAGE_READ_LINES;
+        sg_fast_lines = APP_STORAGE_READ_LINES;
+    } else if (prv_try_lines(1)) {
+        PR_WARN("[sto] %d 线起不来，退 1 线（动画会掉帧）", APP_STORAGE_READ_LINES);
+        sg_sdio_lines = 1;
+        sg_fast_lines = 1;
+    } else {
+        sg_sdio_lines = 0;
+        PR_ERR("[sto] SD 卡 4 线 / 1 线都起不来");
+        return FALSE;                   /* sg_write_lines 留 0：写会被如实拒掉 */
     }
-    if (prv_setup_lines(1)) {
-        if (prv_try_lines(4)) {
-            sg_sdio_lines = 4;
-            sg_fast_lines = 4;
-            PR_NOTICE("[sto] 平时 4 线读（快），拍照时临时切 %d 线写", sg_write_lines);
-        } else {
-            sg_fast_lines = 1;
-            PR_WARN("[sto] 切回 4 线失败，只能停在 1 线（动画会掉帧）");
-        }
-        return TRUE;
-    }
-    return FALSE;
+
+    sg_write_lines = APP_STORAGE_WRITE_LINES;
+    sg_write_clk   = APP_STORAGE_WRITE_CLK;
+    PR_NOTICE("[sto] 卡就绪：平时 %d 线读，拍照时切到 %d 线写；读通路 %s",
+              sg_fast_lines, sg_write_lines,
+              g_sd_card_dma_rx_compiled ? "GDMA（硬件读，单次 ≤64KB）"
+                                        : "CPU 轮询 FIFO");
+    return TRUE;
 }
 
 OPERATE_RET app_storage_sdio_setup(void)
@@ -375,34 +294,7 @@ OPERATE_RET app_storage_sdio_setup(void)
     }
     sg_sdio_done = TRUE;
 
-    /* 第一轮：保持 SDK 默认（DMA 写）。4 线优先要速度，不行退 1 线要余量。 */
-    if (prv_find_write_mode()) {
-        return OPRT_OK;
-    }
-
-    /* 第二轮：关掉 DMA 写再来一遍。
-     * 走到这里，"时钟太快"和"4 线串扰"都已经被排除，剩下两类嫌疑：驱动写通路
-     * （GDMA TX）和卡/供电/卡座。dma_tx_en 是建卡时读的，所以必须重起一次卡才
-     * 生效 —— 这是唯一能把这两类分开的软件开关。 */
-    PR_WARN("[sto] 各档时钟都写不进，关掉 DMA 写重试（对照实验）");
-    g_sd_card_dma_tx_override = 0;
-    if (prv_find_write_mode()) {
-        return OPRT_OK;                 /* 成了就保持 CPU 写，别切回 DMA */
-    }
-    g_sd_card_dma_tx_override = -1;
-
-    PR_ERR("[sto] 关 DMA 也写不进 —— 写失败在卡/供电/卡座，不在软件");
-    /* 诊断不能拖累体验：退回读得最快的组合，别停在 1 线最低时钟上。
-     * sg_write_lines 保持 0 —— 没有能写的档，app_storage_write_begin() 会如实报错。 */
-    if (prv_try_lines(4)) {
-        sg_sdio_lines = 4;
-        sg_fast_lines = 4;
-    } else if (prv_try_lines(1)) {
-        sg_sdio_lines = 1;
-        sg_fast_lines = 1;
-    } else {
-        sg_sdio_lines = 0;
-        PR_ERR("[sto] SD 卡 4 线 / 1 线都起不来");
+    if (!prv_bring_up()) {
         return OPRT_COM_ERROR;
     }
     (void)bk_sd_card_set_clock(SDIO_HOST_CLK_13M);
@@ -432,9 +324,22 @@ OPERATE_RET app_storage_write_begin(void)
     app_storage_busy_enter();
 
     if (sg_sdio_lines != sg_write_lines) {
+        const int32_t prev = sg_sdio_lines;
+
         if (!prv_try_lines(sg_write_lines)) {
+            /* **切档失败必须切回去。** 切档的过程是 unmount -> deinit -> init，
+             * 失败时卷是"拆了没挂上"的状态：后面所有读（字库按需读字形、精灵）
+             * 都会对着一个死卷 fopen 失败，直到下一次写档或链路重建才恢复。
+             * 这里把卡重新起回原来那一档，读能力立刻回来。 */
+            PR_ERR("[sto] 切到写档（%d 线）失败，切回 %d 线", sg_write_lines, (int)prev);
+            if (0 != prev && prv_try_lines(prev)) {
+                sg_sdio_lines = prev;
+                PR_NOTICE("[sto] 已切回 %d 线（读恢复）", (int)prev);
+            } else {
+                sg_sdio_lines = 0;
+                PR_ERR("[sto] 切回 %d 线也失败，卡不可用", (int)prev);
+            }
             app_storage_busy_leave();
-            PR_ERR("[sto] 切到写档（%d 线）失败", sg_write_lines);
             return OPRT_COM_ERROR;
         }
         sg_sdio_lines = sg_write_lines;

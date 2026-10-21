@@ -582,38 +582,62 @@ static void __cam_place(void)
         lv_timer_set_period(sg_cam_tmr, 200);
     }
 
-    if (app_camera_overlay_enable(sc.x1, sc.y1 + top, w, h - top)) {
-        PR_NOTICE("[cam] 取景框 overlay %dx%d（顶部 %d 留给控件）", w, h - top, top);
-        return;
+    /* 取景框按**帧的宽高比内接**：整帧都看得见。
+     *
+     * 帧是旋转后的 240×320（摄像头模组在板上转了 90° 装，见 app_camera.h），
+     * 而容器是 236×168 的横条。以前直接把容器交给 overlay，覆盖映射（cover）
+     * 会把上下各裁掉约 23% —— 取景框里框住的东西，拍出来上下会多出一截。
+     *
+     * 这里把框收成 3:4 的内接矩形（约 126×168，水平居中），容器剩下的地方
+     * 留页面底色。**框始终在容器内部**，不会压到顶部控件，也不会越出去盖住
+     * 下面的快门行。 */
+    {
+        int avail_h = h - top;
+        int bw = w;
+        int bh = (int)((int64_t)w * APP_CAM_PREVIEW_H / APP_CAM_PREVIEW_W);
+        int bx, by;
+
+        if (bh > avail_h) {
+            bh = avail_h;
+            bw = (int)((int64_t)avail_h * APP_CAM_PREVIEW_W / APP_CAM_PREVIEW_H);
+        }
+        bx = sc.x1 + (w - bw) / 2;
+        by = sc.y1 + top + (avail_h - bh) / 2;
+
+        if (app_camera_overlay_enable(bx, by, bw, bh, PET_RADIUS_CARD)) {
+            PR_NOTICE("[cam] 取景框 overlay %dx%d（容器 %dx%d，顶部 %d 留给控件）",
+                      bw, bh, w, h, top);
+            return;
+        }
+        PR_WARN("[cam] overlay 没起来，退回 LVGL 画布");
+
+        sg_cam_buf = (uint16_t *)tal_psram_malloc((size_t)bw * (size_t)bh * 2u);
+        if (NULL == sg_cam_buf) {
+            PR_WARN("[cam] 取景框缓冲分配失败（%dx%d）", bw, bh);
+            return;
+        }
+        sg_cam_w = bw;
+        sg_cam_h = bh;
+
+        /* 退回画布时把它摆到 overlay 本该在的位置，别贴着左上角。 */
+        cv = lv_canvas_create(sg_cam_cv);
+        lv_canvas_set_buffer(cv, sg_cam_buf, bw, bh, LV_COLOR_FORMAT_RGB565);
+        lv_obj_set_pos(cv, bx - sc.x1, by - sc.y1);
+        lv_obj_remove_flag(cv, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(cv, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_radius(cv, 0, 0);
+        lv_obj_set_style_border_width(cv, 0, 0);
+        lv_obj_set_style_pad_all(cv, 0, 0);
+        lv_obj_add_event_cb(cv, __cam_buf_free_cb, LV_EVENT_DELETE, sg_cam_buf);
+        sg_cam_cv = cv;
+
+        /* 先铺成深色底，第一帧到之前不至于是一块花屏。 */
+        for (int i = 0; i < bw * bh; i++) {
+            sg_cam_buf[i] = 0x10E5;         /* 0x141C2E */
+        }
+
+        PR_NOTICE("[cam] 取景框实时预览 %dx%d", bw, bh);
     }
-
-    PR_WARN("[cam] overlay 没起来，退回 LVGL 画布");
-
-    sg_cam_buf = (uint16_t *)tal_psram_malloc((size_t)w * (size_t)h * 2u);
-    if (NULL == sg_cam_buf) {
-        PR_WARN("[cam] 取景框缓冲分配失败（%dx%d）", w, h);
-        return;
-    }
-    sg_cam_w = w;
-    sg_cam_h = h;
-
-    /* 先铺成深色底，第一帧到之前不至于是一块花屏。 */
-    for (int i = 0; i < w * h; i++) {
-        sg_cam_buf[i] = 0x10E5;         /* 0x141C2E */
-    }
-
-    cv = lv_canvas_create(sg_cam_cv);
-    lv_canvas_set_buffer(cv, sg_cam_buf, w, h, LV_COLOR_FORMAT_RGB565);
-    lv_obj_set_pos(cv, 0, 0);
-    lv_obj_remove_flag(cv, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_remove_flag(cv, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_radius(cv, 0, 0);
-    lv_obj_set_style_border_width(cv, 0, 0);
-    lv_obj_set_style_pad_all(cv, 0, 0);
-    lv_obj_add_event_cb(cv, __cam_buf_free_cb, LV_EVENT_DELETE, sg_cam_buf);
-    sg_cam_cv = cv;
-
-    PR_NOTICE("[cam] 取景框实时预览 %dx%d", w, h);
 }
 
 static void __cam_tick_cb(lv_timer_t *t)
@@ -755,15 +779,17 @@ static void __build_viewfinder(lv_obj_t *parent)
     lv_obj_t *chip;
 
     pui_passthrough(frame);
-    lv_obj_set_width(frame, LV_PCT(100));
+    /* 预览在左边、占满剩余宽度和整个高度（父容器是横向排布，见页面构建处）。 */
+    lv_obj_set_width(frame, 0);
     lv_obj_set_flex_grow(frame, 1);
+    lv_obj_set_height(frame, LV_PCT(100));
     lv_obj_set_style_bg_color(frame, PET_COLOR_PREVIEW, 0);
     lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
-    /* 取景框四角直角、零内边距：相机画面铺满整块，四周不留边。 */
-    lv_obj_set_style_radius(frame, 0, 0);
+    /* 四角跟卡片同半径：这块是贴着卡片边缘的，直角会把卡片的圆角盖掉。 */
+    lv_obj_set_style_radius(frame, PET_RADIUS_CARD, 0);
     lv_obj_set_style_pad_all(frame, 0, 0);
     lv_obj_set_style_border_width(frame, 0, 0);
-    lv_obj_set_style_clip_corner(frame, FALSE, 0);
+    lv_obj_set_style_clip_corner(frame, TRUE, 0);
 
     scene = lv_obj_create(frame);
     pui_passthrough(scene);
@@ -774,8 +800,8 @@ static void __build_viewfinder(lv_obj_t *parent)
     lv_obj_set_style_bg_grad_color(scene, lv_color_hex(0x141C2E), 0);
     lv_obj_set_style_bg_grad_dir(scene, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_opa(scene, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(scene, 0, 0);
-    lv_obj_set_style_clip_corner(scene, FALSE, 0);
+    lv_obj_set_style_radius(scene, PET_RADIUS_CARD, 0);
+    lv_obj_set_style_clip_corner(scene, TRUE, 0);
     lv_obj_add_event_cb(scene, __scene_del_cb, LV_EVENT_DELETE, NULL);
 
     if (OPRT_OK == app_camera_open()) {
@@ -1029,17 +1055,24 @@ void pet_page_camera_build(lv_obj_t *panel)
     lv_obj_set_height(inner, 0);
     lv_obj_set_flex_grow(inner, 1);
     /* 相机页的卡片内边距清零：取景框直接铺到卡片边缘，四周不留边框。
-     * 底部保留 PUI_CARD_PAD，快门那一行不贴边。 */
+     * 右边保留 PUI_CARD_PAD，控件列不贴卡片边。
+     *
+     * **横向排布**：预览在左（按帧的 3:4 竖着铺满整个高度），控件列在右。
+     * 原来是上下排（预览在上、相册/快门/设置一行在下），那时预览只能拿到
+     * 236×168 的横条，而帧是 240×320 的竖图 —— 按比例内接只剩 126×168，
+     * 左右空一大片。改成左右排之后预览能拿到约 168×224，基本铺满。 */
+    lv_obj_set_flex_flow(inner, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_all(inner, 0, 0);
-    lv_obj_set_style_pad_row(inner, CAM_STAGE_GAP, 0);
-    lv_obj_set_style_pad_bottom(inner, PUI_CARD_PAD, 0);
+    lv_obj_set_style_pad_column(inner, CAM_STAGE_GAP, 0);
+    lv_obj_set_style_pad_right(inner, PUI_CARD_PAD, 0);
 
     __build_viewfinder(inner);
 
-    row = pui_box_create(inner, PUI_FLOW_ROW, CAM_ROW_GAP);
-    lv_obj_set_style_pad_hor(row, PUI_CARD_PAD, 0);
-    lv_obj_set_height(row, CAM_SHUTTER);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    /* 控件列：相册 / 快门 / 设置 竖着排，宽就是快门的直径。 */
+    row = pui_box_create(inner, PUI_FLOW_COLUMN, CAM_ROW_GAP);
+    lv_obj_set_width(row, CAM_SHUTTER);
+    lv_obj_set_height(row, LV_PCT(100));
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     /* Stacked: the row is as tall as the shutter, so the two buttons beside it have the
        height to stand up. Flat, they would read as captions flanking a disc rather than

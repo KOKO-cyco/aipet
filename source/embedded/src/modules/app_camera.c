@@ -17,6 +17,7 @@
 
 #include <string.h>
 #include <stdlib.h>                     /* strtol：解析 flash 里存的参数串 */
+#include <math.h>                       /* overlay 圆角覆盖率表（sqrtf） */
 
 #include "tal_api.h"
 #include "lvgl.h"                       /* overlay：把预览直接写进显示 framebuffer */
@@ -87,6 +88,8 @@ static uint32_t sg_conv_ms_max;
 static uint32_t sg_rot_ms_sum;              /* 其中硬件 ROTT 那一拍的耗时 */
 static uint32_t sg_rot_ms_max;
 static uint32_t sg_last_conv_ms;            /* 预览限帧：上一帧转换的时间 */
+static uint32_t sg_ov_draw_cnt;             /* overlay 实际合成次数（2 秒窗口） */
+static uint32_t sg_ov_skip;                 /* overlay 跳过合成的次数（2 秒窗口） */
 
 /* 应用层的 YUV422 排列。SDK 的 TUYA_YUV422_ORDER_E 只有 UYVY/YUYV 两种，
  * 但实测这块板子的 GC2145 输出的是 VYUY，所以在应用层补一种。 */
@@ -481,13 +484,17 @@ static OPERATE_RET prv_raw_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame
         } else if ((now - sg_fps_t0) >= 2000u) {
             uint32_t ms = now - sg_fps_t0;
 
-            PR_DEBUG(CAM_TAG " 预览 %u 帧/%ums（约 %u fps），转换 平均 %u ms 最大 %u ms（其中 ROTT %u/%u）",
+            /* 合成/跳过：overlay 是"有新帧或有人画到取景框上"才重画，这一对比
+             * 能直接看出降频有没有生效（相机 10fps 时合成次数应≈帧数）。 */
+            PR_DEBUG(CAM_TAG " 预览 %u 帧/%ums（约 %u fps），转换 平均 %u ms 最大 %u ms"
+                     "（其中 ROTT %u/%u），overlay 合成 %u 跳过 %u",
                      (unsigned)sg_fps_cnt, (unsigned)ms,
                      (unsigned)(sg_fps_cnt * 1000u / ms),
                      (unsigned)(sg_conv_ms_sum / sg_fps_cnt),
                      (unsigned)sg_conv_ms_max,
                      (unsigned)(sg_rot_ms_sum / sg_fps_cnt),
-                     (unsigned)sg_rot_ms_max);
+                     (unsigned)sg_rot_ms_max,
+                     (unsigned)sg_ov_draw_cnt, (unsigned)sg_ov_skip);
 
             sg_fps_cnt     = 0;
             sg_fps_t0      = now;
@@ -495,6 +502,8 @@ static OPERATE_RET prv_raw_cb(TDL_CAMERA_HANDLE_T hdl, TDL_CAMERA_FRAME_T *frame
             sg_conv_ms_max = 0;
             sg_rot_ms_sum  = 0;
             sg_rot_ms_max  = 0;
+            sg_ov_draw_cnt = 0;
+            sg_ov_skip     = 0;
         }
     }
     return OPRT_OK;
@@ -717,7 +726,7 @@ static BOOL_T prv_save_shot(char *path, size_t path_sz)
      *
      * mkdir 必须在切档**之后**：建目录本身就是在写卡，放在前面等于用 4 线写一遍。 */
     if (OPRT_OK != app_storage_write_begin()) {
-        PR_ERR(CAM_TAG " 这张卡没有能写的档位（见开机 [sto] 扫描日志），照片没存");
+        PR_ERR(CAM_TAG " 切不到写档（1 线），照片没存；看上面 [sto] 的起卡日志");
         return FALSE;
     }
 
@@ -765,8 +774,8 @@ static BOOL_T prv_save_shot(char *path, size_t path_sz)
     app_storage_write_end();
 
     if (!ok) {
-        PR_ERR(CAM_TAG " %s 落盘失败（3 次都校验不过）。对照开机那条"
-                       "「写卡扫描」：它也失败就是卡/供电，通过才是并发问题",
+        PR_ERR(CAM_TAG " %s 落盘失败（3 次都校验不过）。写档是固定的 1 线 @13M"
+                       "（开机不再试写），所以这基本只剩卡/供电/卡座三种解释",
                full);
         return FALSE;
     }
@@ -1399,8 +1408,10 @@ static void prv_param_load(void)
 
 /* ---- overlay：预览直接写进显示 framebuffer -------------------------------- */
 
-/* SDK 显示端口的 pre-flush 钩子（lv_port_disp_internal.h，应用不直接包含它）。 */
-typedef void (*APP_CAM_PRE_FLUSH_CB)(TDL_DISP_FRAME_BUFF_T *fb);
+/* SDK 显示端口的 pre-flush 钩子（lv_port_disp_internal.h，应用不直接包含它）。
+ * 第二个参数是本次刷新 LVGL 重绘的区域（逻辑坐标）—— 合成用它判断"这次有没有
+ * 人画到取景框上"，没画到就跳过重画。 */
+typedef void (*APP_CAM_PRE_FLUSH_CB)(TDL_DISP_FRAME_BUFF_T *fb, const lv_area_t *area);
 extern void lv_port_set_pre_flush_cb(APP_CAM_PRE_FLUSH_CB cb);
 
 /* 缓存回写：CPU 直接写 fb 之后，必须把这段刷回 PSRAM，DMA/面板才能看到。 */
@@ -1413,21 +1424,93 @@ static uint32_t sg_ov_drawn_gen;            /* 上一次画进 fb 的帧代数 *
 static int      sg_ov_ox, sg_ov_oy;         /* 逻辑原点对应的面板点 */
 static int      sg_ov_ax, sg_ov_ay;         /* 逻辑 +x 在面板上的单位步进 */
 static int      sg_ov_bx, sg_ov_by;         /* 逻辑 +y 在面板上的单位步进 */
+static int      sg_ov_lx, sg_ov_ly;         /* 取景框的逻辑原点（脏矩形反查用） */
+static int      sg_ov_px0, sg_ov_py0;       /* 面板包围盒（未钳制） */
+static int      sg_ov_px1, sg_ov_py1;
 static int      sg_ov_w, sg_ov_h;           /* 逻辑尺寸 */
 static BOOL_T   sg_ov_paused;               /* 弹窗盖在取景框上时暂停合成 */
 static uint16_t sg_ov_mx[APP_CAM_OV_MAX];   /* 逻辑 x -> 预览 x */
 static uint16_t sg_ov_my[APP_CAM_OV_MAX];   /* 逻辑 y -> 预览 y */
 
+/* 圆角：角方块里的覆盖率表（0..255）。只算一次，合成时查表。
+ * 半径上限取 40 —— 卡片圆角是 20（PET_RADIUS_CARD），留一倍余量。 */
+#define APP_CAM_OV_RAD_MAX   40
+static int     sg_ov_rad;
+static uint8_t sg_ov_cov[APP_CAM_OV_RAD_MAX][APP_CAM_OV_RAD_MAX];
+
+/**
+ * 本次刷新的脏矩形（逻辑坐标）有没有压到取景框上。
+ *
+ * 映射和合成用的是同一组仿射基：逻辑点 (lx,ly) -> 面板
+ *   px = ox + (lx-lx0)*ax + (ly-ly0)*bx
+ *   py = oy + (lx-lx0)*ay + (ly-ly0)*by
+ * 取脏矩形两个对角点各映射一次、取包围盒，再和取景框的面板包围盒求交即可。
+ * **只是区域判定，不参与像素寻址** —— 合成那块算法一个字没动。
+ */
+static BOOL_T prv_ov_area_hit(const lv_area_t *area)
+{
+    const int INF = 0x7FFFFFFF;
+    int       lxs[2], lys[2];
+    int       px0 = INF, py0 = INF, px1 = -INF, py1 = -INF;
+    int       i, j;
+
+    if (NULL == area) {
+        return TRUE;                    /* 没给区域：保守当命中 */
+    }
+    lxs[0] = area->x1;
+    lxs[1] = area->x2;
+    lys[0] = area->y1;
+    lys[1] = area->y2;
+
+    for (i = 0; i < 2; i++) {
+        for (j = 0; j < 2; j++) {
+            int dx = lxs[i] - sg_ov_lx;
+            int dy = lys[j] - sg_ov_ly;
+            int px = sg_ov_ox + dx * sg_ov_ax + dy * sg_ov_bx;
+            int py = sg_ov_oy + dx * sg_ov_ay + dy * sg_ov_by;
+
+            if (px < px0) px0 = px;
+            if (px > px1) px1 = px;
+            if (py < py0) py0 = py;
+            if (py > py1) py1 = py;
+        }
+    }
+    return (px1 < sg_ov_px0 || px0 > sg_ov_px1 ||
+            py1 < sg_ov_py0 || py0 > sg_ov_py1) ? FALSE : TRUE;
+}
+
+/** RGB565 按覆盖率与已有像素混合（overlay 的圆角边缘用）。
+ *  名字带 ov_：文件里已经有一个 prv_blend565（合影用，参数是 0..255 的 alpha）。 */
+static uint16_t prv_ov_blend565(uint16_t dst, uint16_t src, int cov)
+{
+    int sr = (src >> 11) & 0x1F, sg = (src >> 5) & 0x3F, sb = src & 0x1F;
+    int dr = (dst >> 11) & 0x1F, dg = (dst >> 5) & 0x3F, db = dst & 0x1F;
+    int r  = (sr * cov + dr * (255 - cov)) / 255;
+    int g  = (sg * cov + dg * (255 - cov)) / 255;
+    int b  = (sb * cov + db * (255 - cov)) / 255;
+
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
 /**
  * pre-flush 回调：跑在 LVGL 线程的 flush 里，只做内存拷贝，不碰 LVGL API。
  *
- * **每次 flush 都重画，不只在"有新帧"时画。** 以前按帧代数跳过重复绘制，省下
- * 一点 CPU，但代价是：LVGL 只要在这块区域里重绘了任何东西（按返回键时按钮的
- * 按下态、阴影、chip 的动画），framebuffer 就被刷回页面底色，而预览要等到下一个
- * 相机帧（≤100ms）才补回来 —— 用户看到的就是"点返回，画面上闪一下黑块"。
- * 每次重画的代价是 54K 像素（约 1~1.5ms），换来的是"预览永远是这一层最上面的"。
+ * **现在是"按需重画"**（2026-10-21）：
+ *
+ *   1) 有新相机帧（帧代数变了）   -> 整块重画；
+ *   2) 没有新帧，但本次刷新 LVGL 确实画到了取景框区域 -> 也整块重画；
+ *   3) 两者都不满足               -> 直接返回，framebuffer 里保留上一次的合成结果。
+ *
+ * 为什么以前是"每次 flush 都重画"：LVGL 只要在取景框里重绘了任何东西（按返回键
+ * 时按钮的按下态），fb 就被刷回页面底色，而预览要等下一个相机帧（≤100ms）才补
+ * 回来 —— 用户看到"点返回，画面上闪一下黑块"。第 2 条就是治它的，作用和当初
+ * 一样，但只在该重画时才付代价。
+ *
+ * 代价对比：相机 10fps、页面刷新 30+fps，以前 2/3 的合成在重复画同一帧；
+ * 每次约 15ms（40K 像素 PSRAM 读+写），显示线程近一半时间耗在这里。现在
+ * 常态下每秒只合成 10 次。
  */
-static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb)
+static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb, const lv_area_t *area)
 {
     const uint16_t *src;
     uint16_t       *dst;
@@ -1442,36 +1525,29 @@ static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb)
     if (front < 0 || NULL == sg_buf[front]) {
         return;
     }
+
+    /* 没有新帧、这次刷新也没画到取景框上：不必重做合成。 */
+    if (sg_gen == sg_ov_drawn_gen && !prv_ov_area_hit(area)) {
+        sg_ov_skip++;
+        return;
+    }
     sg_ov_drawn_gen = sg_gen;
+    sg_ov_draw_cnt++;
+
     src = sg_buf[front];
     dst = (uint16_t *)fb->frame;
     fw  = (int)fb->width;
 
-    /* 面板包围盒：四个角点都映射一遍取 min/max。 */
-    {
-        int cx[4], cy[4];
-
-        cx[0] = sg_ov_ox;
-        cy[0] = sg_ov_oy;
-        cx[1] = sg_ov_ox + (sg_ov_w - 1) * sg_ov_ax;
-        cy[1] = sg_ov_oy + (sg_ov_w - 1) * sg_ov_ay;
-        cx[2] = sg_ov_ox + (sg_ov_h - 1) * sg_ov_bx;
-        cy[2] = sg_ov_oy + (sg_ov_h - 1) * sg_ov_by;
-        cx[3] = cx[1] + (sg_ov_h - 1) * sg_ov_bx;
-        cy[3] = cy[1] + (sg_ov_h - 1) * sg_ov_by;
-
-        px0 = px1 = cx[0];
-        py0 = py1 = cy[0];
-        for (int i = 1; i < 4; i++) {
-            if (cx[i] < px0) px0 = cx[i];
-            if (cx[i] > px1) px1 = cx[i];
-            if (cy[i] < py0) py0 = cy[i];
-            if (cy[i] > py1) py1 = cy[i];
-        }
-        if (px0 < 0) px0 = 0;
-        if (py0 < 0) py0 = 0;
-        if (px1 >= fw) px1 = fw - 1;
-        /* 面板高度由调用方保证；这里只钳 x。 */
+    /* 面板包围盒：启用时按四个角点算好并保存，这里只做屏幕钳制。 */
+    px0 = sg_ov_px0;
+    py0 = sg_ov_py0;
+    px1 = sg_ov_px1;
+    py1 = sg_ov_py1;
+    if (px0 < 0) px0 = 0;
+    if (py0 < 0) py0 = 0;
+    if (px1 >= fw) px1 = fw - 1;
+    if (px1 < px0 || py1 < py0) {
+        return;
     }
 
     /* 逐面板像素反查逻辑坐标：面板行连续写，源图是跨行读（可接受）。
@@ -1488,8 +1564,37 @@ static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb)
         for (int px = px0; px <= px1; px++, lx += sg_ov_ax, ly += sg_ov_bx) {
             if (lx >= 0 && lx < sg_ov_w && ly >= 0 && ly < sg_ov_h) {
                 /* 白平衡微调在这里做：写进 fb 的每个像素都过一遍 R/B 增益查表。 */
-                drow[px - px0] = prv_wb_px(
+                uint16_t sp = prv_wb_px(
                     src[(size_t)sg_ov_my[ly] * APP_CAM_PREVIEW_W + sg_ov_mx[lx]]);
+
+                /* 圆角：只处理四个角的 r×r 方块，其余像素一次比较就跳过。 */
+                if (sg_ov_rad > 0) {
+                    int u = -1;
+                    int v = -1;
+
+                    if (px < px0 + sg_ov_rad) {
+                        u = px - px0;
+                    } else if (px > px1 - sg_ov_rad) {
+                        u = px1 - px;
+                    }
+                    if (py < py0 + sg_ov_rad) {
+                        v = py - py0;
+                    } else if (py > py1 - sg_ov_rad) {
+                        v = py1 - py;
+                    }
+
+                    if (u >= 0 && v >= 0) {
+                        int cov = sg_ov_cov[v][u];
+
+                        if (0 == cov) {
+                            continue;           /* 圆外：保留 fb 里的卡片底色 */
+                        }
+                        if (cov < 255) {
+                            sp = prv_ov_blend565(drow[px - px0], sp, cov);
+                        }
+                    }
+                }
+                drow[px - px0] = sp;
             }
         }
         /* 这一行已经写完整，刷回 PSRAM，供 DMA/面板读取。 */
@@ -1497,7 +1602,7 @@ static void prv_overlay_cb(TDL_DISP_FRAME_BUFF_T *fb)
     }
 }
 
-BOOL_T app_camera_overlay_enable(int x, int y, int w, int h)
+BOOL_T app_camera_overlay_enable(int x, int y, int w, int h, int radius)
 {
     lv_display_t *disp = lv_display_get_default();
     lv_area_t     a, b, c;
@@ -1508,6 +1613,31 @@ BOOL_T app_camera_overlay_enable(int x, int y, int w, int h)
     }
     if (w < 2 || h < 2 || 0 == (w - 1) || 0 == (h - 1)) {
         return FALSE;
+    }
+
+    /* 圆角覆盖率表：角方块里每个像素被圆盖住多少（0..255），只建一次。
+     * 圆心取 (radius, radius)，像素中心在 (u+0.5, v+0.5)，按"半径 - 距离 + 0.5"
+     * 算覆盖率 —— 和 LVGL 自己的抗锯齿同一套做法。 */
+    if (radius < 0 || radius > APP_CAM_OV_RAD_MAX || radius * 2 >= w || radius * 2 >= h) {
+        radius = 0;
+    }
+    sg_ov_rad = radius;
+    if (radius > 0) {
+        for (int v = 0; v < radius; v++) {
+            for (int u = 0; u < radius; u++) {
+                float dx = (float)radius - ((float)u + 0.5f);
+                float dy = (float)radius - ((float)v + 0.5f);
+                float d  = sqrtf(dx * dx + dy * dy);
+                float cv = (float)radius - d + 0.5f;
+
+                if (cv < 0.0f) {
+                    cv = 0.0f;
+                } else if (cv > 1.0f) {
+                    cv = 1.0f;
+                }
+                sg_ov_cov[v][u] = (uint8_t)(cv * 255.0f + 0.5f);
+            }
+        }
     }
 
     /* 用 LVGL 自己的旋转把三个角点映射到面板坐标，避免手写 90° 公式。 */
@@ -1524,8 +1654,34 @@ BOOL_T app_camera_overlay_enable(int x, int y, int w, int h)
     sg_ov_ay = (b.y1 - a.y1) / (w - 1);
     sg_ov_bx = (c.x1 - a.x1) / (h - 1);
     sg_ov_by = (c.y1 - a.y1) / (h - 1);
+    sg_ov_lx = x;
+    sg_ov_ly = y;
     sg_ov_w  = w;
     sg_ov_h  = h;
+    sg_ov_skip = 0;
+
+    /* 面板包围盒：四个角点映射一遍取 min/max，合成时直接用（每帧都要）。 */
+    {
+        int cx[4], cy[4];
+
+        cx[0] = sg_ov_ox;
+        cy[0] = sg_ov_oy;
+        cx[1] = sg_ov_ox + (w - 1) * sg_ov_ax;
+        cy[1] = sg_ov_oy + (w - 1) * sg_ov_ay;
+        cx[2] = sg_ov_ox + (h - 1) * sg_ov_bx;
+        cy[2] = sg_ov_oy + (h - 1) * sg_ov_by;
+        cx[3] = cx[1] + (h - 1) * sg_ov_bx;
+        cy[3] = cy[1] + (h - 1) * sg_ov_by;
+
+        sg_ov_px0 = sg_ov_px1 = cx[0];
+        sg_ov_py0 = sg_ov_py1 = cy[0];
+        for (int i = 1; i < 4; i++) {
+            if (cx[i] < sg_ov_px0) sg_ov_px0 = cx[i];
+            if (cx[i] > sg_ov_px1) sg_ov_px1 = cx[i];
+            if (cy[i] < sg_ov_py0) sg_ov_py0 = cy[i];
+            if (cy[i] > sg_ov_py1) sg_ov_py1 = cy[i];
+        }
+    }
 
     /* cover 映射：逻辑矩形 -> 240×320 预览（比例不同就裁，不拉伸）。 */
     src_w = APP_CAM_PREVIEW_W;
