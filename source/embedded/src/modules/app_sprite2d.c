@@ -1436,9 +1436,23 @@ OPERATE_RET app_sprite2d_init(void)
                 sg_data.idle_off[i] = sg_data.file.offs[i] - sg_data.file.offs[0];
             }
 
-            if (TRUE != spf6_read_at(&sg_data.file, sg_data.file.offs[0],
-                                     rle_len, sg_data.idle_rle)) {
-                PR_ERR("[sp2d] idle 的 RLE 读失败（%u 字节）", (unsigned)rle_len);
+            /* idle 整组要一次读 700~800KB。开机那一刻卡刚挂上，第一次读撞上
+             * 还没准备好的窗口是常事 —— 实测一次失败就放弃会让"待机常驻 0/14 组"，
+             * 之后每一帧都得从卡上读，赶上卡不稳就是整只宠物卡住。
+             * 所以退让着重试几次再认输。 */
+            for (int attempt = 0; attempt < 3; attempt++) {
+                if (attempt > 0) {
+                    tal_system_sleep(30);
+                }
+                if (TRUE == spf6_read_at(&sg_data.file, sg_data.file.offs[0],
+                                         rle_len, sg_data.idle_rle)) {
+                    ok = TRUE;
+                    break;
+                }
+                PR_WARN("[sp2d] idle 的 RLE 读失败（%u 字节），第 %d 次",
+                        (unsigned)rle_len, attempt + 1);
+            }
+            if (!ok) {
                 break;
             }
 

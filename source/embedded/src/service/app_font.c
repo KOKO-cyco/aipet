@@ -140,6 +140,7 @@ typedef struct {
     char                          path[48];   /* 重开用（SD 切档/重建会作废句柄）*/
     uint8_t                       idx;        /* 在 s_fpx[] 里的下标（缓存行的键）*/
     uint32_t                      media_gen;  /* 打开/上次重开时的链路代次 */
+    uint32_t                      last_try_ms;/* 上次尝试重开的时间（失败限流用）*/
     uint16_t                      cache_next; /* 轮转指针（简单的近似 LRU） */
     uint32_t                      last_letter;/* 最近一次查过的字，cmap 查表缓存 */
     uint32_t                      last_gid;
@@ -692,16 +693,32 @@ static uint32_t prv_gid(APP_SDFONT_T *f, uint32_t letter)
  *  新出现的字就全是空白。 */
 static BOOL_T prv_font_reopen(APP_SDFONT_T *f)
 {
+    uint32_t now = tal_system_get_millisecond();
+
+    /* **卡不在就一个字都别试。**
+     *
+     * FatFs 在"驱动没初始化"的时候，一次 fopen 内部要重试三轮（disk_read
+     * retry 0/1/2），实测单次约 2 秒 —— 而这里是**画字的时候**跑的，也就是
+     * LVGL 线程。拔卡之后每个新字形都会撞一次，界面直接冻住：nosd 门页弹不出来、
+     * 按键没反应，日志里那一串 `tkl_fopen failed: puhui14.bin` 就是它。
+     *
+     * 卡不在时返回失败就行 —— 字形缓存里已有的字照常显示，缓存外的这一帧空着，
+     * 等卡回来（或门页接管）自然恢复。 */
+    if (!app_storage_card_present()) {
+        return FALSE;
+    }
+
+    /* 卡在、但刚试过：限流。卡半死不活的时候（读一次失败一次）别每个字形都撞。 */
+    if (0 != f->last_try_ms && (now - f->last_try_ms) < 500u) {
+        return FALSE;
+    }
+    f->last_try_ms = now;
+
     if (NULL != f->fp) {
         tkl_fclose(f->fp);
         f->fp = NULL;
     }
 
-    /* **只试一次，不在这里等、也不在这里重建链路。**
-     *
-     * 这个函数跑在 LVGL 线程里（画字的那一刻），等 80ms 会把整个界面卡住。
-     * 链路重挂之后卡是挂着的，直接 fopen 一般就成；不成就是这一帧的字不画，
-     * 下一帧再来 —— 大不了晚 16ms 出现，比卡住强。 */
     f->fp = tkl_fopen(f->path, "rb");
     if (NULL != f->fp) {
         f->media_gen = app_storage_media_gen();

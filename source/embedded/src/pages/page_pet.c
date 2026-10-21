@@ -691,6 +691,15 @@ static uint32_t sg_refr_at;
  *  抽搐排查用：兜底次数和抽搐同时出现，就说明是供给没跟上。 */
 static uint32_t sg_fb_n;
 
+/** 当前这一组**连续**兜底了多少拍。
+ *
+ * 卡上那一段读不出来的时候（素材文件损坏 / 卡坏块），这一组的帧永远到不了，
+ * 帧号也就永远不前进 —— 兜底画的是"上一帧"，于是角色**定格在那一个姿势**，
+ * 不会自己回待机。连续这么多拍还读不到就认定这个动作废了，按"演完"处理，
+ * 下一拍收敛回待机（待机是常驻内存的，不吃卡）。 */
+#define PET_FB_GIVEUP   20u
+static uint32_t sg_fb_run;
+
 /** @brief 记一拍的耗时，满 2 秒打一条。
  *
  * **量的是"一拍"而不是"一次刷屏"**：刷屏已经交给 LVGL 自己的 32ms 定时器了，
@@ -1004,7 +1013,19 @@ static void prv_tick_cb(lv_timer_t *t)
                             sg_frame_idx--;
                         }
                         sg_fb_n++;
+
+                        /* 连续读不到 = 这个动作的素材废了：按"演完"处理，
+                         * 下一拍收敛回待机，别让角色定格在那一帧上。 */
+                        if (++sg_fb_run >= PET_FB_GIVEUP) {
+                            sg_fb_run    = 0;
+                            sg_clip_once = FALSE;
+                            sg_clip_at   = now;
+                            PR_WARN("[pet] %s 连续 %u 拍读不到，当作演完切回待机",
+                                    app_sprite2d_clip_name(sg_clip),
+                                    (unsigned)PET_FB_GIVEUP);
+                        }
                     } else {
+                        sg_fb_run        = 0;
                         sg_painted_clip  = sg_clip;
                         sg_painted_frame = lf;
                     }
