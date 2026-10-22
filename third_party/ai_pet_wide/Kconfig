@@ -1,0 +1,15 @@
+menu "configure app (ai_pet) "
+
+config APP_CONFIG
+    bool
+    default y
+
+config APP_PET_TODO_MAX
+    int "maximum number of to-do items kept in RAM"
+    range 4 128
+    default 32
+    help
+        The to-do page keeps its list in a fixed-size array so the UI never
+        allocates while a page is being built. This caps that array.
+
+endmenu

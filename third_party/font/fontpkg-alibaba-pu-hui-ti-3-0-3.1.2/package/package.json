@@ -1,0 +1,32 @@
+{
+  "name": "@fontpkg/alibaba-pu-hui-ti-3-0",
+  "version": "3.1.2",
+  "description": "Font package for 阿里巴巴普惠体 3.0",
+  "keywords": [
+    "font",
+    "fonts",
+    "alibaba-pu-hui-ti-3-0",
+    "阿里巴巴普惠体 3.0"
+  ],
+  "license": "SEE LICENSE IN README.md",
+  "files": [
+    "AlibabaPuHuiTi-3-115-Black.ttf",
+    "AlibabaPuHuiTi-3-105-Heavy.ttf",
+    "AlibabaPuHuiTi-3-95-ExtraBold.ttf",
+    "AlibabaPuHuiTi-3-55-RegularL3.ttf",
+    "AlibabaPuHuiTi-3-45-Light.ttf",
+    "AlibabaPuHuiTi-3-75-SemiBold.ttf",
+    "AlibabaPuHuiTi-3-55-Regular.ttf",
+    "AlibabaPuHuiTi-3-35-Thin.ttf",
+    "AlibabaPuHuiTi-3-85-Bold.ttf",
+    "AlibabaPuHuiTi-3-65-Medium.ttf"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/user/fontpkg"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

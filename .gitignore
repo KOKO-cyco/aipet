@@ -12,17 +12,10 @@ source/embedded/log/
 source/embedded/log.log
 source/*.zip
 
-# ---- 巨型素材（另有产出机器，见 memory: anim-frame-pipeline） --------------
-# 素材和它的生成工具放在一起（third_party/<素材>/），但**大块素材本身不进 git**：
-#   third_party/sprite/my_pet/        187M  精灵素材源（webm/PNG 序列）+ 打包产物 spf
-#   third_party/font/fontpkg-*/        82M  字体源包（AlibabaPuHuiTi）
-#   third_party/ai_pet_wide/           22M  UI 移植源（参考用，不参与构建）
-# 换机器要**单独拷**这几个目录，光 clone 仓库跑不出素材。
-third_party/sprite/my_pet/
-third_party/font/fontpkg-*/
-third_party/ai_pet_wide/
-third_party/music/
-third_party/*.psd
+# ---- 素材全部入库 ----------------------------------------------------------
+# third_party/ 整个目录都进 git（精灵素材源、字体源包、UI 移植源一并入库），
+# clone 下来即完整，不再需要单独拷素材。
+# 只有下面这些「素材之外」的目录例外：
 preview/
 
 # Python
