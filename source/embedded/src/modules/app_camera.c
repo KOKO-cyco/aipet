@@ -560,7 +560,7 @@ static void prv_bmp_header(uint8_t *h, uint32_t data_len, APP_CAM_QUALITY_E q)
 /**
  * @brief 合影：算角色贴在哪，返回立绘指针。
  *
- * 立绘是 RGB565A8 的常量表（`tools/make_compose_pet.py` 从绿幕 PNG 抠出来、缩到
+ * 立绘是 RGB565A8 的常量表（`third_party/sprite/make_compose_pet.py` 从绿幕 PNG 抠出来、缩到
  * 180px 高），alpha 混合在写 BMP 的那一趟里逐像素做 —— 所以边缘是干净的，不是
  * 一块方图。
  *

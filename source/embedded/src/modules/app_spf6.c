@@ -291,7 +291,7 @@ static OPERATE_RET prv_open_locked(SPF6_FILE_T *pf, const char *path,
 
     if (0 != memcmp(hdr, SPF6_MAGIC, 4)) {
         PR_ERR("[spf6] %s 不是 %s 容器（头 4 字节 %02X %02X %02X %02X）—— "
-               "固件已改用 PackBits 压缩帧 + 名字表，请用 tools/pack_seq.py "
+               "固件已改用 PackBits 压缩帧 + 名字表，请用 third_party/sprite/pack_seq.py "
                "重新生成并拷到 SD 卡",
                path, SPF6_MAGIC, hdr[0], hdr[1], hdr[2], hdr[3]);
         spf6_close(pf);

@@ -37,7 +37,7 @@
 ************************macro define************************
 ***********************************************************/
 /* 板子上真实存在的动作 —— **就是 fish_elf.spf 名字表里的那些名字**（见
- * tools/build_fish.sh 的 ELF_ORDER 和 app_sprite2d_clip_name()）。这份清单同时用于
+ * third_party/sprite/build_fish.sh 的 ELF_ORDER 和 app_sprite2d_clip_name()）。这份清单同时用于
  * 两处：给大模型看的工具描述、回调里的名字合法性校验 —— 名字拼错就直接回 false，
  * 不让 LLM 的幻觉变成一次"宠物没反应"。
  *

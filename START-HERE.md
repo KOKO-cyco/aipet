@@ -79,7 +79,7 @@ AI 回复、用户写的备忘录），静态子集永远会缺字，缺字就�
 按需从卡上读、读过的进 24 行缓存（一份字库约 15KB）。六档全集的索引约 850KB，
 比之前"14/18 全量 + 其余子集"的 1274KB 还少。
 
-改字库：`python tools/gen_font_sd.py`（要 node + `npm install lv_font_conv`），
+改字库：`python third_party/font/gen_font_sd.py`（要 node + `npm install lv_font_conv`），
 产物在 `third_party/font/sdcard_font/`，拷到卡上同名覆盖。**换文案不需要重新
 生成** —— 全集已经有了。
 
@@ -89,7 +89,7 @@ AI 回复、用户写的备忘录），静态子集永远会缺字，缺字就�
 字库可以不放（固件里有内置子集兜底），但内置子集**缺字就渲染空白**，
 开发期建议放上。
 
-`fish_elf.spf` 在 `third_party/fish/` 里（素材是 gitignore 的，换机器要单独拷，
+`fish_elf.spf` 在 `third_party/sprite/my_pet/` 里（素材是 gitignore 的，换机器要单独拷，
 见第 4 节）。**重新打包过就要重新拷到卡上** —— 固件按名字找组号，旧文件里没有
 新加的动作组。
 
@@ -171,7 +171,7 @@ AI 回复、用户写的备忘录），静态子集永远会缺字，缺字就�
 | `APP_EVT_PET_ACTION` | 对话驱动动作的事件（模块之间不互相 include） |
 
 `fish_role.spf`（老角色页那个 73MB 的大角色）不再打包，也不再需要 ——
-文件可能还留在 `third_party/fish/` 里，可以删。
+（老素材目录已经清掉了，不用再管。）
 
 ---
 
@@ -203,10 +203,10 @@ AI 回复、用户写的备忘录），静态子集永远会缺字，缺字就�
 
 ### ③ 素材是 gitignore 的
 
-`third_party/fish/`（打包产物）和 `third_party/blue_big_fat_fish/`（素材源）
+`third_party/sprite/`（精灵素材源 `my_pet/` + 打包产物 `fish_elf.spf`）
 都不进 git。**换机器要单独拷这两个目录**，光 clone 仓库跑不出素材。
 
-`third_party/resources/fish_seq`（中间产物）由 `build_fish.sh` 自己生成，不用拷。
+`third_party/sprite/` 下的中间产物（PNG 序列）由 `build_fish.sh` 自己生成，不用拷。
 
 ### ④ 中文文件名依赖 SDK 的 `FF_CODE_PAGE == 936`
 
@@ -229,15 +229,15 @@ LVGL 事件回调（按钮点击）**已经在 LVGL 线程里**，别再调
 ## 5. 宠物素材管线
 
 ```sh
-sh tools/build_fish.sh        # webm -> PNG 序列 -> fish_elf.spf，一步到位
+sh third_party/sprite/build_fish.sh        # webm -> PNG 序列 -> fish_elf.spf，一步到位
 ```
 
 需要 **Python（numpy + PIL）和 ffmpeg**。本机 `py -3` 有 numpy/PIL
-（项目 venv 里没有），要换就 `PY=python3 sh tools/build_fish.sh`。
+（项目 venv 里没有），要换就 `PY=python3 sh third_party/sprite/build_fish.sh`。
 
-产出只有 `third_party/fish/fish_elf.spf`（**要拷到 SD 卡**）。
+产出是 `third_party/sprite/my_pet/fish_elf.spf`（**要拷到 SD 卡**）。
 
-**改动作集**：编 `tools/fish_extract.py` 的 `CLIPS` 表 + `tools/build_fish.sh`
+**改动作集**：编 `third_party/sprite/fish_extract.py` 的 `CLIPS` 表 + `third_party/sprite/build_fish.sh`
 的 `ELF_ORDER`（**顺序即组号，第 0 组必须是 idle**），**还要同步**
 `app_avatar_tools.c` 的动作白名单（给大模型看的可选值）和
 `page_pet.c` 的情绪表。

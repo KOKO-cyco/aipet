@@ -231,7 +231,7 @@ void app_camera_set_quality(APP_CAM_QUALITY_E q);
  * @brief 设置拍照时是否把角色叠进去、叠在哪一边。
  *
  * 角色用的是 `third_party/my_pet/右侧半身比耶.png` 抠像后编进 flash 的立绘
- * （见 app_cam_pet.h / tools/make_compose_pet.py），**带 alpha 混合** ——
+ * （见 app_cam_pet.h / third_party/sprite/make_compose_pet.py），**带 alpha 混合** ——
  * 是叠上去的，不是贴一块方图。
  *
  * 站位：原图是在右边缘切过的半身稿，所以**贴边不放留白** —— 右边贴右边缘，

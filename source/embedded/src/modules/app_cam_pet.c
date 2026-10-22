@@ -1,6 +1,6 @@
 /**
  * @file app_cam_pet.c
- * @brief 合影用的角色立绘 —— **本文件由 tools/make_compose_pet.py 生成**。
+ * @brief 合影用的角色立绘 —— **本文件由 third_party/sprite/make_compose_pet.py 生成**。
  *
  * 源图：third_party/my_pet/右侧半身比耶.png
  * 源图 md5：f08ef130e5e98e81f0d086f022dbd31c
@@ -8,7 +8,7 @@
  * 格式：RGB565A8 —— 前 W*H*2 字节 RGB565，后 W*H 字节 alpha
  * 字节数：37800（在 flash 里）
  *
- * **换了源图要重新跑一次生成**（命令见 tools/make_compose_pet.py）。别手改。
+ * **换了源图要重新跑一次生成**（命令见 third_party/sprite/make_compose_pet.py）。别手改。
  */
 
 #include "app_cam_pet.h"

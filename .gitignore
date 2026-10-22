@@ -13,17 +13,16 @@ source/embedded/log.log
 source/*.zip
 
 # ---- 巨型素材（另有产出机器，见 memory: anim-frame-pipeline） --------------
-# resources 459M / music 137M，进 git 会让仓库直接失控；代码基线不含它们。
-third_party/resources/
+# 素材和它的生成工具放在一起（third_party/<素材>/），但**大块素材本身不进 git**：
+#   third_party/sprite/my_pet/        187M  精灵素材源（webm/PNG 序列）+ 打包产物 spf
+#   third_party/font/fontpkg-*/        82M  字体源包（AlibabaPuHuiTi）
+#   third_party/ai_pet_wide/           22M  UI 移植源（参考用，不参与构建）
+# 换机器要**单独拷**这几个目录，光 clone 仓库跑不出素材。
+third_party/sprite/my_pet/
+third_party/font/fontpkg-*/
+third_party/ai_pet_wide/
 third_party/music/
 third_party/*.psd
-
-# ---- 2D 角色的源素材与打包产物（同一条理由） --------------------------------
-# blue_big_fat_fish 72M（源 webm/mp4）/ fish 44M（*.spf、*.rgb 打包产物）
-# 两者都能从源视频重跑 `sh tools/build_fish.sh` 得到；进 git 只会让仓库翻倍。
-# 注意：这意味着**换机器要单独拷这两个目录**，光 clone 仓库是跑不出素材的。
-third_party/blue_big_fat_fish/
-third_party/fish/
 preview/
 
 # Python
@@ -33,3 +32,13 @@ __pycache__/
 # ---- Claude Code 的机器本地状态（路径是绝对的，换机器没意义）----
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+
+# 用户的备份压缩包，不进 git
+third_party.zip
+
+# macOS 打包垃圾
+__MACOSX/
+._*
+
+# 根目录的备份压缩包也不进 git
+/*.zip

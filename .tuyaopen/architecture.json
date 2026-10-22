@@ -133,10 +133,10 @@
       "kind": "tool",
       "language": "Python",
       "sources": [
-        "tools/"
+        "third_party/"
       ],
       "surface": "embedded",
-      "notes": "webm -> PNG 序列 -> fish_elf.spf（tools/build_fish.sh）。产物放 SD 卡。"
+      "notes": "素材 + 生成工具同目录：third_party/sprite/（webm -> PNG -> fish_elf.spf）、third_party/font/（字库）、third_party/weather/（图标）。产物拷到 SD 卡。"
     }
   ],
   "components": [],

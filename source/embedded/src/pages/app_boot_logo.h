@@ -14,10 +14,10 @@
  *
  * 怎么生成
  * --------
- * 把图丢给 `tools/img_to_lvgl.py`（PNG / JPEG 都吃），它会**整个覆盖**
+ * 把图丢给 `third_party/logo/img_to_lvgl.py`（PNG / JPEG 都吃），它会**整个覆盖**
  * `app_boot_logo.c`：
  *
- *     python tools/img_to_lvgl.py third_party/logo.png --max 100 --trim --bg "#9393C2"
+ *     python third_party/logo/img_to_lvgl.py third_party/logo/logo.png --max 100 --trim --bg "#9393C2"
  *
  * 出来的是一段 RGB565 常量数组 + 描述符。**注意 RGB565 没有 alpha 通道**：源图
  * 带透明的话，透明像素会按 `--bg` 指定的底色合成掉，所以底色要跟页面底色一致

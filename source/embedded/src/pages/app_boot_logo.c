@@ -1,6 +1,6 @@
 /**
  * @file app_boot_logo.c
- * @brief 开机 logo 的像素数据 —— **本文件由 tools/img_to_lvgl.py 生成**。
+ * @brief 开机 logo 的像素数据 —— **本文件由 third_party/logo/img_to_lvgl.py 生成**。
  *
  * 源图：logo.png
  * 源图 md5：4648eafed12456ac6b429902c6bdccfe

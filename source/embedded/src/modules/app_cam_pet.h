@@ -2,7 +2,7 @@
  * @file app_cam_pet.h
  * @brief 合影用的角色立绘（绿幕抠像后的 RGB565A8 常量位图）。
  *
- * 数据由 `tools/make_compose_pet.py` 生成，源图
+ * 数据由 `third_party/sprite/make_compose_pet.py` 生成，源图
  * `third_party/my_pet/右侧半身比耶.png`。换图就重新跑一次脚本，别手改 .c。
  *
  * 为什么编进 flash 而不是放卡上：只有约 38KB，而且合影是拍照流程的一部分，

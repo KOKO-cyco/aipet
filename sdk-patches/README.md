@@ -78,9 +78,9 @@ git apply -p1 <aipet>/sdk-patches/platform-T5AI.diff
 
 ## 别忘了单独拷的东西（都在 aipet 的 `.gitignore` 里）
 
-`third_party/blue_big_fat_fish/`（素材源 webm，72M）和 `third_party/fish/`
+`third_party/sprite/my_pet/`（素材源 webm + PNG 序列，187M）
 （打包产物 `*.spf`，44M）**故意不进 git** —— 都能从源视频用
-`sh tools/build_fish.sh` 重跑出来。换机器时单独拷这两个目录，否则桌宠页没素材。
+`sh third_party/sprite/build_fish.sh` 重跑出来。换机器时单独拷这两个目录，否则桌宠页没素材。
 
-另外 `third_party/resources/`（`fish_extract.py` 解出来的 PNG 序列，几百 M）
-也是 gitignore 的，跑一次 `sh tools/build_fish.sh` 就会重新生成。
+另外 `third_party/font/fontpkg-*/`（字体源包，82M）
+也是 gitignore 的，跑一次 `sh third_party/sprite/build_fish.sh` 就会重新生成。

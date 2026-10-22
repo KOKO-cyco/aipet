@@ -51,7 +51,7 @@ extern "C" {
 #define SP2D_MAX_W          288
 #define SP2D_MAX_H          208
 
-/** 精灵文件路径。由 `tools/build_fish.sh` 产出（SPF7 格式，见 app_spf6.h）。 */
+/** 精灵文件路径。由 `third_party/sprite/build_fish.sh` 产出（SPF7 格式，见 app_spf6.h）。 */
 #define SP2D_PATH_SPF       "/sdcard/sprite/fish_elf.spf"
 
 /** 上一次渲染的统计。 */

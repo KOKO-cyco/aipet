@@ -34,10 +34,13 @@ aipet/
 │   └── platform/           # Tuya Platform product snapshots (IDE)
 │       └── product-<pid>.json
 ├── tuyaopen.project.ini    # human-readable project config (IDE-maintained)
-├── tools/                  # 素材管线（webm -> PNG -> fish_elf.spf，见 build_fish.sh）
-├── third_party/
-│   ├── fish/               # 打包产物 fish_elf.spf + 背景（gitignore，换机器要单独拷）
-│   └── blue_big_fat_fish/  # 动作素材源（gitignore）
+├── third_party/            # 素材 + 它们的生成工具（**工具和产物放一起**）
+│   ├── font/               # 字库：源包 + 产物 sdcard_font/ + gen_font*.py + 探针
+│   ├── sprite/             # 桌宠精灵：素材源 my_pet/ + 产物 fish_elf.spf + 打包脚本
+│   ├── weather/            # 天气图标：源图 white/black_v4 + 产物 icons/*.bin
+│   ├── logo/               # 开机 logo：logo.png + img_to_lvgl.py
+│   ├── camera/             # 相机样张（调参用）
+│   └── ai_pet_wide/        # 新 UI 的移植源（参考，不参与构建）
 ├── source/
 │   ├── embedded/           # firmware — build with tos.py
 │   │   ├── include/        # project header files

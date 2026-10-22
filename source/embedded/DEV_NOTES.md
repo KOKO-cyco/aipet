@@ -154,23 +154,26 @@ git -C "$SDK/platform/T5AI" rev-parse HEAD     # 应等于 platform_config.yaml 
 
 | 文件 | 改什么 |
 |---|---|
-| `tools/fish_extract.py` | `CLIPS` 表（源素材 webm → 动作名） |
-| `tools/build_fish.sh` | `ELF_ORDER`（**顺序即组号，第 0 组必须是 idle**） |
+| `third_party/sprite/fish_extract.py` | `CLIPS` 表（源素材 webm → 动作名） |
+| `third_party/sprite/build_fish.sh` | `ELF_ORDER`（**顺序即组号，第 0 组必须是 idle**） |
 | `src/modules/app_avatar_tools.c` | 动作白名单（给大模型看的可选值） |
 | `src/pages/page_pet.c` | 情绪表（`prv_emotion_clip_name`）+ 待机小动作池（`sg_idle_acts`） |
 
-然后 `sh tools/build_fish.sh`，**把新的 `fish_elf.spf` 拷到 SD 卡**。
+然后 `sh third_party/sprite/build_fish.sh`，**把新的 `fish_elf.spf` 拷到 SD 卡**。
 打完看脚本末尾那张表：**锚点框尺寸变了，角色在屏幕上就跟着变小**（见 START-HERE.md §4.2）。
 
 ### 3.5 生成/更新资源
 
 | 要做的事 | 命令 |
 |---|---|
-| 宠物精灵 `fish_elf.spf` | `sh tools/build_fish.sh` |
-| 内置中文字体（C 源） | `python tools/gen_font.py` |
-| SD 全字库 `cn16/cn21.bin` | `python tools/gen_font_sd.py --out <SD>/font` |
-| 天气图标 | `python tools/gen_weather_icons.py` |
-| 字库探针 | `python tools/font_bin_probe.py` |
+| 宠物精灵 `fish_elf.spf` | `sh third_party/sprite/build_fish.sh` |
+| 内置中文字体（C 源） | `python third_party/font/gen_font.py` |
+| SD 六档字库 `puhui*.bin` | `python third_party/font/gen_font_sd.py` |
+| 字库探针 | `python third_party/font/font_bin_probe.py` |
+
+> 天气图标（`/sdcard/weather/*.bin`，WXI1 格式）**生成脚本不在仓库里** —— 当前这批
+> 是手工一次性生成的，产物在 `third_party/weather/icons/`。要重做图标得先补一个
+> 生成器（8 字节头 + RGB565 平面 + A8 平面，48x48，见 `app_weather_icon.h`）。
 
 ---
 
@@ -202,7 +205,7 @@ git -C "$SDK/platform/T5AI" rev-parse HEAD     # 应等于 platform_config.yaml 
   + `render_clip()`，没走这条路。
 - `app_ai_chat_hold()` / `release()` 也没有调用者 —— 它们是**单实例 codec 的交接
   钩子**，留给以后要放音的功能（比如备忘录到点播提醒）。
-- `third_party/fish/fish_role.spf`（73MB，老角色页的大角色）不再打包也不再需要，
+- `fish_role.spf`（73MB，老角色页的大角色）不再打包也不再需要，
   可以删。
 - `src/tests/` 下的 bring-up 测试（麦克风自检、SD 读压力）默认关着，排查时把
   `app_bringup.h` / `app_sd_test.h` 里的开关改回 1。

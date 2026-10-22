@@ -99,7 +99,7 @@
 #define PET_MISS_DN_PCT       25        /* miss 率 ≥25% -> 降 */
 #define PET_MISS_UP_PCT       8         /* miss 率 <8%  -> 升（滞回带防抖）*/
 
-/** 待机组的组号。素材约定第 0 组必须是 idle（见 tools/build_fish.sh 的 --order）。 */
+/** 待机组的组号。素材约定第 0 组必须是 idle（见 third_party/sprite/build_fish.sh 的 --order）。 */
 #define PET_CLIP_IDLE         0
 
 /***********************************************************
@@ -128,7 +128,7 @@
  *  「待机-待机-开心-待机-待机-伤心」，即夹 2 个。 */
 #define PET_AUDIT_GAP      2
 
-/** 巡检表：按打包顺序（= tools/build_fish.sh 的 ELF_ORDER）列全部组。
+/** 巡检表：按打包顺序（= third_party/sprite/build_fish.sh 的 ELF_ORDER）列全部组。
  * 第 0 条必须是 idle（既当夹在中间的空档，又是动作序号 0 的基准）。
  * label 是给人看的中文名，和源视频文件名一一对应。
  *
@@ -174,10 +174,10 @@ static const PET_AUDIT_T sg_audit[] = {
  * 差得远 —— 接缝处会瞬移/抽动。所以只循环其中一段 [first, last]：这一段的首尾
  * 姿态和运动方向都接得上。
  *
- * **帧号由 tools/find_loop.py 算出，不要手调**（它把"接缝跳变"和"正常播下一帧"
+ * **帧号由 third_party/sprite/find_loop.py 算出，不要手调**（它把"接缝跳变"和"正常播下一帧"
  * 做比较，比肉眼靠谱，换素材也能重跑）：
  *
- *     python tools/find_loop.py third_party/resources/fish_seq/talk
+ *     python third_party/sprite/find_loop.py third_party/sprite/build/fish_seq/talk
  *
  * `frames` 是**打包时这条动作的总帧数**，用来做一致性检查：对不上就说明素材
  * 重打过（改了 --order / fps / 剪辑），帧号已经失效，必须重跑上面那条命令。
@@ -197,7 +197,7 @@ static const PET_LOOP_T sg_loop[] = {
      *
      * 表不能是 0 长度（C 不允许），留一条 `strcmp` 永远匹配不上的哨兵行；消费处
      * （prv_loop_frame）本来就是"匹配不上 = 没有循环区间"。以后哪个动作要加循环
-     * 段：重跑 tools/find_loop.py，把 { 名, 起, 止, 总帧 } 换成真数据。 */
+     * 段：重跑 third_party/sprite/find_loop.py，把 { 名, 起, 止, 总帧 } 换成真数据。 */
     { "", 0, 0, 0 },
 };
 
@@ -639,7 +639,7 @@ static int prv_loop_frame(int clip, int frame)
                 /* 素材重打过，帧号已经失效 —— 宁可退回整条循环，也别按错位的
                  * 帧号切一段莫名其妙的动作出来。 */
                 PR_WARN("[pet] %s 现在 %d 帧（循环区间是按 %d 帧算的）—— 区间失效，"
-                        "按整条循环。重跑 tools/find_loop.py 更新 sg_loop[]",
+                        "按整条循环。重跑 third_party/sprite/find_loop.py 更新 sg_loop[]",
                         name, frames, sg_loop[i].frames);
                 break;
             }

@@ -280,7 +280,7 @@ static int32_t prv_bit_get_signed(APP_FONT_BIT_T *it, int n)
  *
  * 位图在 bin 里是"接在描述符后面的错位位流"：描述符 26 位意味着位图的每个字节
  * 都横跨文件的两个字节。这里一次拼一个字节，比逐 bit 读快得多，结果与官方的
- * read_bits 逐位版本逐字节相同（tools/font_bin_probe.py 在 PC 上验证过）。
+ * read_bits 逐位版本逐字节相同（third_party/font/font_bin_probe.py 在 PC 上验证过）。
  */
 static void prv_bits_to_bytes(const uint8_t *src, uint32_t src_bytes, uint32_t bitpos,
                               uint8_t *dst, uint32_t n)

@@ -30,7 +30,7 @@
  *
  * 各组的 `w/h/dx/dy` 都是**自己裁剪框**的（不是全图共用一个框）；`dx/dy` 是相对
  * **锚点框左上角**的偏移，锚点框 = 所有组裁剪框的并集。所以切动作时角色不会跳。
- * 生成端是 `tools/pack_seq.py`。
+ * 生成端是 `third_party/sprite/pack_seq.py`。
  */
 
 #ifndef __APP_SPF6_H__
@@ -47,7 +47,7 @@ extern "C" {
 /** 动作名的最长字节数（含结尾 0）。最长的现名是 `rnd_lookaround`（14）。 */
 #define SPF6_NAME_MAX       16
 
-/** 动作组数上限（和 tools/pack_seq.py 的 `--order` 长度对齐）。
+/** 动作组数上限（和 third_party/sprite/pack_seq.py 的 `--order` 长度对齐）。
  *  现在实打实用到 22 组（待机1 + 贴边2 + 点击5 + 拖拽3 + 说话1 + AI表情2 + 随机8），
  *  留点余量给以后加动作。超了在 spf6_open 里直接报错，不静默截断。 */
 #define SPF6_MAX_CLIPS      24
@@ -109,7 +109,7 @@ typedef struct {
  * @return OPRT_OK；OPRT_INVALID_PARM 格式/参数不对；OPRT_MALLOC_FAILED 表分配失败；
  *         OPRT_NOT_FOUND 文件打不开。
  *
- * @note 版本不匹配时的报错里会写清"用 tools/pack_seq.py 重新生成" ——
+ * @note 版本不匹配时的报错里会写清"用 third_party/sprite/pack_seq.py 重新生成" ——
  *       老格式不保留兼容路径，留一条只会让"到底跑的是哪版"更难查。
  */
 OPERATE_RET spf6_open(SPF6_FILE_T *pf, const char *path, uint16_t max_w, uint16_t max_h);
@@ -139,7 +139,7 @@ uint32_t spf6_rle_worst(uint32_t npx);
 uint32_t spf6_spans_bytes(uint16_t max_h);
 
 /**
- * @brief PackBits 解压（tools/pack_seq.py 的 packbits 是编码端，两边必须一致）。
+ * @brief PackBits 解压（third_party/sprite/pack_seq.py 的 packbits 是编码端，两边必须一致）。
  *
  * 控制字节 c：0..127 后面跟 c+1 个字面像素（2 字节/个，小端）；
  * 129..255 后面跟 1 个像素、重复 257-c 次；128 编码端不产生。
