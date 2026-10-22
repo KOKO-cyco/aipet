@@ -5,7 +5,7 @@
 `TuyaOpenSDK` 整个 **4.9 GB**（`platform/T5AI` 里全是预编译库和构建中间件），
 不可能进 git。但这个工程跑得起来**必须带上这些改动**，所以只把**改动本身**落库。
 
-新机器上的流程：**克隆上游 SDK → 打这里的补丁 → 把巨型素材单独拷过去**。
+新机器上的流程：**克隆上游 SDK → 打这里的补丁 → 克隆 aipet 仓库（third_party 素材已全量入库）**。
 
 ## 基线（打补丁前必须在这个 commit 上）
 
@@ -76,11 +76,8 @@ git apply -p1 <aipet>/sdk-patches/platform-T5AI.diff
 > ⚠️ **`TuyaOpenSDK/patches/` 那个旧目录已经过时**（只归档了 4 个文件，实际改了 11 个）。
 > 以本目录为准。旧目录留着做历史参考。
 
-## 别忘了单独拷的东西（都在 aipet 的 `.gitignore` 里）
+## 素材不用单独拷了
 
-`third_party/sprite/my_pet/`（素材源 webm + PNG 序列，187M）
-（打包产物 `*.spf`，44M）**故意不进 git** —— 都能从源视频用
-`sh third_party/sprite/build_fish.sh` 重跑出来。换机器时单独拷这两个目录，否则桌宠页没素材。
-
-另外 `third_party/font/fontpkg-*/`（字体源包，82M）
-也是 gitignore 的，跑一次 `sh third_party/sprite/build_fish.sh` 就会重新生成。
+`third_party/` 整个目录（精灵素材源 `my_pet/`、打包产物 `*.spf`、字体源包
+`fontpkg-*/`、UI 移植源 `ai_pet_wide/`）都已进 aipet 的 git 仓库，clone 即可。
+中间产物（PNG 序列）由 `sh third_party/sprite/build_fish.sh` 重新生成。

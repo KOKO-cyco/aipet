@@ -89,8 +89,7 @@ AI 回复、用户写的备忘录），静态子集永远会缺字，缺字就�
 字库可以不放（固件里有内置子集兜底），但内置子集**缺字就渲染空白**，
 开发期建议放上。
 
-`fish_elf.spf` 在 `third_party/sprite/my_pet/` 里（素材是 gitignore 的，换机器要单独拷，
-见第 4 节）。**重新打包过就要重新拷到卡上** —— 固件按名字找组号，旧文件里没有
+`fish_elf.spf` 在 `third_party/sprite/my_pet/` 里（已随仓库入库，clone 即可）。**重新打包过就要重新拷到卡上** —— 固件按名字找组号，旧文件里没有
 新加的动作组。
 
 ---
@@ -201,12 +200,12 @@ AI 回复、用户写的备忘录），静态子集永远会缺字，缺字就�
 
 当前：锚点框 218×195（最宽的是 `rnd_whale`，199 宽）。
 
-### ③ 素材是 gitignore 的
+### ③ 素材全部入库
 
-`third_party/sprite/`（精灵素材源 `my_pet/` + 打包产物 `fish_elf.spf`）
-都不进 git。**换机器要单独拷这两个目录**，光 clone 仓库跑不出素材。
+`third_party/` 整个目录（精灵素材源 `my_pet/`、打包产物 `fish_elf.spf`、字体源包、
+UI 移植源）都已进 git，**换机器 clone 仓库就有全部素材**，不用单独拷。
 
-`third_party/sprite/` 下的中间产物（PNG 序列）由 `build_fish.sh` 自己生成，不用拷。
+`third_party/sprite/` 下的中间产物（PNG 序列）由 `build_fish.sh` 自己生成，不用入库。
 
 ### ④ 中文文件名依赖 SDK 的 `FF_CODE_PAGE == 936`
 
