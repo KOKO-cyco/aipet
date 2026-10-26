@@ -25,6 +25,15 @@
 
 ## 1. 先跑起来
 
+### 0. 前提：TuyaOpenSDK 必须先打补丁
+
+`TuyaOpenSDK`（4.9 GB）不进 git，但本工程**依赖它的一批本地改动** —— RGB565 上屏
+合成钩子、相机 GC2145 驱动、SD 卡/语音栈调参等。**新机器 clone 完仓库、还没打补丁
+就编译，会直接链接失败**（例如 `app_camera.c` 引用的 `lv_port_set_pre_flush_cb`）。
+
+按 [`sdk-patches/README.md`](sdk-patches/README.md) 重放补丁（外层 `4e3147b` +
+嵌套 `e4286054e`），再往下走。
+
 ### 编译
 
 ```sh

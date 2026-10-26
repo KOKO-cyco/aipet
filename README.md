@@ -22,6 +22,10 @@ T5AI 横屏桌宠摆件：**宠物 + 对话 + 备忘录**。
 
 ## Build
 
+> **前提：先把 TuyaOpenSDK 的补丁打上。** SDK 不进 git，本工程依赖它的一批本地改动
+> （RGB565 上屏钩子、相机驱动、SD 卡、语音栈…）。没打补丁就编译会链接失败 ——
+> 步骤见 [`sdk-patches/README.md`](sdk-patches/README.md)。
+
 ```sh
 cd source/embedded
 tos.py build
