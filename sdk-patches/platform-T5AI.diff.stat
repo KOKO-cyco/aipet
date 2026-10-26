@@ -1,18 +1,15 @@
  .../onboard_mic_stream/onboard_mic_stream.c        |    9 +-
- .../bk_voice_service/src/bk_voice_service.c        | 3380 ++++++++++----------
+ .../bk_voice_service/src/bk_voice_service.c        |  382 +++---
  t5_os/ap/components/fatfs/ffconf.h                 |   15 +-
- .../ap/middleware/driver/sd_card/sd_card_driver.c  |   23 +-
+ .../ap/middleware/driver/sd_card/sd_card_driver.c  |   74 +-
  .../middleware/soc/bk7257_ap/bk7257_ap.defconfig   |    2 +-
- .../middleware/soc/bk7258_ap/bk7258_ap.defconfig   |    8 +-
+ .../middleware/soc/bk7258_ap/bk7258_ap.defconfig   | 1324 ++++++++++----------
  t5_os/ap/middleware/soc/common/hal/yuv_buf_hal.c   |    9 +
- t5_os/projects/tuya_app/ap/config/bk7258_ap/config |   17 +
- .../tuya_app/ap/config/bk7258_ap/usr_gpio_cfg.h    |    2 +-
- .../tuya_scripts/tuya_default_gpio_config.json     |    4 +-
- tuyaos/tuyaos_adapter/include/dvp/tkl_dvp.h        |   33 +
- .../include/utilities/include/tuya_cloud_types.h   |    5 +
+ t5_os/projects/tuya_app/ap/config/bk7258_ap/config |   20 +-
+ tuyaos/tuyaos_adapter/include/dvp/tkl_dvp.h        |   50 +
  tuyaos/tuyaos_adapter/include/vad/tkl_vad.h        |    6 +
- tuyaos/tuyaos_adapter/src/driver/tkl_audio.c       |   11 +
- tuyaos/tuyaos_adapter/src/driver/tkl_dvp.c         |  183 ++
- tuyaos/tuyaos_adapter/src/driver/tkl_kws.c         |   46 +-
- tuyaos/tuyaos_adapter/src/driver/tkl_vad.c         |  162 +-
- 17 files changed, 2189 insertions(+), 1726 deletions(-)
+ tuyaos/tuyaos_adapter/src/driver/tkl_audio.c       |   14 +
+ tuyaos/tuyaos_adapter/src/driver/tkl_dvp.c         |  192 +++
+ tuyaos/tuyaos_adapter/src/driver/tkl_kws.c         |   63 +-
+ tuyaos/tuyaos_adapter/src/driver/tkl_vad.c         |  162 ++-
+ 14 files changed, 1438 insertions(+), 884 deletions(-)
