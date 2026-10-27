@@ -13,10 +13,10 @@
 #include "tuya_cloud_types.h"
 
 #ifndef TUYA_PRODUCT_ID
-#define TUYA_PRODUCT_ID "sayojo04prxu4kts"
+#define TUYA_PRODUCT_ID "mqnzcaztvpwkkcyj"
 #endif
 
-#define TUYA_OPENSDK_UUID    "uuid6fe85fc0cfccde00"             // TODO: your uuid
-#define TUYA_OPENSDK_AUTHKEY "mAAQGYfRNzt2jn7AFM87qMvBGVmncG0L" // TODO: your authkey
+#define TUYA_OPENSDK_UUID    "uuid472dc38b2848b53b"
+#define TUYA_OPENSDK_AUTHKEY "yx146G6FpfXJIq5WuyizvWx2PGLfLcAJ"
 
 #endif /* TUYA_CONFIG_H_ */
