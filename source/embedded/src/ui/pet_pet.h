@@ -86,6 +86,15 @@ typedef enum {
 void pet_say(const char *text);
 
 /**
+ * @brief Update the bubble for one page of a streaming (AI) reply.
+ *
+ * Same buffer and typewriter as pet_say(), but when the bubble is already on screen the
+ * line is replaced in place instead of replaying the fade-and-rise. An AI reply is shown
+ * a page at a time, and re-animating every page would read as a blink between them.
+ */
+void pet_say_stream(const char *text);
+
+/**
  * @brief pet_say() with a tone.
  *
  * Identical to pet_say() except that the bubble is drawn and arrives the way @p mood

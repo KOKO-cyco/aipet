@@ -94,6 +94,46 @@ static void prv_ai_evt_cb(AI_NOTIFY_EVENT_T *event)
         PR_INFO("[ai] asr ok");
         break;
 
+    /* ---- NLG 文本流 -> 气泡 ------------------------------------------------
+     * 原样转给页面，不在这里缓存：字符串只在本次同步分发期间有效，谁要谁拷。
+     * timeindex 同理，由页面按"相对本轮首片"的差值排期，和语音对齐。 */
+    case AI_USER_EVT_TEXT_STREAM_START:
+    case AI_USER_EVT_TEXT_STREAM_DATA:
+    case AI_USER_EVT_TEXT_STREAM_STOP: {
+        AI_NOTIFY_TEXT_T *txt = (AI_NOTIFY_TEXT_T *)event->data;
+        APP_AI_TEXT_T     out;
+
+        out.kind = (AI_USER_EVT_TEXT_STREAM_START == event->type)  ? APP_AI_TEXT_START
+                   : (AI_USER_EVT_TEXT_STREAM_STOP == event->type) ? APP_AI_TEXT_STOP
+                                                                  : APP_AI_TEXT_DATA;
+        out.data      = (NULL != txt) ? txt->data : NULL;
+        out.len       = (NULL != txt) ? txt->datalen : 0;
+        out.timeindex = (NULL != txt) ? txt->timeindex : 0;
+
+        PR_DEBUG("[ai] text %d len %u t=%u", (int)out.kind, (unsigned)out.len, (unsigned)out.timeindex);
+        app_event_publish(APP_EVT_AI_TEXT, &out);
+    } break;
+
+    case AI_USER_EVT_TEXT_STREAM_ABORT:
+    case AI_USER_EVT_CHAT_BREAK: {
+        APP_AI_TEXT_T out = {.data = NULL, .len = 0, .timeindex = 0, .kind = APP_AI_TEXT_ABORT};
+
+        app_event_publish(APP_EVT_AI_TEXT, &out);
+    } break;
+
+    /* ---- TTS 播放时钟：气泡按这个起点对齐文本时间戳 ---------------------- */
+    case AI_USER_EVT_TTS_START:
+        app_event_publish(APP_EVT_AI_TTS, (void *)(intptr_t)APP_AI_TTS_START);
+        break;
+
+    case AI_USER_EVT_TTS_STOP:
+        app_event_publish(APP_EVT_AI_TTS, (void *)(intptr_t)APP_AI_TTS_STOP);
+        break;
+
+    case AI_USER_EVT_TTS_ABORT:
+        app_event_publish(APP_EVT_AI_TTS, (void *)(intptr_t)APP_AI_TTS_ABORT);
+        break;
+
     default:
         break;
     }

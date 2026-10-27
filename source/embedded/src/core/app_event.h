@@ -26,6 +26,34 @@
 extern "C" {
 #endif
 
+/** AI 文本流分片的类型。 */
+typedef enum {
+    APP_AI_TEXT_START = 0, /**< 一轮回复开始（可能已带第一片文字） */
+    APP_AI_TEXT_DATA,      /**< 中间分片 */
+    APP_AI_TEXT_STOP,      /**< 本轮最后一片，之后不会再有 */
+    APP_AI_TEXT_ABORT,     /**< 被打断：丢弃尚未显示的分页 */
+} APP_AI_TEXT_E;
+
+/** AI 文本流分片。
+ *
+ * `timeindex` 是云端给整段回复打的时间戳，同一轮里单调不减（单位 ms）；
+ * **只有相对差值有意义** —— 气泡按"本片 - 本轮首片"相对 TTS 起点排期，
+ * 所以云端给绝对时间还是从 0 开始的偏移都能对齐。分片里的字符串只在
+ * app_event_publish() 同步分发期间有效，订阅方必须拷贝。 */
+typedef struct {
+    const char   *data;
+    uint16_t      len;
+    uint32_t      timeindex;
+    APP_AI_TEXT_E kind;
+} APP_AI_TEXT_T;
+
+/** TTS 播放时钟。气泡用 START 的本地时刻当"第 0 毫秒"。 */
+typedef enum {
+    APP_AI_TTS_START = 0,
+    APP_AI_TTS_STOP,
+    APP_AI_TTS_ABORT,
+} APP_AI_TTS_E;
+
 typedef enum {
     APP_EVT_NONE = 0,
 
@@ -50,6 +78,8 @@ typedef enum {
     APP_EVT_AI_STATE,         /* data = (intptr_t)AI_MODE_STATE_*               */
     APP_EVT_AI_EMOTION,       /* data = const char *（情绪名，大写，UTF-8）      */
     APP_EVT_AI_STACK_UP,      /* 语音栈拉起成功，data = NULL                    */
+    APP_EVT_AI_TEXT,          /* data = const APP_AI_TEXT_T *（NLG 文本流分片） */
+    APP_EVT_AI_TTS,           /* data = (intptr_t)APP_AI_TTS_E（播放时钟）      */
 
     /* ---- 对话驱动动作：MCP 工具模块 app_avatar_tools 发布 ----------------
      * data = const char *（精灵动作名，与 app_sprite2d_clip_name() 一致）。
