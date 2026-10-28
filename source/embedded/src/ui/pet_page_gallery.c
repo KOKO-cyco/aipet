@@ -9,12 +9,12 @@
  *     |  | (img)| | (img)| | (img)|     |
  *     |  +------+ +------+ +------+     |
  *     |    合影     便签    购物条       |
- *     |  +------+ +------+ +------+     |
- *     |  | (img)| | (img)| |  [+] |     |
- *     |  +------+ +------+ +------+     |
- *     |   购物小票  会议记录  添加笔记    |
+ *     |  +------+ +------+               |
+ *     |  | (img)| | (img)|               |
+ *     |  +------+ +------+               |
+ *     |   购物小票  会议记录              |
  *     +---------------------------------+
- *     | [   加备忘录   ] [   AI解读   ]  |  action bar
+ *     | [           AI解读           ]  |  action bar
  *     +---------------------------------+
  *
  * Three columns, and the page does not say how wide one is: the grid divides the panel
@@ -46,10 +46,9 @@
 
 #define GAL_GAP 8
 
-/* The grid's columns, and how many thumbnails it holds before the add slot. Six tiles
-   over three columns is exactly two rows; the panel's content well is 198 px and two
-   rows of PUI_TILE_PHOTO_H plus a caption and a gap come to 208, so the grid scrolls by
-   ten pixels — which is what a sixth shot needs, and what a seventh would use properly. */
+/* The grid's columns. Five thumbnails over three columns are two rows with one cell
+   left empty — the add slot is gone now that there is no note editor, so the empty
+   cell stays empty rather than turning into an add button. */
 #define GAL_COLS 3
 
 /* The hues the placeholder blocks cycle through. There is no image data to take a colour
@@ -66,8 +65,6 @@ static const PUI_TONE_E sg_photo_tones[] = {PUI_TONE_ACCENT, PUI_TONE_INDIGO, PU
 /***********************************************************
 ********************function define**************************
 ***********************************************************/
-
-static void __goto_note_cb(lv_event_t *e);
 
 static void __say_selected(void)
 {
@@ -120,32 +117,7 @@ static lv_obj_t *__build_tile(lv_obj_t *parent, uint32_t index)
     return tile;
 }
 
-/**
- * @brief The last cell of the grid: a way out to the note page.
- *
- * The same shape as a photo tile — a block over a caption — with the block outlined and
- * empty instead of filled. Matching the structure matters more than matching the fill:
- * a differently-shaped cell in the last slot reads as a stray object rather than as the
- * empty slot it is.
- */
-static lv_obj_t *__build_add_tile(lv_obj_t *parent)
-{
-    lv_obj_t *tile = pui_tile_create(parent, FONT_AWESOME_EDIT, PUI_TONE_NEUTRAL, PUI_FILL_OUTLINE, "添加笔记");
-
-    pui_tile_set_wide(tile, TRUE);
-    lv_obj_add_event_cb(tile, __goto_note_cb, LV_EVENT_CLICKED, NULL);
-
-    return tile;
-}
-
 /* ---- Actions --------------------------------------------------------------- */
-
-static void __goto_note_cb(lv_event_t *e)
-{
-    (void)e;
-
-    pet_ui_go(PET_PAGE_NOTE);
-}
 
 /**
  * @brief The delete action, on the header's trailing button.
@@ -175,13 +147,6 @@ static void __delete_cb(lv_event_t *e)
     pet_ui_refresh();
 }
 
-static void __to_memo_cb(lv_event_t *e)
-{
-    (void)e;
-
-    pet_say(pet_demo_shot_selected() > 0 ? "好的，这几张我写进备忘录里了" : "先选一张，我才知道写哪张");
-}
-
 static void __ai_read_cb(lv_event_t *e)
 {
     (void)e;
@@ -209,8 +174,8 @@ void pet_page_gallery_build(lv_obj_t *panel)
     body = pet_page_content(panel);
 
     grid = pui_grid_create(body, GAL_COLS, GAL_GAP);
-    /* Kept scrollable: the model's five shots and the add slot fit exactly, but a
-       sixth shot would need a third row and the grid is where it would go. */
+    /* Kept scrollable: the model's five shots are two rows, but the count is the
+       model's and a sixth shot would need a third row. */
     pui_screen_scrollable(grid);
     lv_obj_set_flex_grow(grid, 1);
 
@@ -218,22 +183,13 @@ void pet_page_gallery_build(lv_obj_t *panel)
         __build_tile(grid, i);
     }
 
-    __build_add_tile(grid);
-
     bar = pet_page_action_bar(panel, PUI_GRID_GAP);
-    btn = pui_button_create(bar, "加备忘录", PUI_TONE_ACCENT, PUI_FILL_SOLID, PUI_SIZE_MD);
-    /* Grown rather than sized to their labels: three of them share the bar's width
-       whatever it turns out to be, so neither the labels nor the panel have to be
-       measured. */
-    pui_button_set_grow(btn, TRUE);
-    lv_obj_add_event_cb(btn, __to_memo_cb, LV_EVENT_CLICKED, NULL);
-
     btn = pui_button_create(bar, "AI解读", PUI_TONE_NEUTRAL, PUI_FILL_GHOST, PUI_SIZE_MD);
     pui_button_set_grow(btn, TRUE);
     lv_obj_add_event_cb(btn, __ai_read_cb, LV_EVENT_CLICKED, NULL);
 
     /* Two bands: the grid, then the bar. The tiles inside the grid arrive with it rather
-       than one after another — a six-tile cascade is six animations to say what one
+       than one after another — a five-tile cascade is five animations to say what one
        already says, and the grid is read as a block. */
     pui_anim_rise_in(grid, 0);
     pui_anim_rise_in(bar, 1);

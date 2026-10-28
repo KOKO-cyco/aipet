@@ -1022,6 +1022,13 @@ static void prv_vol_icon_cb(lv_event_t *e)
     prv_vol_open();
 }
 
+/* 左上角的备忘录徽标：点一下直接进备忘录列表。 */
+static void prv_memo_badge_cb(lv_event_t *e)
+{
+    (void)e;
+    pet_ui_go(PET_PAGE_MEMOS);
+}
+
 /***********************************************************
 ************************* 定时器 ****************************
 ***********************************************************/
@@ -1143,8 +1150,17 @@ lv_obj_t *app_statusbar_create(lv_obj_t *parent)
     lv_obj_clear_flag(sg_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(sg_bar, prv_bar_deleted_cb, LV_EVENT_DELETE, NULL);
 
-    /* ---- 左：待办数（demo 的 "待办 3" 徽标位置）---- */
-    sg_badge = prv_text(sg_bar, "待办 0", SB_COL_DIM);
+    /* ---- 左：备忘录数（可点，进备忘录列表）---- */
+    {
+        lv_obj_t *memo = lv_button_create(sg_bar);
+
+        lv_obj_set_size(memo, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(memo, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(memo, 0, 0);
+        lv_obj_set_style_pad_all(memo, 2, 0);
+        sg_badge = prv_text(memo, "备忘录 0", SB_COL_DIM);
+        lv_obj_add_event_cb(memo, prv_memo_badge_cb, LV_EVENT_CLICKED, NULL);
+    }
 
     /* 弹簧：把下面这些推到右边。 */
     pui_spacer(sg_bar);
@@ -1224,7 +1240,7 @@ void app_statusbar_set_todo(uint32_t pending)
         return;
     }
 
-    lv_snprintf(text, sizeof(text), "待办 %u", (unsigned)pending);
+    lv_snprintf(text, sizeof(text), "备忘录 %u", (unsigned)pending);
     if (0 == strcmp(lv_label_get_text(sg_badge), text)) {
         return;
     }

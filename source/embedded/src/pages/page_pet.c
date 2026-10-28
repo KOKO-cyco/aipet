@@ -5,7 +5,7 @@
  * 这一页现在只做三件事，界面本身全在 src/ui/ 里：
  *
  *   1) **建壳**：`pet_ui_init(sg_scr)` 建出顶栏 + 左宠物卡 + 右功能面板
- *      （主页 / 拍照 / 相册 / 备忘录 / 全部笔记 / 设置，七页的页面栈）。
+ *      （主页 / 拍照 / 相册 / 备忘录 / 笔记 / 设置，六页的页面栈）。
  *   2) **把精灵画进左卡**：`pet_pet_stage()` 给出卡里那块舞台，这里在上面建一个
  *      lv_canvas，按 app_sprite2d 的脏矩形方式每 42ms 画一帧。
  *   3) **动作状态机**：AI 思考/说话、大模型点名、情绪、点击、待机随机插播 ——
@@ -20,7 +20,7 @@
  * 和旧版的差别
  * ------------
  * 旧版是深色主题、宠物在左半 240、右半是写死的备忘录原型视图；新版整套界面来自
- * 宽屏 demo（米白卡片风），右半是真正的页面栈，备忘录/笔记/设置都是独立页面。
+ * 宽屏 demo（暗色卡片风），右半是真正的页面栈，备忘录/笔记/设置都是独立页面。
  * **宠物仍然是实时精灵**，不是 demo 里那张 932KB 的静态图。
  *
  * 动作状态机（**不是**循环轮播）
@@ -1009,7 +1009,7 @@ static void prv_adapt_ticks(uint32_t now, lv_timer_t *tick)
         sg_ad_bad   = 0;
         sg_ad_good  = 0;
         lv_timer_set_period(tick, PET_TICK_SLOW_MS);
-        PR_NOTICE("[pet] 预取缺帧 %u/%u -> 拍子 %u -> %u ms（供给不足，降帧保流畅）",
+        PR_DEBUG("[pet] 预取缺帧 %u/%u -> 拍子 %u -> %u ms（供给不足，降帧保流畅）",
                   (unsigned)dm, (unsigned)tol,
                   (unsigned)PET_TICK_MS, (unsigned)PET_TICK_SLOW_MS);
     } else if (sg_ad_slow && sg_ad_good >= 4u) {
@@ -1018,7 +1018,7 @@ static void prv_adapt_ticks(uint32_t now, lv_timer_t *tick)
         sg_ad_bad   = 0;
         sg_ad_good  = 0;
         lv_timer_set_period(tick, PET_TICK_MS);
-        PR_NOTICE("[pet] 预取缺帧 %u/%u -> 拍子 %u -> %u ms（供给恢复，升回）",
+        PR_DEBUG("[pet] 预取缺帧 %u/%u -> 拍子 %u -> %u ms（供给恢复，升回）",
                   (unsigned)dm, (unsigned)tol,
                   (unsigned)PET_TICK_SLOW_MS, (unsigned)PET_TICK_MS);
     }
@@ -1103,7 +1103,7 @@ static void prv_tick_cb(lv_timer_t *t)
             if (sg_hold_clip < 0) {
                 sg_idle_at = now;       /* 回待机：重新开始"多久之后随机插播" */
             }
-            PR_NOTICE("[pet] AI 状态 -> %s", app_sprite2d_clip_name(sg_clip));
+            PR_DEBUG("[pet] AI 状态 -> %s", app_sprite2d_clip_name(sg_clip));
         }
 
         /* ① 一次性插播：优先级最高，会盖掉上面刚切的持续动作，演完再回去 */
@@ -1116,7 +1116,7 @@ static void prv_tick_cb(lv_timer_t *t)
              * 上一遍的姿势 —— 不清掉的话重播的前几拍会在"组首帧 ↔ 上次播到的
              * 位置"之间来回跳。跨组请求也走这里（顺带清掉新组的旧槽）。 */
             app_sprite2d_rewind(req);
-            PR_NOTICE("[pet] 插播 %s（第 %d/%d 组）",
+            PR_DEBUG("[pet] 插播 %s（第 %d/%d 组）",
                       app_sprite2d_clip_name(sg_clip), sg_clip + 1, n);
         }
 
@@ -1152,7 +1152,7 @@ static void prv_tick_cb(lv_timer_t *t)
                     sg_clip      = act;
                     sg_clip_at   = now;
                     sg_clip_once = TRUE;
-                    PR_NOTICE("[pet] 待机插播 %s", app_sprite2d_clip_name(act));
+                    PR_DEBUG("[pet] 待机插播 %s", app_sprite2d_clip_name(act));
                 }
             }
         }
@@ -1267,7 +1267,7 @@ static void prv_page_hook(PET_PAGE_E page)
     case PET_PAGE_CAMERA:
         name = "fn_photo";
         break;
-    case PET_PAGE_NOTE:
+    case PET_PAGE_MEMOS:
     case PET_PAGE_NOTES:
         name = "fn_note";
         break;

@@ -36,6 +36,14 @@ extern "C" {
 /* Cap on photos in the gallery strip. */
 #define PET_SHOT_MAX 8
 
+/* Cap on notes held in RAM. Notes are free-form text; the list page is read-only. */
+#define PET_NOTE_MAX 8
+
+/* A note is a title plus a handful of lines. Six is what the 250 px panel can show
+   without the list turning into a wall of text; a few lines is what the panel reads
+   comfortably. */
+#define PET_NOTE_LINES_MAX 6
+
 /***********************************************************
 ***********************typedef define***********************
 ***********************************************************/
@@ -45,6 +53,7 @@ extern "C" {
  */
 typedef struct {
     char   text[PET_TEXT_MAX];
+    char   when[16]; /* display time, e.g. "09:30" / "明天"; empty = no time */
     BOOL_T done;
 } PET_TODO_T;
 
@@ -56,6 +65,17 @@ typedef struct {
     PET_TODO_T items[PET_TODO_MAX];
     uint32_t   count;
 } PET_TODO_LIST_T;
+
+/**
+ * @brief One free-form note. Notes have no editing UI or add path on this build;
+ *        the list page only shows and deletes them.
+ */
+typedef struct {
+    char     title[PET_TEXT_MAX];
+    char     time[16]; /* display time, e.g. "10:20" / "昨天" */
+    char     lines[PET_NOTE_LINES_MAX][PET_TEXT_MAX];
+    uint32_t line_count;
+} PET_NOTE_T;
 
 /**
  * @brief One photo in the gallery grid. Only the caption is modelled — there is no

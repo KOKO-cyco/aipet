@@ -49,7 +49,7 @@ extern "C" {
 lv_obj_t *app_statusbar_create(lv_obj_t *parent);
 
 /**
- * @brief 更新左边那个"待办 N"徽标。
+ * @brief 更新左边那个"备忘录 N"徽标。
  *
  * @param[in] pending 未完成条数。内容没变时不动标签（省一次重排 + 重绘）。
  * @note 必须在 LVGL 线程（或持显示锁）里调。

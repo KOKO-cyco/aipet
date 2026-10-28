@@ -20,10 +20,14 @@
 extern void rtos_dump_task_list(void);
 extern void rtos_dump_task_runtime_stats(void);
 
-/* 自动采样节奏：开机风暴（配网 / 字库 / 精灵加载）先让它过去，再开始采。 */
+/* 自动采样节奏：开机风暴（配网 / 字库 / 精灵加载）先让它过去，再开始采。
+ *
+ * **默认 0 次 = 不开机自动采样**：它会打印整张任务表和 CPU 占用，6 次 × 每 20 秒
+ * 把串口刷满，而现场调试很少看它。要采样时在串口执行 `perf <秒>` 和 `perf now`。 */
 #define PERF_FIRST_DELAY_MS 15000
 #define PERF_PERIOD_MS      20000
-#define PERF_AUTO_MAX       6
+#define PERF_AUTO_MAX       0
+#define PERF_MANUAL_MAX     6
 #define PERF_STACK          4096
 
 /* cli_cmd_t 的 name/help 是 char*（非 const），用可写数组避免字面量告警
@@ -78,7 +82,7 @@ static void prv_cli_perf(int argc, char *argv[])
         int sec = atoi(argv[1]);
         if (sec > 0) {
             sg_period = sec * 1000;
-            sg_left   = PERF_AUTO_MAX;
+            sg_left   = PERF_MANUAL_MAX;
             sg_off    = FALSE;
             PR_NOTICE("[perf] 自动采样：每 %d 秒一次，再采 %d 次", sec, sg_left);
             return;
@@ -100,8 +104,10 @@ static void prv_task(void *arg)
     int n = 0;
 
     (void)arg;
+#if PERF_AUTO_MAX > 0
     PR_NOTICE("[perf] 自动采样线程就绪：%d ms 后开始，每 %d ms 一次，共 %d 次",
               PERF_FIRST_DELAY_MS, PERF_PERIOD_MS, PERF_AUTO_MAX);
+#endif
 
     tal_system_sleep(PERF_FIRST_DELAY_MS);
 
@@ -114,8 +120,7 @@ static void prv_task(void *arg)
         sg_left--;
         n++;
         prv_dump("自动");
-        PR_NOTICE("[perf] 自动采样 %d/%d，剩余 %d 次（perf off 可停）",
-                  n, PERF_AUTO_MAX, sg_left);
+        PR_NOTICE("[perf] 采样 %d 次，剩余 %d 次（perf off 可停）", n, sg_left);
         tal_system_sleep(sg_period);
     }
 }

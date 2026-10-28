@@ -48,30 +48,33 @@ uint32_t pet_demo_todo_pending(void);
 void pet_demo_todo_toggle(uint32_t index);
 
 /**
- * @brief Append an item.
- *
- * @return FALSE when the list is already at PET_TODO_MAX, in which case nothing is
- *         added — the caller decides how to say so.
+ * @brief Delete one item and close the gap. Out-of-range indices are ignored.
  */
-BOOL_T pet_demo_todo_add(const char *text);
+void pet_demo_todo_delete(uint32_t index);
 
 /**
- * @brief Label of the to-do page's left rail, e.g. 灵感记录.
- *
- * @return NULL when @p index is past the end, so a caller can loop until NULL.
+ * @brief Remove every item whose done flag is set.
  */
-const char *pet_demo_nav_name(uint32_t index);
+void pet_demo_todo_clear_done(void);
+
+/* ---- Notes ---------------------------------------------------------------- */
 
 /**
- * @brief When a note was last touched, as it should be shown beside the name.
- *
- * A display string rather than a timestamp: the model has no clock, so this is fixed
- * demo copy of the form 10:20 / 昨天 / 周一.
- *
- * @return NULL when @p index is past the end, so a caller can stop at the same place
- *         pet_demo_nav_name() does.
+ * @brief How many notes the list page has to show.
  */
-const char *pet_demo_nav_time(uint32_t index);
+uint32_t pet_demo_note_count(void);
+
+/**
+ * @brief One note, newest first.
+ *
+ * @return NULL when @p index is past the end.
+ */
+const PET_NOTE_T *pet_demo_note_at(uint32_t index);
+
+/**
+ * @brief Delete one note and close the gap. Out-of-range indices are ignored.
+ */
+void pet_demo_note_delete(uint32_t index);
 
 /* ---- Gallery -------------------------------------------------------------- */
 
@@ -121,32 +124,6 @@ void pet_demo_mode_next(void);
  * @brief Chinese name of a mode. Out-of-range values read as PET_MODE_COMPOSE.
  */
 const char *pet_demo_mode_name(PET_CAMERA_MODE_E mode);
-
-/* ---- Note page ------------------------------------------------------------ */
-
-/**
- * @brief One line of the note body.
- *
- * @return NULL when @p index is past the end, so a caller can loop until NULL.
- */
-const char *pet_demo_note_line(uint32_t index);
-
-/* ---- Reminder picker ------------------------------------------------------ */
-
-/**
- * @brief The day / hour / minute the reminder sheet is currently showing.
- */
-uint32_t pet_demo_remind_day(void);
-uint32_t pet_demo_remind_hour(void);
-uint32_t pet_demo_remind_min(void);
-
-/**
- * @brief Step the reminder, wrapping rather than clamping.
- *
- * Wrapping is the point: the sheet is a pair of rollers, and a roller that stops
- * dead at 23:59 feels broken. Day wraps 1..31, hour 0..23, minute 0..59.
- */
-void pet_demo_remind_step(int day_delta, int hour_delta, int min_delta);
 
 /* ---- Settings ------------------------------------------------------------- */
 

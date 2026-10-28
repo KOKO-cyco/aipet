@@ -256,35 +256,43 @@ static BOOL_T prv_try_lines(int lines)
 #define APP_STORAGE_WRITE_LINES  1
 #define APP_STORAGE_WRITE_CLK    SDIO_HOST_CLK_13M
 
-/* 读档线宽：**4 线**（这块板读得最快的那一档）。
- * 1 线的读带宽只有 4 线的 1/6~1/10，常驻 1 线桌宠会肉眼可见掉帧；之前那次
- * "1 线读"是对照实验，已经撤掉。只有 4 线**起不来**时才退 1 线。 */
-#define APP_STORAGE_READ_LINES   4
+/* 读档线宽：**固定 1 线**。
+ *
+ * 这块板的 4 线读一直不稳：2026-10-28 真机 4 线试 5 次、1 线再试 5 次，38 秒
+ * 全败，屏幕一直黑；退到 1 线后第一次挂载就成功。4 线从来没有在这块板上稳定
+ * 兑现过带宽，所以开机不再探测它。
+ *
+ * 代价：1 线读带宽只有 4 线的 1/6~1/10，桌宠动画可能掉帧。用确定性换流畅度。 */
+#define APP_STORAGE_READ_LINES   1
 
-/* 起卡：4 线优先（读快），不行退 1 线，然后直接定格写档常量。
+/* 起卡：**只挂一次**。
+ *
+ * 以前是 4 线 x5 + 1 线 x5，每次 mount 内部还要重读 3 遍，真机最坏 38 秒 ——
+ * 这段时间排在显示初始化之前，就是"开机黑屏"。卡挂不上时反复 deinit/mount
+ * 也没有帮助：日志里 10 次全败，反而是后面的恢复路径一次就挂上了。
+ * 所以开机只试一次，失败就交给 prv_recover_locked()（由 preload 触发）。
  * 不试写 —— 见上面固定写档的理由。 */
 static BOOL_T prv_bring_up(void)
 {
-    if (prv_try_lines(APP_STORAGE_READ_LINES)) {
-        sg_sdio_lines = APP_STORAGE_READ_LINES;
-        sg_fast_lines = APP_STORAGE_READ_LINES;
-    } else if (prv_try_lines(1)) {
-        PR_WARN("[sto] %d 线起不来，退 1 线（动画会掉帧）", APP_STORAGE_READ_LINES);
-        sg_sdio_lines = 1;
-        sg_fast_lines = 1;
-    } else {
-        sg_sdio_lines = 0;
-        PR_ERR("[sto] SD 卡 4 线 / 1 线都起不来");
-        return FALSE;                   /* sg_write_lines 留 0：写会被如实拒掉 */
+    if (prv_try_lines_once(APP_STORAGE_READ_LINES)) {
+        sg_sdio_lines  = APP_STORAGE_READ_LINES;
+        sg_fast_lines  = APP_STORAGE_READ_LINES;
+        sg_write_lines = APP_STORAGE_WRITE_LINES;
+        sg_write_clk   = APP_STORAGE_WRITE_CLK;
+        PR_NOTICE("[sto] 卡就绪：平时 %d 线读，拍照时切到 %d 线写；读通路 %s",
+                  sg_fast_lines, sg_write_lines,
+                  g_sd_card_dma_rx_compiled ? "GDMA（硬件读，单次 ≤64KB）"
+                                            : "CPU 轮询 FIFO");
+        return TRUE;
     }
 
-    sg_write_lines = APP_STORAGE_WRITE_LINES;
-    sg_write_clk   = APP_STORAGE_WRITE_CLK;
-    PR_NOTICE("[sto] 卡就绪：平时 %d 线读，拍照时切到 %d 线写；读通路 %s",
-              sg_fast_lines, sg_write_lines,
-              g_sd_card_dma_rx_compiled ? "GDMA（硬件读，单次 ≤64KB）"
-                                        : "CPU 轮询 FIFO");
-    return TRUE;
+    /* tkl_sdio_init(1 线) 已经生效，恢复路径会沿用这个线宽重挂。
+     * 写档等真正挂上之后由 prv_recover_locked() 补回来。 */
+    sg_sdio_lines  = 0;
+    sg_fast_lines  = APP_STORAGE_READ_LINES;
+    sg_write_lines = 0;
+    PR_ERR("[sto] 1 线起卡失败（开机只试一次），等恢复路径重挂");
+    return FALSE;
 }
 
 OPERATE_RET app_storage_sdio_setup(void)
@@ -508,10 +516,20 @@ BOOL_T app_storage_wait_ready(uint32_t timeout_ms)
 {
     uint32_t t0      = tal_system_get_millisecond();
     uint32_t last_log = t0;
+    BOOL_T   told    = FALSE;
 
     for (;;) {
         if (app_storage_ready() && !sg_warming) {
             return TRUE;
+        }
+
+        /* 卡没就绪时只报一次，别每 5 秒刷屏；后面要看进度把日志级别开到 DEBUG。
+         * 真卡住时这行会停在屏幕上，说明卡在哪一步没过。 */
+        if (!told) {
+            told = TRUE;
+            PR_WARN("[sto] 等 SD 就绪：卡%s", app_storage_card_present()
+                                                  ? "在位但读不到，后台重建中"
+                                                  : "不在位，请插入");
         }
 
         /* **timeout_ms == 0 = 永久等待，不超时。**
@@ -527,13 +545,13 @@ BOOL_T app_storage_wait_ready(uint32_t timeout_ms)
             return FALSE;
         }
 
-        /* 永久等待时每 5 秒报一次，免得用户对着开机画面不知道在等什么。 */
+        /* 之后的进度只走 DEBUG，默认 INFO 下不再刷屏。 */
         if (0 == timeout_ms &&
             (tal_system_get_millisecond() - last_log) >= 5000u) {
             last_log = tal_system_get_millisecond();
-            PR_WARN("[sto] 还在等 SD：卡%s", app_storage_card_present()
-                                                ? "在位但没起来（链路重建中）"
-                                                : "不在位，请插入");
+            PR_DEBUG("[sto] 还在等 SD：卡%s", app_storage_card_present()
+                                                ? "在位（重建/预热中）"
+                                                : "不在位");
         }
 
         tal_system_sleep(50);
@@ -726,6 +744,16 @@ static OPERATE_RET prv_recover_locked(void)
             if (TRUE == prv_readable()) {
                 sg_mounted = TRUE;
                 sg_fault   = APP_SD_OK;
+                /* 开机那次没挂上、靠这条路径挂起来的：把读写档补回来，
+                 * 否则 sg_write_lines 永远是 0，照片保存会一直失败。
+                 * 线宽沿用 tkl_sdio_init() 最后一次设置（开机固定 1 线）。 */
+                if (0 == sg_sdio_lines) {
+                    sg_sdio_lines = sg_fast_lines;
+                }
+                if (0 == sg_write_lines) {
+                    sg_write_lines = APP_STORAGE_WRITE_LINES;
+                    sg_write_clk   = APP_STORAGE_WRITE_CLK;
+                }
                 /* **不动 sg_gen**：重建只是把 SDIO 链路重新拉起来，卡还是那张卡、
                  * 目录内容没变。动它会让"插卡 -> 重建"这条每次必走的路把预热的
                  * 结果白作废一遍（见 app_storage_gen 的说明）。 */

@@ -26,24 +26,11 @@ static PET_CAMERA_MODE_E sg_mode = PET_MODE_SELFIE;
 static PET_POS_E         sg_pos  = PET_POS_RIGHT;
 
 static int sg_settings[PET_SETTING_MAX];
-static int sg_remind_day  = 15;
-static int sg_remind_hour = 19;
-static int sg_remind_min  = 0;
 
-/* The notes the home card previews and the notes list page shows in full. The names are
-   the gallery's captions so the two never disagree about what a note is called. Each is
-   paired with the time it was last touched, which is what the row's trailing label shows:
-   the model has no clock, so these are fixed demo strings. */
-static const char *const sg_nav[] = {"购物清单", "会议记录", "灵感记录", "待办事项", "旅行计划"};
-static const char *const sg_nav_time[] = {"10:20", "昨天", "昨天", "周一", "上周"};
-
-/* The note page's body, one line per row. */
-static const char *const sg_note_lines[] = {
-    "拍照记录便签",
-    "提取待办事项",
-    "周三买电池",
-    "晚上7点开会",
-};
+/* Notes are their own list now; the UI only shows and deletes them. Seeded newest
+   first, like the list page renders them. */
+static PET_NOTE_T sg_notes[PET_NOTE_MAX];
+static uint32_t   sg_note_count;
 
 static const char *const sg_mode_names[PET_MODE_MAX] = {
     "准景合物",
@@ -104,21 +91,57 @@ static void __seed_todo(void)
 {
     static const struct {
         const char *text;
+        const char *when;
         BOOL_T      done;
     } rows[] = {
-        {"整理桌面", TRUE},
-        {"回复邮件", TRUE},
-        {"项目讨论", FALSE},
-        {"买咖啡", FALSE},
+        {"买咖啡", "09:30", FALSE},
+        {"回复邮件", "10:00", TRUE},
+        {"项目讨论", "19:00", FALSE},
+        {"整理桌面", "昨天", FALSE},
     };
 
     memset(&sg_todo, 0, sizeof(sg_todo));
-    __copy(sg_todo.title, sizeof(sg_todo.title), "今日待办");
+    __copy(sg_todo.title, sizeof(sg_todo.title), "今日备忘录");
 
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]) && i < PET_TODO_MAX; i++) {
         __copy(sg_todo.items[i].text, PET_TEXT_MAX, rows[i].text);
+        __copy(sg_todo.items[i].when, sizeof(sg_todo.items[i].when), rows[i].when);
         sg_todo.items[i].done = rows[i].done;
         sg_todo.count++;
+    }
+}
+
+static void __seed_notes(void)
+{
+    static const struct {
+        const char *title;
+        const char *time;
+        const char *lines[3];
+    } rows[] = {
+        {"购物清单", "10:20", {"牛奶", "电池", "周末采购"}},
+        {"会议记录", "昨天", {"周三 10 点", "项目进度", "需要带电脑"}},
+        {"灵感记录", "昨天", {"宠物动作", "语音提醒", "加一个转圈动画"}},
+        {"旅行计划", "上周", {"杭州两天一夜", "西湖", "带上相机"}},
+    };
+
+    memset(sg_notes, 0, sizeof(sg_notes));
+    sg_note_count = 0;
+
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]) && i < PET_NOTE_MAX; i++) {
+        PET_NOTE_T *note = &sg_notes[sg_note_count];
+
+        __copy(note->title, sizeof(note->title), rows[i].title);
+        __copy(note->time, sizeof(note->time), rows[i].time);
+
+        for (size_t j = 0; j < sizeof(rows[i].lines) / sizeof(rows[i].lines[0]); j++) {
+            if (rows[i].lines[j] == NULL) {
+                break;
+            }
+            __copy(note->lines[note->line_count], PET_TEXT_MAX, rows[i].lines[j]);
+            note->line_count++;
+        }
+
+        sg_note_count++;
     }
 }
 
@@ -155,14 +178,12 @@ static void __seed_settings(void)
 void pet_demo_init(void)
 {
     __seed_todo();
+    __seed_notes();
     __seed_shots();
     __seed_settings();
 
-    sg_mode        = PET_MODE_SELFIE;
-    sg_pos         = PET_POS_RIGHT;
-    sg_remind_day  = 15;
-    sg_remind_hour = 19;
-    sg_remind_min  = 0;
+    sg_mode = PET_MODE_SELFIE;
+    sg_pos  = PET_POS_RIGHT;
 }
 
 /* ---- To-do ---------------------------------------------------------------- */
@@ -194,35 +215,71 @@ void pet_demo_todo_toggle(uint32_t index)
     sg_todo.items[index].done = sg_todo.items[index].done ? FALSE : TRUE;
 }
 
-BOOL_T pet_demo_todo_add(const char *text)
+void pet_demo_todo_delete(uint32_t index)
 {
-    if (sg_todo.count >= PET_TODO_MAX || text == NULL || text[0] == '\0') {
-        return FALSE;
+    if (index >= sg_todo.count) {
+        return;
     }
 
-    __copy(sg_todo.items[sg_todo.count].text, PET_TEXT_MAX, text);
-    sg_todo.items[sg_todo.count].done = FALSE;
-    sg_todo.count++;
+    if (index + 1 < sg_todo.count) {
+        memmove(&sg_todo.items[index], &sg_todo.items[index + 1],
+                (sg_todo.count - index - 1) * sizeof(sg_todo.items[0]));
+    }
 
-    return TRUE;
+    sg_todo.count--;
+    memset(&sg_todo.items[sg_todo.count], 0, sizeof(sg_todo.items[0]));
 }
 
-const char *pet_demo_nav_name(uint32_t index)
+void pet_demo_todo_clear_done(void)
 {
-    if (index >= sizeof(sg_nav) / sizeof(sg_nav[0])) {
+    uint32_t write = 0;
+
+    for (uint32_t read = 0; read < sg_todo.count; read++) {
+        if (sg_todo.items[read].done) {
+            continue;
+        }
+
+        if (write != read) {
+            sg_todo.items[write] = sg_todo.items[read];
+        }
+        write++;
+    }
+
+    if (write < sg_todo.count) {
+        memset(&sg_todo.items[write], 0, (sg_todo.count - write) * sizeof(sg_todo.items[0]));
+    }
+
+    sg_todo.count = write;
+}
+
+/* ---- Notes ---------------------------------------------------------------- */
+
+uint32_t pet_demo_note_count(void)
+{
+    return sg_note_count;
+}
+
+const PET_NOTE_T *pet_demo_note_at(uint32_t index)
+{
+    if (index >= sg_note_count) {
         return NULL;
     }
 
-    return sg_nav[index];
+    return &sg_notes[index];
 }
 
-const char *pet_demo_nav_time(uint32_t index)
+void pet_demo_note_delete(uint32_t index)
 {
-    if (index >= sizeof(sg_nav_time) / sizeof(sg_nav_time[0])) {
-        return NULL;
+    if (index >= sg_note_count) {
+        return;
     }
 
-    return sg_nav_time[index];
+    if (index + 1 < sg_note_count) {
+        memmove(&sg_notes[index], &sg_notes[index + 1], (sg_note_count - index - 1) * sizeof(sg_notes[0]));
+    }
+
+    sg_note_count--;
+    memset(&sg_notes[sg_note_count], 0, sizeof(sg_notes[0]));
 }
 
 /* ---- Gallery -------------------------------------------------------------- */
@@ -294,41 +351,6 @@ const char *pet_demo_mode_name(PET_CAMERA_MODE_E mode)
     }
 
     return sg_mode_names[mode];
-}
-
-/* ---- Note page ------------------------------------------------------------ */
-
-const char *pet_demo_note_line(uint32_t index)
-{
-    if (index >= sizeof(sg_note_lines) / sizeof(sg_note_lines[0])) {
-        return NULL;
-    }
-
-    return sg_note_lines[index];
-}
-
-/* ---- Reminder picker ------------------------------------------------------ */
-
-uint32_t pet_demo_remind_day(void)
-{
-    return (uint32_t)sg_remind_day;
-}
-
-uint32_t pet_demo_remind_hour(void)
-{
-    return (uint32_t)sg_remind_hour;
-}
-
-uint32_t pet_demo_remind_min(void)
-{
-    return (uint32_t)sg_remind_min;
-}
-
-void pet_demo_remind_step(int day_delta, int hour_delta, int min_delta)
-{
-    sg_remind_day  = __wrap(sg_remind_day + day_delta, 1, 31);
-    sg_remind_hour = __wrap(sg_remind_hour + hour_delta, 0, 23);
-    sg_remind_min  = __wrap(sg_remind_min + min_delta, 0, 59);
 }
 
 /* ---- Settings ------------------------------------------------------------- */

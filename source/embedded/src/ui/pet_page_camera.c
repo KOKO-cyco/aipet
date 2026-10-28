@@ -196,19 +196,6 @@ static void __modal_close_cb(lv_event_t *e)
     __preview_pause(FALSE);
 }
 
-static void __modal_say_cb(lv_event_t *e)
-{
-    const char *line = (const char *)lv_event_get_user_data(e);
-
-    if (sg_shot_pending) {
-        app_camera_discard();
-        sg_shot_pending = FALSE;
-    }
-    pet_page_sheet_close();
-    __preview_pause(FALSE);
-    pet_say(line);
-}
-
 /**
  * @brief Add one full-width row to a sheet's card.
  *
@@ -217,7 +204,7 @@ static void __modal_say_cb(lv_event_t *e)
  * says which of them is the destructive one.
  *
  * @param[in] cb    clicked handler
- * @param[in] user  handler's user data (a say-line for __modal_say_cb, NULL otherwise)
+ * @param[in] user  handler's user data (NULL for the shot actions)
  */
 static void __modal_button(lv_obj_t *card, const char *text, PUI_TONE_E tone,
                            lv_event_cb_t cb, const char *user)
@@ -412,13 +399,10 @@ static void __shot_now(void)
     lv_obj_set_style_text_align(sub, LV_TEXT_ALIGN_CENTER, 0);
     sg_shot_sub = sub;
 
-    /* 拍照失败时只留"关闭"：AI识别 / 新建备忘录当时会一本正经地报结果，
-     * 但根本没有照片可识别。 */
+    /* 拍照失败时只留"关闭"：AI识别当时会一本正经地报结果，但根本没有照片可识别。 */
     if (ok) {
         __modal_button(body, "保存到相册", PUI_TONE_ACCENT, __save_shot_cb, NULL);
         __modal_button(body, "AI识别", PUI_TONE_ACCENT, __ai_open_cb, NULL);
-        __modal_button(body, "新建备忘录", PUI_TONE_ACCENT, __modal_say_cb,
-                       "新建了一条备忘录，随时可以改");
     }
 
     close = pui_button_create(body, "关闭", PUI_TONE_RED, PUI_FILL_OUTLINE, PUI_SIZE_MD);

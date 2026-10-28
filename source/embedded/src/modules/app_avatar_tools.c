@@ -247,6 +247,7 @@ static OPERATE_RET prv_register_tools(void)
     ));
 
     PR_NOTICE("[avatar] 3 个动作工具已登记：play_animation / set_emotion / composite_action");
+
     sg_server_up = true;
     return OPRT_OK;
 }

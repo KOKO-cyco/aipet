@@ -46,11 +46,11 @@ extern "C" {
  * something the user can navigate to.
  */
 typedef enum {
-    PET_PAGE_HOME = 0, /* 主页 — three entry tiles, the weather and two summary cards */
+    PET_PAGE_HOME = 0, /* 主页 — three entry tiles and two summary cards */
     PET_PAGE_CAMERA,   /* 拍照 */
     PET_PAGE_GALLERY,  /* 相册 — reached from the camera page */
-    PET_PAGE_NOTES,    /* 全部笔记 — the list of notes, reached from the home card */
-    PET_PAGE_NOTE,     /* 备忘录 — the editor for one note */
+    PET_PAGE_MEMOS,    /* 备忘录 — time-bound items, checkable and deletable */
+    PET_PAGE_NOTES,    /* 笔记 — free-form notes, read-only list */
     PET_PAGE_SETTINGS, /* 设置 */
     PET_PAGE_MAX,
 } PET_PAGE_E;
