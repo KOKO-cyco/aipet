@@ -10,6 +10,8 @@
 
 #include <string.h>
 
+#include "tal_kv.h"
+
 /***********************************************************
 ***********************variable define**********************
 ***********************************************************/
@@ -89,6 +91,126 @@ static int __wrap(int value, int lo, int hi)
     }
 
     return value + lo;
+}
+
+/***********************************************************
+*********************persist define*************************
+***********************************************************/
+
+/* 备忘录/笔记落 flash。分三块存：一张 meta 头（计数 + id 游标）+ 两张表各存一块
+ * 原始结构体数组。之所以不拼成一个大结构再写，是为了 save 时不需要 6KB 连续临时
+ * 缓冲 —— AI 栈起来后 SRAM 只剩十几 KB，凑不出这么大的块。
+ * 写入顺序：先表、后 meta，meta 相当于提交标记；中途掉电时 meta 还是旧的，
+ * 下次加载长度对不上就整份作废、回落到演示数据。
+ * 键名受 TAL_LV_KEY_LEN(16) 限制。 */
+#define PET_KV_META    "pet_meta"
+#define PET_KV_MEMO    "pet_memo"
+#define PET_KV_NOTE    "pet_note"
+#define PET_KV_MAGIC   0x5045544DU /* 'P','E','T','M'，用来识别坏数据 */
+#define PET_KV_VERSION 1U
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t todo_count;
+    uint32_t note_count;
+    uint32_t next_id;
+} PET_KV_META_T;
+
+static void __persist_save(void)
+{
+    PET_KV_META_T meta;
+
+    if (sg_todo.count > 0) {
+        tal_kv_set(PET_KV_MEMO, (const uint8_t *)sg_todo.items, sg_todo.count * sizeof(sg_todo.items[0]));
+    } else {
+        tal_kv_del(PET_KV_MEMO);
+    }
+
+    if (sg_note_count > 0) {
+        tal_kv_set(PET_KV_NOTE, (const uint8_t *)sg_notes, sg_note_count * sizeof(sg_notes[0]));
+    } else {
+        tal_kv_del(PET_KV_NOTE);
+    }
+
+    meta.magic      = PET_KV_MAGIC;
+    meta.version    = PET_KV_VERSION;
+    meta.todo_count = (uint16_t)sg_todo.count;
+    meta.note_count = sg_note_count;
+    meta.next_id    = sg_next_id;
+
+    /* KV 没就绪时静默放弃：内存里的功能照常，最多丢这次持久化。 */
+    (void)tal_kv_set(PET_KV_META, (const uint8_t *)&meta, sizeof(meta));
+}
+
+static BOOL_T __persist_load(void)
+{
+    uint8_t      *buf = NULL;
+    size_t        len = 0;
+    PET_KV_META_T meta;
+
+    if (0 != tal_kv_get(PET_KV_META, &buf, &len) || NULL == buf) {
+        return FALSE;
+    }
+    if (len != sizeof(meta)) {
+        tal_kv_free(buf);
+        return FALSE;
+    }
+    memcpy(&meta, buf, sizeof(meta));
+    tal_kv_free(buf);
+
+    if (PET_KV_MAGIC != meta.magic || PET_KV_VERSION != meta.version || meta.todo_count > PET_TODO_MAX ||
+        meta.note_count > PET_NOTE_MAX) {
+        return FALSE;
+    }
+
+    memset(&sg_todo, 0, sizeof(sg_todo));
+    memset(sg_notes, 0, sizeof(sg_notes));
+
+    buf = NULL;
+    if (meta.todo_count > 0) {
+        if (0 != tal_kv_get(PET_KV_MEMO, &buf, &len) || NULL == buf ||
+            len != (size_t)meta.todo_count * sizeof(sg_todo.items[0])) {
+            if (NULL != buf) {
+                tal_kv_free(buf);
+            }
+            return FALSE;
+        }
+        memcpy(sg_todo.items, buf, len);
+        tal_kv_free(buf);
+        sg_todo.count = meta.todo_count;
+    }
+
+    buf = NULL;
+    if (meta.note_count > 0) {
+        if (0 != tal_kv_get(PET_KV_NOTE, &buf, &len) || NULL == buf ||
+            len != (size_t)meta.note_count * sizeof(sg_notes[0])) {
+            if (NULL != buf) {
+                tal_kv_free(buf);
+            }
+            return FALSE;
+        }
+        memcpy(sg_notes, buf, len);
+        tal_kv_free(buf);
+        sg_note_count = meta.note_count;
+    }
+
+    __copy(sg_todo.title, sizeof(sg_todo.title), "今日备忘录");
+
+    /* id 游标兜底：即使 meta 里的值偏小，也不能和现有 id 撞车。 */
+    sg_next_id = (meta.next_id > 0) ? meta.next_id : 1;
+    for (uint32_t i = 0; i < sg_todo.count; i++) {
+        if (sg_todo.items[i].id >= sg_next_id) {
+            sg_next_id = sg_todo.items[i].id + 1;
+        }
+    }
+    for (uint32_t i = 0; i < sg_note_count; i++) {
+        if (sg_notes[i].id >= sg_next_id) {
+            sg_next_id = sg_notes[i].id + 1;
+        }
+    }
+
+    return TRUE;
 }
 
 static void __seed_todo(void)
@@ -183,8 +305,19 @@ static void __seed_settings(void)
 
 void pet_demo_init(void)
 {
-    __seed_todo();
-    __seed_notes();
+    memset(&sg_todo, 0, sizeof(sg_todo));
+    memset(sg_notes, 0, sizeof(sg_notes));
+    sg_note_count = 0;
+    sg_next_id    = 1;
+
+    /* 有落盘数据就恢复；没有（首次启动 / 数据损坏）就种一份演示数据并立刻写回，
+     * 这样用户第一次删改之后，重启看到的是他自己的清单，而不是重新长出来的四条。 */
+    if (TRUE != __persist_load()) {
+        __seed_todo();
+        __seed_notes();
+        __persist_save();
+    }
+
     __seed_shots();
     __seed_settings();
 
@@ -219,6 +352,8 @@ void pet_demo_todo_toggle(uint32_t index)
     }
 
     sg_todo.items[index].done = sg_todo.items[index].done ? FALSE : TRUE;
+
+    __persist_save();
 }
 
 void pet_demo_todo_delete(uint32_t index)
@@ -234,6 +369,8 @@ void pet_demo_todo_delete(uint32_t index)
 
     sg_todo.count--;
     memset(&sg_todo.items[sg_todo.count], 0, sizeof(sg_todo.items[0]));
+
+    __persist_save();
 }
 
 void pet_demo_todo_clear_done(void)
@@ -256,6 +393,8 @@ void pet_demo_todo_clear_done(void)
     }
 
     sg_todo.count = write;
+
+    __persist_save();
 }
 
 /* ---- Memos / notes by id -------------------------------------------------- */
@@ -330,6 +469,8 @@ uint32_t pet_demo_memo_add(const char *text, const char *when)
     sg_todo.items[0].done = FALSE;
     sg_todo.count++;
 
+    __persist_save();
+
     return sg_todo.items[0].id;
 }
 
@@ -350,6 +491,8 @@ BOOL_T pet_demo_memo_update(uint32_t id, const char *text, const char *when, int
     if (done >= 0) {
         sg_todo.items[i].done = done ? TRUE : FALSE;
     }
+
+    __persist_save();
 
     return TRUE;
 }
@@ -386,6 +529,8 @@ uint32_t pet_demo_note_add(const char *title, const char *body)
     __note_fill_body(note, body);
     sg_note_count++;
 
+    __persist_save();
+
     return note->id;
 }
 
@@ -403,6 +548,8 @@ BOOL_T pet_demo_note_update(uint32_t id, const char *title, const char *body)
     if (body != NULL && body[0] != '\0') {
         __note_fill_body(&sg_notes[i], body);
     }
+
+    __persist_save();
 
     return TRUE;
 }
@@ -447,6 +594,8 @@ void pet_demo_note_delete(uint32_t index)
 
     sg_note_count--;
     memset(&sg_notes[sg_note_count], 0, sizeof(sg_notes[0]));
+
+    __persist_save();
 }
 
 /* ---- Gallery -------------------------------------------------------------- */
