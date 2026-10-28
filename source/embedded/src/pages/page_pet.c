@@ -34,14 +34,13 @@
  *   APP_EVT_AI_EMOTION   AI 情绪（云端 NLG / MCP）      —— 一次性
  *   APP_EVT_AI_STATE     AI 状态（THINK / SPEAK）       —— **持续**
  *   APP_EVT_AI_TEXT      AI 回复文本流（气泡分页）       —— 一次性
- *   APP_EVT_AI_TTS       TTS 播放时钟（文本时间戳基准）  —— 一次性
  *   点宠物                                               —— 一次性
  *
  * "持续"优先于"一次性"：AI 一开始说话就立刻切过去，正在演的随机动作让位。
  *
- * 气泡显示 AI 回复时按 14 字分页，每页的排期 = TTS_START 的本地时刻 +
- * (本片 timeindex - 本轮首片 timeindex)，和语音走同一条时间轴；云端没给
- * timeindex 或 TTS 没起来时按 PET_AI_CHAR_MS / PET_AI_FALLBACK_MS 兜底。
+ * 气泡的显示节奏复用 SDK 的 ai_ui_stream_text（与 apps/tuya.ai/your_chat_bot
+ * 同一套）：它每 1s 吐 10 个字，这里只把吐出来的字攒成 14 字一页（气泡两行
+ * 的上限）交给 pet_say_stream()。
  */
 
 #include <stdio.h>
@@ -52,6 +51,7 @@
 #include "lvgl.h"
 
 #include "ai_manage_mode.h"     /* AI_MODE_STATE_* —— AI 状态驱动动作 */
+#include "ai_ui_stream_text.h"  /* 流式文本节奏（同 your_chat_bot） */
 
 #include "app_ai_chat.h"
 #include "app_camera.h"
@@ -109,20 +109,12 @@
 #define PET_CLIP_IDLE         0
 
 /* ---- AI 文本流 -> 气泡 ------------------------------------------------------
- * 气泡的显示上限是两行 18px 汉字，共 14 个字（见 pet_pet.h），所以 AI 的长回复
- * 按 14 字分页显示。每页的排期用云端 timeindex 的相对差值：**同一条回复内，
- * 所有分片减去本轮首片**，再加到 TTS_START 的本地时刻上 —— 这样云端给的是
- * 绝对时间戳还是从 0 开始的偏移，都会被归一到同一个时间轴。
- *
- * timeindex 缺失（全 0）时按 PET_AI_CHAR_MS 的语速估算，保证文字不会一次性
- * 冲在语音前面；TTS_START 一直没来（比如只有文字）则用首片到达后
- * PET_AI_FALLBACK_MS 作为起点。 */
+ * 显示节奏用 SDK 的 ai_ui_stream_text（apps/tuya.ai/your_chat_bot 的同一套）：
+ * 分片进它的环形缓冲，它每 1s 吐 10 个字，UTF-8 切分和缓冲都在组件里。
+ * 气泡两行 18px 汉字的上限是 14 个字（见 pet_pet.h），这里只把吐出来的字
+ * 攒成 14 字一页、优先在标点处断页，再交给 pet_say_stream()。 */
 #define PET_AI_PAGE_CHARS   14
-#define PET_AI_PAGE_BYTES   (PET_AI_PAGE_CHARS * 3 + 1)
-#define PET_AI_QUEUE_LEN    16
-#define PET_AI_ACC_BYTES    (PET_AI_PAGE_BYTES * 2)
-#define PET_AI_FALLBACK_MS  400u
-#define PET_AI_CHAR_MS      220u
+#define PET_AI_PAGE_BYTES   (PET_AI_PAGE_CHARS * 4 + 1)   /* UTF-8 一个字符最多 4 字节 */
 
 /***********************************************************
 ************************ 动作巡检 *****************************
@@ -282,27 +274,13 @@ static volatile BOOL_T sg_req_font;
 static volatile int sg_ai_state = AI_MODE_STATE_IDLE;
 
 /* ---- AI 气泡：文本流状态 ----------------------------------------------------
- * AI 事件跑在语音栈线程上，tick 跑在 LVGL 线程上，所以这一组状态用互斥锁保护；
- * 回调里只做字符串搬运，碰 LVGL 的只有 tick。 */
-typedef struct {
-    char     text[PET_AI_PAGE_BYTES];
-    uint16_t len;
-    uint32_t due;      /**< 相对本轮 TTS 起点的毫秒偏移 */
-} PET_AI_PAGE_T;
-
-static MUTEX_HANDLE sg_ai_lock;
-static PET_AI_PAGE_T sg_ai_q[PET_AI_QUEUE_LEN];
-static int      sg_ai_head;
-static int      sg_ai_tail;
-static char     sg_ai_acc[PET_AI_ACC_BYTES];  /* 还没攒够一页的尾巴（可能半个 UTF-8） */
-static uint16_t sg_ai_acc_len;
-static uint32_t sg_ai_acc_due;                /* 当前这页第一字的 timeindex 偏移 */
-static uint32_t sg_ai_ref_idx;                /* 本轮首片的 timeindex */
-static BOOL_T   sg_ai_ref_valid;
-static BOOL_T   sg_ai_tts_valid;              /* TTS_START 已到，时间轴可用 */
-static uint32_t sg_ai_tts_ms;                 /* TTS_START 的本地时刻 */
-static uint32_t sg_ai_first_ms;               /* 本轮首片文本到达的本地时刻（兜底） */
-static volatile BOOL_T sg_ai_abort;           /* 被打断：tick 里把气泡收掉 */
+ * sg_ai_page 只由 ai_ui_stream_text 的定时器线程读写；AI 事件线程只置标志，
+ * 这样不用锁，也不会在 AI 线程里碰 LVGL。 */
+static char     sg_ai_page[PET_AI_PAGE_BYTES];  /* 还没攒够一页的尾巴 */
+static uint16_t sg_ai_page_len;
+static volatile BOOL_T sg_ai_reset_req;         /* 新一轮/被打断：定时器线程清页 */
+static volatile BOOL_T sg_ai_streaming;         /* 本轮有文本（状态切换别抢气泡） */
+static volatile BOOL_T sg_ai_abort;             /* 被打断：tick 里把气泡收掉 */
 
 /***********************************************************
 ********************** 前向声明 ******************************
@@ -518,263 +496,156 @@ static BOOL_T prv_ai_is_punct(const char *s, int len)
     return FALSE;
 }
 
-static void prv_ai_reset_locked(void)
+/** 一页攒够 14 字就切，优先断在最后一个标点；不够一页返回 0。 */
+static int prv_ai_page_cut(const char *s, int len)
 {
-    sg_ai_head     = 0;
-    sg_ai_tail     = 0;
-    sg_ai_acc_len  = 0;
-    sg_ai_acc_due  = 0;
-    sg_ai_ref_idx  = 0;
-    sg_ai_ref_valid = FALSE;
-    sg_ai_tts_valid = FALSE;
-    sg_ai_tts_ms    = 0;
-    sg_ai_first_ms  = 0;
-    sg_ai_abort     = FALSE;
-}
+    int i = 0;
+    int chars = 0;
+    int cut = 0;
+    int punct = 0;
 
-/** 入队一页。队列满时丢最旧的一页，保证用户看到的是"正在说的"。 */
-static void prv_ai_push_locked(const char *text, int len, uint32_t due)
-{
-    PET_AI_PAGE_T *p;
-    int            next = (sg_ai_head + 1) % PET_AI_QUEUE_LEN;
+    while (i < len) {
+        int cl = prv_ai_utf8_len((uint8_t)s[i]);
 
-    if (next == sg_ai_tail) {
-        sg_ai_tail = (sg_ai_tail + 1) % PET_AI_QUEUE_LEN;
-    }
-
-    p = &sg_ai_q[sg_ai_head];
-    if (len > (int)sizeof(p->text) - 1) {
-        len = (int)sizeof(p->text) - 1;
-    }
-    memcpy(p->text, text, (size_t)len);
-    p->text[len] = '\0';
-    p->len       = (uint16_t)len;
-    p->due       = due;
-
-    sg_ai_head = next;
-}
-
-/** 攒够 14 个字就切一页；优先在标点处断，读起来不会拦腰截断。 */
-static void prv_ai_split_locked(uint32_t chunk_due)
-{
-    for (;;) {
-        int chars = 0;
-        int i     = 0;
-        int cut   = 0;      /* 第 14 个字的边界 */
-        int punct = 0;      /* 最近一个标点的边界 */
-
-        while (i < sg_ai_acc_len) {
-            int cl = prv_ai_utf8_len((uint8_t)sg_ai_acc[i]);
-
-            if (i + cl > sg_ai_acc_len) {
-                break;      /* 半个 UTF-8：等下一片补齐 */
-            }
-            chars++;
-            i += cl;
-            cut = i;
-            if (prv_ai_is_punct(sg_ai_acc + i - cl, cl)) {
-                punct = i;
-            }
-            if (chars >= PET_AI_PAGE_CHARS) {
-                break;
-            }
+        if (i + cl > len) {
+            break;
         }
-
-        if (chars < PET_AI_PAGE_CHARS) {
-            return;
+        chars++;
+        i += cl;
+        cut = i;
+        if (prv_ai_is_punct(s + i - cl, cl)) {
+            punct = i;
         }
-
-        int end  = (punct > 0) ? punct : cut;
-        int used = 0;
-
-        for (int k = 0; k < end; k += prv_ai_utf8_len((uint8_t)sg_ai_acc[k])) {
-            used++;
+        if (chars >= PET_AI_PAGE_CHARS) {
+            break;
         }
-
-        prv_ai_push_locked(sg_ai_acc, end, sg_ai_acc_due);
-
-        uint32_t next_due = sg_ai_acc_due + (uint32_t)used * PET_AI_CHAR_MS;
-
-        memmove(sg_ai_acc, sg_ai_acc + end, (size_t)(sg_ai_acc_len - end));
-        sg_ai_acc_len -= (uint16_t)end;
-        sg_ai_acc_due  = (chunk_due > next_due) ? chunk_due : next_due;
     }
-}
 
-static void prv_ai_append_locked(const char *text, uint16_t len, uint32_t due)
-{
-    if (NULL == text || 0 == len) {
-        return;
-    }
-    if (0 == sg_ai_acc_len) {
-        sg_ai_acc_due = due;
-    }
-    if (len > sizeof(sg_ai_acc) - sg_ai_acc_len) {
-        len = (uint16_t)(sizeof(sg_ai_acc) - sg_ai_acc_len);  /* 超长回复：截断，绝不越界 */
-    }
-    memcpy(sg_ai_acc + sg_ai_acc_len, text, len);
-    sg_ai_acc_len += len;
-
-    prv_ai_split_locked(due);
-}
-
-/** 本片的 timeindex -> 相对本轮首片的偏移。乱序/缺失都归 0。 */
-static uint32_t prv_ai_due_of(uint32_t idx)
-{
-    if (!sg_ai_ref_valid) {
-        sg_ai_ref_idx  = idx;
-        sg_ai_ref_valid = TRUE;
-    }
-    if (idx < sg_ai_ref_idx) {
+    if (chars < PET_AI_PAGE_CHARS) {
         return 0;
     }
-    return idx - sg_ai_ref_idx;
+    return (punct > 0) ? punct : cut;
 }
 
-static void prv_ai_turn_reset(void)
+/** 把攒够的一页交给气泡（已在定时器线程，LVGL 要拿显示锁）。 */
+static void prv_ai_show_page(const char *page)
 {
-    if (NULL == sg_ai_lock) {
+    app_disp_lock();
+    pet_say_stream(page);
+    app_disp_unlock();
+}
+
+/** ai_ui_stream_text 的显示回调：跑在它的软件定时器线程。
+ *  string == NULL 表示流已经吐空 —— 把不足一页的尾巴也显示出去。 */
+static void prv_ai_disp_cb(char *string)
+{
+    char page[PET_AI_PAGE_BYTES];
+
+    if (sg_ai_reset_req) {
+        sg_ai_reset_req = FALSE;
+        sg_ai_page_len  = 0;
+    }
+
+    if (NULL == string) {
+        sg_ai_streaming = FALSE;
+        if (sg_ai_page_len > 0) {
+            memcpy(page, sg_ai_page, sg_ai_page_len);
+            page[sg_ai_page_len] = '\0';
+            sg_ai_page_len = 0;
+            prv_ai_show_page(page);
+        }
         return;
     }
-    (void)tal_mutex_lock(sg_ai_lock);
-    prv_ai_reset_locked();
-    (void)tal_mutex_unlock(sg_ai_lock);
+
+    for (int i = 0; '\0' != string[i];) {
+        int cl  = prv_ai_utf8_len((uint8_t)string[i]);
+        int cut;
+
+        if ((int)sg_ai_page_len + cl >= (int)sizeof(sg_ai_page)) {
+            sg_ai_page_len = 0;     /* 正常到不了：一拍最多 10 字，页只有 14 字 */
+        }
+        memcpy(sg_ai_page + sg_ai_page_len, string + i, (size_t)cl);
+        sg_ai_page_len = (uint16_t)(sg_ai_page_len + cl);
+        i += cl;
+
+        cut = prv_ai_page_cut(sg_ai_page, sg_ai_page_len);
+        if (0 == cut) {
+            continue;
+        }
+
+        memcpy(page, sg_ai_page, (size_t)cut);
+        page[cut] = '\0';
+        memmove(sg_ai_page, sg_ai_page + cut, (size_t)(sg_ai_page_len - cut));
+        sg_ai_page_len = (uint16_t)(sg_ai_page_len - cut);
+
+        prv_ai_show_page(page);
+    }
 }
 
+/** 事件线程：只把分片交给 ai_ui_stream_text，节奏和 UTF-8 都在组件里。 */
 static void prv_ai_text_cb(const APP_AI_TEXT_T *t)
 {
-    BOOL_T flush = FALSE;
-
-    if (NULL == t || NULL == sg_ai_lock) {
+    if (NULL == t) {
         return;
     }
-
-    (void)tal_mutex_lock(sg_ai_lock);
 
     switch (t->kind) {
     case APP_AI_TEXT_START:
-        prv_ai_reset_locked();
-        sg_ai_first_ms = (uint32_t)tal_system_get_millisecond();
+        sg_ai_reset_req = TRUE;
+        sg_ai_streaming = TRUE;
+        ai_ui_stream_text_reset();
+        ai_ui_stream_text_start();
         if (NULL != t->data && t->len > 0) {
-            prv_ai_append_locked(t->data, t->len, prv_ai_due_of(t->timeindex));
+            ai_ui_stream_text_write(t->data);
         }
         break;
 
     case APP_AI_TEXT_DATA:
     case APP_AI_TEXT_STOP:
         if (NULL != t->data && t->len > 0) {
-            prv_ai_append_locked(t->data, t->len, prv_ai_due_of(t->timeindex));
+            ai_ui_stream_text_write(t->data);
         }
-        flush = (APP_AI_TEXT_STOP == t->kind);
+        if (APP_AI_TEXT_STOP == t->kind) {
+            ai_ui_stream_text_end();
+        }
         break;
 
     case APP_AI_TEXT_ABORT:
-        prv_ai_reset_locked();
-        sg_ai_abort = TRUE;
+        sg_ai_reset_req = TRUE;
+        sg_ai_streaming = FALSE;
+        sg_ai_abort     = TRUE;
+        ai_ui_stream_text_reset();
         break;
 
     default:
         break;
     }
-
-    if (flush && sg_ai_acc_len > 0) {
-        int end = 0;
-
-        while (end < sg_ai_acc_len) {
-            int cl = prv_ai_utf8_len((uint8_t)sg_ai_acc[end]);
-
-            if (end + cl > sg_ai_acc_len) {
-                break;      /* 尾部半个字符：丢掉 */
-            }
-            end += cl;
-        }
-        if (end > 0) {
-            prv_ai_push_locked(sg_ai_acc, end, sg_ai_acc_due);
-            sg_ai_acc_len = 0;
-        }
-    }
-
-    (void)tal_mutex_unlock(sg_ai_lock);
-}
-
-static void prv_ai_tts_cb(APP_AI_TTS_E kind)
-{
-    if (NULL == sg_ai_lock) {
-        return;
-    }
-
-    (void)tal_mutex_lock(sg_ai_lock);
-
-    if (APP_AI_TTS_START == kind) {
-        sg_ai_tts_valid = TRUE;
-        sg_ai_tts_ms    = (uint32_t)tal_system_get_millisecond();
-    } else if (APP_AI_TTS_ABORT == kind) {
-        prv_ai_reset_locked();
-        sg_ai_abort = TRUE;
-    }
-    /* TTS_STOP 不动队列：最后几页可能还没轮到，让它们按时间轴走完 */
-
-    (void)tal_mutex_unlock(sg_ai_lock);
 }
 
 /** 本轮是否有 AI 文本（有的话气泡归文本流，状态切换不要抢）。 */
 static BOOL_T prv_ai_has_text(void)
 {
-    BOOL_T has = FALSE;
-
-    if (NULL == sg_ai_lock) {
-        return FALSE;
-    }
-    (void)tal_mutex_lock(sg_ai_lock);
-    has = (0 != sg_ai_first_ms) ? TRUE : FALSE;
-    (void)tal_mutex_unlock(sg_ai_lock);
-
-    return has;
+    return sg_ai_streaming;
 }
 
-/** tick：到点就换下一页。返回 TRUE 表示这次调用已经把新的一页交给 pet_say(). */
+static void prv_ai_turn_reset(void)
+{
+    sg_ai_reset_req  = TRUE;
+    sg_ai_streaming  = FALSE;
+    ai_ui_stream_text_reset();      /* 丢掉还没吐出来的尾巴，别在收气泡后又冒出来 */
+}
+
+/** tick：被打断时把气泡收掉。文本显示本身由 ai_ui_stream_text 的定时器驱动。 */
 static BOOL_T prv_ai_bubble_tick(uint32_t now)
 {
-    char   line[PET_AI_PAGE_BYTES];
-    BOOL_T show  = FALSE;
-    BOOL_T clear = FALSE;
+    (void)now;
 
-    if (NULL == sg_ai_lock) {
+    if (!sg_ai_abort) {
         return FALSE;
     }
-
-    (void)tal_mutex_lock(sg_ai_lock);
-
-    if (sg_ai_abort) {
-        sg_ai_abort = FALSE;
-        clear       = TRUE;
-    } else {
-        /* 没有 TTS_START（只有文字 / 音频没起来）：首片后 400ms 开始走时间轴 */
-        if (!sg_ai_tts_valid && 0 != sg_ai_first_ms &&
-            (uint32_t)(now - sg_ai_first_ms) >= PET_AI_FALLBACK_MS) {
-            sg_ai_tts_valid = TRUE;
-            sg_ai_tts_ms    = sg_ai_first_ms + PET_AI_FALLBACK_MS;
-        }
-
-        if (sg_ai_tts_valid && sg_ai_tail != sg_ai_head) {
-            PET_AI_PAGE_T *p = &sg_ai_q[sg_ai_tail];
-
-            if ((uint32_t)(now - sg_ai_tts_ms) >= p->due) {
-                memcpy(line, p->text, sizeof(line));
-                sg_ai_tail = (sg_ai_tail + 1) % PET_AI_QUEUE_LEN;
-                show       = TRUE;
-            }
-        }
-    }
-
-    (void)tal_mutex_unlock(sg_ai_lock);
-
-    if (clear) {
-        pet_say("");
-    } else if (show) {
-        pet_say_stream(line);
-    }
-    return show;
+    sg_ai_abort = FALSE;
+    pet_say("");
+    return FALSE;
 }
 
 static void prv_pet_evt_cb(APP_EVT_E evt, void *data, void *user)
@@ -823,8 +694,8 @@ static void prv_pet_evt_cb(APP_EVT_E evt, void *data, void *user)
             break;
         case AI_MODE_STATE_SPEAK:
             clip = -1;      /* 新动作集没有 talk（碎碎念）组：说话期间回待机 */
-            /* 有 AI 文本时气泡归文本流（prv_ai_bubble_tick），这里不要收掉；
-             * 只有音频、没有文字的回复才把"让我想想…"收走。 */
+            /* 有 AI 文本时气泡归文本流，这里不要收掉；只有音频、没有文字的
+             * 回复才把"让我想想…"收走。 */
             sg_req_say = prv_ai_has_text() ? 0 : 2;
             break;
         default:
@@ -840,10 +711,6 @@ static void prv_pet_evt_cb(APP_EVT_E evt, void *data, void *user)
 
     case APP_EVT_AI_TEXT:
         prv_ai_text_cb((const APP_AI_TEXT_T *)data);
-        break;
-
-    case APP_EVT_AI_TTS:
-        prv_ai_tts_cb((APP_AI_TTS_E)(intptr_t)data);
         break;
 
     case APP_EVT_FONT_READY:
@@ -1536,16 +1403,15 @@ static OPERATE_RET prv_pet_enter(void *arg)
 
     /* 动作由这三条事件驱动（大模型点名 / AI 情绪 / AI 状态），见上面的状态机说明。
      * 订阅是幂等的，页面重进不会叠加。 */
-    if (NULL == sg_ai_lock) {
-        (void)tal_mutex_create_init(&sg_ai_lock);
-    }
     prv_ai_turn_reset();
+
+    /* 文本显示的节奏交给 SDK 的流式组件（同 apps/tuya.ai/your_chat_bot）。 */
+    (void)ai_ui_stream_text_init(prv_ai_disp_cb);
 
     app_event_subscribe(APP_EVT_PET_ACTION, prv_pet_evt_cb, NULL);
     app_event_subscribe(APP_EVT_AI_EMOTION, prv_pet_evt_cb, NULL);
     app_event_subscribe(APP_EVT_AI_STATE,   prv_pet_evt_cb, NULL);
     app_event_subscribe(APP_EVT_AI_TEXT,    prv_pet_evt_cb, NULL);
-    app_event_subscribe(APP_EVT_AI_TTS,     prv_pet_evt_cb, NULL);
     app_event_subscribe(APP_EVT_FONT_READY, prv_pet_evt_cb, NULL);
 
     lv_screen_load(sg_scr);
@@ -1594,14 +1460,7 @@ static void prv_pet_exit(void)
     app_event_unsubscribe(APP_EVT_AI_EMOTION, prv_pet_evt_cb);
     app_event_unsubscribe(APP_EVT_AI_STATE,   prv_pet_evt_cb);
     app_event_unsubscribe(APP_EVT_AI_TEXT,    prv_pet_evt_cb);
-    app_event_unsubscribe(APP_EVT_AI_TTS,     prv_pet_evt_cb);
     app_event_unsubscribe(APP_EVT_FONT_READY, prv_pet_evt_cb);
-
-    /* 订阅撤完之后才能放锁：事件回调正在用这把锁。 */
-    if (NULL != sg_ai_lock) {
-        (void)tal_mutex_release(sg_ai_lock);
-        sg_ai_lock = NULL;
-    }
 
     if (NULL != sg_tick) {
         lv_timer_del(sg_tick);
