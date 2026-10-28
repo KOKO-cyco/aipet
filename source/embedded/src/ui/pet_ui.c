@@ -264,6 +264,15 @@ lv_obj_t *pet_ui_panel(void)
     return sg_page;
 }
 
+PET_PAGE_E pet_ui_current(void)
+{
+    if (sg_depth <= 0) {
+        return PET_PAGE_HOME;
+    }
+
+    return __top();
+}
+
 /* ---- Page lifecycle ------------------------------------------------------- */
 
 /**

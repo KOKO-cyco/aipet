@@ -50,11 +50,15 @@ extern "C" {
 
 /**
  * @brief One to-do row. Plain data, safe to memcpy.
+ *
+ * @p id is the stable handle the AI addresses the item by; it never changes for
+ * the life of the item, unlike the position in the array.
  */
 typedef struct {
-    char   text[PET_TEXT_MAX];
-    char   when[16]; /* display time, e.g. "09:30" / "明天"; empty = no time */
-    BOOL_T done;
+    uint32_t id;
+    char     text[PET_TEXT_MAX];
+    char     when[16]; /* display time, e.g. "09:30" / "明天"; empty = no time */
+    BOOL_T   done;
 } PET_TODO_T;
 
 /**
@@ -69,8 +73,11 @@ typedef struct {
 /**
  * @brief One free-form note. Notes have no editing UI or add path on this build;
  *        the list page only shows and deletes them.
+ *
+ * @p id is the stable handle the AI addresses the note by, same as the memo's.
  */
 typedef struct {
+    uint32_t id;
     char     title[PET_TEXT_MAX];
     char     time[16]; /* display time, e.g. "10:20" / "昨天" */
     char     lines[PET_NOTE_LINES_MAX][PET_TEXT_MAX];

@@ -57,6 +57,59 @@ void pet_demo_todo_delete(uint32_t index);
  */
 void pet_demo_todo_clear_done(void);
 
+/* ---- Memos / notes by id (the AI's write path) ----------------------------- */
+
+/**
+ * @brief Append a memo at the head of the list, assigning it a fresh id.
+ *
+ * @return The new id, or 0 when the list is full or @p text is empty.
+ */
+uint32_t pet_demo_memo_add(const char *text, const char *when);
+
+/**
+ * @brief Change one memo, addressed by id.
+ *
+ * An empty @p text or @p when leaves that field alone; @p done is -1 for "no
+ * change", otherwise 0 or 1. A memo that does not exist (the AI's snapshot went
+ * stale) reads as failure.
+ *
+ * @return TRUE when something actually changed.
+ */
+BOOL_T pet_demo_memo_update(uint32_t id, const char *text, const char *when, int done);
+
+/**
+ * @brief Delete the memo with this id.
+ *
+ * @return FALSE when no memo has that id.
+ */
+BOOL_T pet_demo_memo_delete_id(uint32_t id);
+
+/**
+ * @brief Append a note at the head of the list, assigning it a fresh id.
+ *
+ * @p body is newline-separated text; each non-empty line becomes one row of the
+ * note (up to PET_NOTE_LINES_MAX lines).
+ *
+ * @return The new id, or 0 when the list is full or @p title is empty.
+ */
+uint32_t pet_demo_note_add(const char *title, const char *body);
+
+/**
+ * @brief Change one note, addressed by id.
+ *
+ * An empty @p title or @p body leaves that field alone.
+ *
+ * @return TRUE when something actually changed.
+ */
+BOOL_T pet_demo_note_update(uint32_t id, const char *title, const char *body);
+
+/**
+ * @brief Delete the note with this id.
+ *
+ * @return FALSE when no note has that id.
+ */
+BOOL_T pet_demo_note_delete_id(uint32_t id);
+
 /* ---- Notes ---------------------------------------------------------------- */
 
 /**

@@ -110,6 +110,17 @@ void pet_ui_refresh(void);
 lv_obj_t *pet_ui_panel(void);
 
 /**
+ * @brief Which page is on top of the stack.
+ *
+ * Used by out-of-band writers (the MCP tools) to decide whether a model change
+ * needs the current page rebuilt: while the camera or settings page is up, a memo
+ * added by voice should not tear that page down.
+ *
+ * @return PET_PAGE_HOME before pet_ui_init() has run.
+ */
+PET_PAGE_E pet_ui_current(void);
+
+/**
  * @brief Re-read the to-do count into the status strip's badge.
  *
  * Call after anything that can change how many to-dos are open, otherwise the badge

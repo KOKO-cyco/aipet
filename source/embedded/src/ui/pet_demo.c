@@ -32,6 +32,10 @@ static int sg_settings[PET_SETTING_MAX];
 static PET_NOTE_T sg_notes[PET_NOTE_MAX];
 static uint32_t   sg_note_count;
 
+/* Monotonic id source for memos and notes. 0 is "no item" — the AI's snapshot
+   uses real ids, and 0 would make "unset" and "item zero" collide. */
+static uint32_t sg_next_id = 1;
+
 static const char *const sg_mode_names[PET_MODE_MAX] = {
     "准景合物",
     "实景合影",
@@ -104,6 +108,7 @@ static void __seed_todo(void)
     __copy(sg_todo.title, sizeof(sg_todo.title), "今日备忘录");
 
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]) && i < PET_TODO_MAX; i++) {
+        sg_todo.items[i].id = sg_next_id++;
         __copy(sg_todo.items[i].text, PET_TEXT_MAX, rows[i].text);
         __copy(sg_todo.items[i].when, sizeof(sg_todo.items[i].when), rows[i].when);
         sg_todo.items[i].done = rows[i].done;
@@ -130,6 +135,7 @@ static void __seed_notes(void)
     for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]) && i < PET_NOTE_MAX; i++) {
         PET_NOTE_T *note = &sg_notes[sg_note_count];
 
+        note->id = sg_next_id++;
         __copy(note->title, sizeof(note->title), rows[i].title);
         __copy(note->time, sizeof(note->time), rows[i].time);
 
@@ -250,6 +256,167 @@ void pet_demo_todo_clear_done(void)
     }
 
     sg_todo.count = write;
+}
+
+/* ---- Memos / notes by id -------------------------------------------------- */
+
+static int __memo_find(uint32_t id)
+{
+    for (uint32_t i = 0; i < sg_todo.count; i++) {
+        if (sg_todo.items[i].id == id) {
+            return (int)i;
+        }
+    }
+
+    return -1;
+}
+
+static int __note_find(uint32_t id)
+{
+    for (uint32_t i = 0; i < sg_note_count; i++) {
+        if (sg_notes[i].id == id) {
+            return (int)i;
+        }
+    }
+
+    return -1;
+}
+
+/* Fill a note's body from newline-separated text. Shared by add and update so
+   the two never disagree about what a body looks like. */
+static void __note_fill_body(PET_NOTE_T *note, const char *body)
+{
+    const char *line = body;
+
+    note->line_count = 0;
+    memset(note->lines, 0, sizeof(note->lines));
+
+    while (line != NULL && line[0] != '\0' && note->line_count < PET_NOTE_LINES_MAX) {
+        const char *nl  = strchr(line, '\n');
+        size_t      len = (nl != NULL) ? (size_t)(nl - line) : strlen(line);
+
+        while (len > 0 && line[len - 1] == '\r') {
+            len--;
+        }
+
+        if (len > 0) {
+            size_t copy = (len < PET_TEXT_MAX) ? len : (PET_TEXT_MAX - 1);
+
+            memcpy(note->lines[note->line_count], line, copy);
+            note->lines[note->line_count][copy] = '\0';
+            note->line_count++;
+        }
+
+        line = (nl != NULL) ? nl + 1 : NULL;
+    }
+}
+
+uint32_t pet_demo_memo_add(const char *text, const char *when)
+{
+    if (sg_todo.count >= PET_TODO_MAX || text == NULL || text[0] == '\0') {
+        return 0;
+    }
+
+    /* Newest first, like the list page renders: what the user just asked for
+       should be visible at the top without scrolling. */
+    if (sg_todo.count > 0) {
+        memmove(&sg_todo.items[1], &sg_todo.items[0], sg_todo.count * sizeof(sg_todo.items[0]));
+    }
+
+    memset(&sg_todo.items[0], 0, sizeof(sg_todo.items[0]));
+    sg_todo.items[0].id = sg_next_id++;
+    __copy(sg_todo.items[0].text, PET_TEXT_MAX, text);
+    __copy(sg_todo.items[0].when, sizeof(sg_todo.items[0].when), when);
+    sg_todo.items[0].done = FALSE;
+    sg_todo.count++;
+
+    return sg_todo.items[0].id;
+}
+
+BOOL_T pet_demo_memo_update(uint32_t id, const char *text, const char *when, int done)
+{
+    int i = __memo_find(id);
+
+    if (i < 0) {
+        return FALSE;
+    }
+
+    if (text != NULL && text[0] != '\0') {
+        __copy(sg_todo.items[i].text, PET_TEXT_MAX, text);
+    }
+    if (when != NULL && when[0] != '\0') {
+        __copy(sg_todo.items[i].when, sizeof(sg_todo.items[i].when), when);
+    }
+    if (done >= 0) {
+        sg_todo.items[i].done = done ? TRUE : FALSE;
+    }
+
+    return TRUE;
+}
+
+BOOL_T pet_demo_memo_delete_id(uint32_t id)
+{
+    int i = __memo_find(id);
+
+    if (i < 0) {
+        return FALSE;
+    }
+
+    pet_demo_todo_delete((uint32_t)i);
+    return TRUE;
+}
+
+uint32_t pet_demo_note_add(const char *title, const char *body)
+{
+    PET_NOTE_T *note;
+
+    if (sg_note_count >= PET_NOTE_MAX || title == NULL || title[0] == '\0') {
+        return 0;
+    }
+
+    if (sg_note_count > 0) {
+        memmove(&sg_notes[1], &sg_notes[0], sg_note_count * sizeof(sg_notes[0]));
+    }
+
+    note = &sg_notes[0];
+    memset(note, 0, sizeof(*note));
+    note->id = sg_next_id++;
+    __copy(note->title, sizeof(note->title), title);
+    __copy(note->time, sizeof(note->time), "刚刚");
+    __note_fill_body(note, body);
+    sg_note_count++;
+
+    return note->id;
+}
+
+BOOL_T pet_demo_note_update(uint32_t id, const char *title, const char *body)
+{
+    int i = __note_find(id);
+
+    if (i < 0) {
+        return FALSE;
+    }
+
+    if (title != NULL && title[0] != '\0') {
+        __copy(sg_notes[i].title, sizeof(sg_notes[i].title), title);
+    }
+    if (body != NULL && body[0] != '\0') {
+        __note_fill_body(&sg_notes[i], body);
+    }
+
+    return TRUE;
+}
+
+BOOL_T pet_demo_note_delete_id(uint32_t id)
+{
+    int i = __note_find(id);
+
+    if (i < 0) {
+        return FALSE;
+    }
+
+    pet_demo_note_delete((uint32_t)i);
+    return TRUE;
 }
 
 /* ---- Notes ---------------------------------------------------------------- */
