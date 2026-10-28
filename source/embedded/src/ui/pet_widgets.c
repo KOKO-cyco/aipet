@@ -439,6 +439,11 @@ lv_obj_t *pet_widget_segment(lv_obj_t *parent, const char *const *labels, uint32
         lv_obj_set_style_pad_all(seg, 0, 0);
         lv_obj_set_style_pad_hor(seg, 2, 0);
 
+        /* A plain lv_obj is not clickable, and its events do not bubble by default.
+           Without both flags the segment never reaches the page's handler on the
+           container and the whole filter bar is inert. */
+        lv_obj_add_flag(seg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_EVENT_BUBBLE);
+
         /* The segment is the target, so it answers the press the same way a check or a
            select row does. Flat: it is a fill with a label on it, not a leaf. */
         pui_pressable_flat(seg);
