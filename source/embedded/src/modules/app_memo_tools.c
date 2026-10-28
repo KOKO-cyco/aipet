@@ -218,33 +218,46 @@ static void prv_build_note_state(char *buf, size_t cap)
 
 void app_memo_state_push(void)
 {
-    char memo[MEMO_STATE_MAX];
-    char note[NOTE_STATE_MAX];
-    char json[MEMO_JSON_MAX];
+    /* 这五个缓冲原先是栈上的（合计 4736 字节），而本函数只在 MCP 工具回调里
+     * 跑，那些回调都落在 tuya_yield 线程上 —— 该线程栈只有 4096 字节，MQTT
+     * 一连上就会在这里硬件栈溢出（UFSR.STKOF）重启。改成静态：省掉整块栈，
+     * 代价是常驻 4736 字节 .bss。
+     *
+     * 线程安全：调用点只有 prv_memo_* / prv_note_* 六个工具回调和
+     * app_memo_tools_register，全部串行跑在 tuya_yield 上，不存在并发写。
+     * 以后若从 UI 线程也调本函数，必须先加互斥锁。 */
+    static char memo[MEMO_STATE_MAX];
+    static char note[NOTE_STATE_MAX];
+    static char json[MEMO_JSON_MAX];
 
     prv_build_memo_state(memo, sizeof(memo));
     prv_build_note_state(note, sizeof(note));
 
-    char memo_safe[MEMO_STATE_MAX];
-    char note_safe[NOTE_STATE_MAX];
+    static char memo_safe[MEMO_STATE_MAX];
+    static char note_safe[NOTE_STATE_MAX];
 
     prv_state_copy(memo_safe, sizeof(memo_safe), memo);
     prv_state_copy(note_safe, sizeof(note_safe), note);
     snprintf(json, sizeof(json), MEMO_STATE_FMT, memo_safe, note_safe);
 
+    /* 上下文推送是"模型看不看得见设备备忘录"的唯一证据，原来打 PR_DEBUG，
+     * 而日志级别是 INFO，等于全程不可见。改成 NOTICE 并把 payload 全量打出来：
+     * 验证上下文内容对不对，就看这一行。 */
     AI_AGENT_SESSION_T *session = tuya_ai_agent_get_session(NULL);
     if (NULL != session) {
         OPERATE_RET rt = tuya_ai_event_update_context(session->sid, session->eid, json);
         if (OPRT_OK != rt) {
             PR_WARN("[memo] 会话中推送状态失败: %d", rt);
         } else {
-            PR_DEBUG("[memo] 状态已推入活跃会话");
+            PR_NOTICE("[memo] 状态已推入活跃会话 sid=%s eid=%s", session->sid, session->eid);
+            PR_NOTICE("[memo] 上下文内容: %s", json);
         }
     } else {
         /* 没有活跃会话：存进 session_param，下一次会话创建时自动带上。
-         * tuya_ai_agent_set_session_param 内部会拷贝字符串，栈缓冲可以传。 */
+         * tuya_ai_agent_set_session_param 内部会拷贝字符串。 */
         tuya_ai_agent_set_session_param(json);
-        PR_DEBUG("[memo] 状态已存入会话参数");
+        PR_NOTICE("[memo] 无活跃会话，已存入 session_param");
+        PR_NOTICE("[memo] 上下文内容: %s", json);
     }
 }
 
@@ -336,25 +349,110 @@ static void prv_memo_delete(const MCP_PROPERTY_LIST_T *properties, MCP_RETURN_VA
     }
 }
 
+/* list：把当前清单原样回给模型。
+ * 之前没有这个动作，模型"看一眼"没有任何合法手段，只能瞎猜——实测它把用户的话
+ * 当成新条目 add 进去（日志里 id=9「查看备忘录」/ id=10「删除所有备忘录信息」/
+ * id=11「确认备忘录删除状态」全是这么产生的），于是"叫它删它反而加"。
+ * 缓冲用 static：本函数跑在 tuya_yield 的 4KB 栈上。 */
+static void prv_memo_list(const MCP_PROPERTY_LIST_T *properties, MCP_RETURN_VALUE_T *ret_val)
+{
+    static char       buf[1024];
+    PET_TODO_LIST_T  *list = pet_demo_todo();
+    size_t            used = 0;
+
+    (void)properties;
+
+    used = (size_t)snprintf(buf, sizeof(buf), "共%u条", (unsigned)list->count);
+    if (0 == list->count) {
+        strncat(buf, "：空", sizeof(buf) - used - 1);
+        ai_mcp_return_value_set_str(ret_val, buf);
+        return;
+    }
+
+    for (uint32_t i = 0; i < list->count && used + 1 < sizeof(buf); i++) {
+        const PET_TODO_T *it = &list->items[i];
+        int               n  = snprintf(buf + used, sizeof(buf) - used, "%sid=%u %s%s%s %s", (i > 0) ? "；" : "：",
+                                        (unsigned)it->id, it->text, (it->when[0] != '\0') ? " " : "",
+                                        (it->when[0] != '\0') ? it->when : "", (TRUE == it->done) ? "已完成" : "未完成");
+        if (n < 0) {
+            break;
+        }
+        used += (size_t)n;
+        if (used >= sizeof(buf)) {
+            used = sizeof(buf) - 1;
+        }
+    }
+    buf[used] = '\0';
+
+    ai_mcp_return_value_set_str(ret_val, buf);
+}
+
+static void prv_note_list(const MCP_PROPERTY_LIST_T *properties, MCP_RETURN_VALUE_T *ret_val)
+{
+    static char  buf[768];
+    uint32_t     count = pet_demo_note_count();
+    size_t       used  = 0;
+
+    (void)properties;
+
+    used = (size_t)snprintf(buf, sizeof(buf), "共%u条", (unsigned)count);
+    if (0 == count) {
+        strncat(buf, "：空", sizeof(buf) - used - 1);
+        ai_mcp_return_value_set_str(ret_val, buf);
+        return;
+    }
+
+    for (uint32_t i = 0; i < count && used + 1 < sizeof(buf); i++) {
+        const PET_NOTE_T *note = pet_demo_note_at(i);
+        int               n;
+
+        if (NULL == note) {
+            break;
+        }
+        n = snprintf(buf + used, sizeof(buf) - used, "%sid=%u %s，%s%s%s", (i > 0) ? "；" : "：", (unsigned)note->id,
+                     note->title, note->time, (note->line_count > 0) ? "，" : "",
+                     (note->line_count > 0) ? note->lines[0] : "");
+        if (n < 0) {
+            break;
+        }
+        used += (size_t)n;
+        if (used >= sizeof(buf)) {
+            used = sizeof(buf) - 1;
+        }
+    }
+    buf[used] = '\0';
+
+    ai_mcp_return_value_set_str(ret_val, buf);
+}
+
 static OPERATE_RET prv_mcp_memo_ops(const MCP_PROPERTY_LIST_T *properties, MCP_RETURN_VALUE_T *ret_val, void *user_data)
 {
     const char *action = prv_prop_str(properties, "action");
+    const char *text   = prv_prop_str(properties, "text");
+    const char *when   = prv_prop_str(properties, "when");
+    int         id     = prv_prop_int(properties, "id", 0);
 
     (void)user_data;
+
+    /* 原样记下模型发来的参数：排查"叫它删它却加"这类问题，只看这一行就够。 */
+    PR_NOTICE("[mcp] memo_ops action='%s' id=%d text='%s' when='%s'", (NULL != action) ? action : "(null)", id,
+              (NULL != text) ? text : "", (NULL != when) ? when : "");
 
     if (NULL == action || '\0' == action[0]) {
         ai_mcp_return_value_set_str(ret_val, "error: action is required");
         return OPRT_OK;
     }
 
-    if (0 == strcmp(action, "add")) {
+    if (0 == strcmp(action, "list")) {
+        prv_memo_list(properties, ret_val);
+    } else if (0 == strcmp(action, "add")) {
         prv_memo_add(properties, ret_val);
     } else if (0 == strcmp(action, "update")) {
         prv_memo_update(properties, ret_val);
     } else if (0 == strcmp(action, "delete")) {
         prv_memo_delete(properties, ret_val);
     } else {
-        ai_mcp_return_value_set_str(ret_val, "error: unknown action, use add/update/delete");
+        ai_mcp_return_value_set_str(ret_val, "error: unknown action, use list/add/update/delete");
     }
 
     return OPRT_OK;
@@ -449,22 +547,29 @@ static void prv_note_delete(const MCP_PROPERTY_LIST_T *properties, MCP_RETURN_VA
 static OPERATE_RET prv_mcp_note_ops(const MCP_PROPERTY_LIST_T *properties, MCP_RETURN_VALUE_T *ret_val, void *user_data)
 {
     const char *action = prv_prop_str(properties, "action");
+    const char *title  = prv_prop_str(properties, "title");
+    int         id     = prv_prop_int(properties, "id", 0);
 
     (void)user_data;
+
+    PR_NOTICE("[mcp] note_ops action='%s' id=%d title='%s'", (NULL != action) ? action : "(null)", id,
+              (NULL != title) ? title : "");
 
     if (NULL == action || '\0' == action[0]) {
         ai_mcp_return_value_set_str(ret_val, "error: action is required");
         return OPRT_OK;
     }
 
-    if (0 == strcmp(action, "add")) {
+    if (0 == strcmp(action, "list")) {
+        prv_note_list(properties, ret_val);
+    } else if (0 == strcmp(action, "add")) {
         prv_note_add(properties, ret_val);
     } else if (0 == strcmp(action, "update")) {
         prv_note_update(properties, ret_val);
     } else if (0 == strcmp(action, "delete")) {
         prv_note_delete(properties, ret_val);
     } else {
-        ai_mcp_return_value_set_str(ret_val, "error: unknown action, use add/update/delete");
+        ai_mcp_return_value_set_str(ret_val, "error: unknown action, use list/add/update/delete");
     }
 
     return OPRT_OK;
@@ -482,16 +587,21 @@ static OPERATE_RET prv_register_memo_tool(void)
         "memo_ops",
         "Manage the pet's 备忘录 list (time-bound tasks the user sees on screen).\n"
         "Actions:\n"
+        "- list: return every memo with its id, text, time and done flag. "
+        "ALWAYS call list first when the user asks what is on the list, or before "
+        "update/delete, so you use a real id.\n"
         "- add: create a memo. 'text' required (short Chinese, under 20 chars); "
         "'when' optional display time like 明天 09:00.\n"
         "- update: change one memo. 'id' required; non-empty 'text'/'when' replace "
         "those fields; 'done' 1=completed 0=reopened, omit to leave unchanged.\n"
         "- delete: remove one memo. 'id' required; also pass its current 'text' "
-        "from your context as a safety check.\n"
-        "Get ids from device_memo_state in your context; never guess an id. "
+        "as a safety check.\n"
+        "Reading the list is what action=list is for: never call add to 'look at' "
+        "the list, and never invent a memo out of the user's request wording. "
         "Only delete when the user explicitly asks to delete.\n"
-        "Response: 'ok id=N' for add, otherwise 'ok' or 'error: ...'.",
-        prv_mcp_memo_ops, NULL, MCP_PROP_STR("action", "add / update / delete."),
+        "Response: 'ok id=N' for add, the full list for list, otherwise 'ok' or "
+        "'error: ...'.",
+        prv_mcp_memo_ops, NULL, MCP_PROP_STR("action", "list / add / update / delete."),
         APP_MCP_PROP_INT_DEF("id", "Memo id from device_memo_state. Required for update/delete; ignored for add.", 0),
         MCP_PROP_STR_DEF("text", "Memo text. Required for add; for delete, the memo's current text as a safety check.",
                          ""),
@@ -505,16 +615,20 @@ static OPERATE_RET prv_register_note_tool(void)
         "note_ops",
         "Manage the pet's 笔记 list (free-form notes without a time).\n"
         "Actions:\n"
+        "- list: return every note with its id, title and time. ALWAYS call list "
+        "first when the user asks what is on the list, or before update/delete.\n"
         "- add: create a note. 'title' required (short Chinese); 'body' optional, "
         "may contain newlines.\n"
         "- update: change one note. 'id' required; non-empty 'title'/'body' replace "
         "those fields; empty means leave unchanged.\n"
         "- delete: remove one note. 'id' required; also pass its current 'title' "
-        "from your context as a safety check.\n"
-        "Get ids from device_note_state in your context; never guess an id. "
+        "as a safety check.\n"
+        "Reading the list is what action=list is for: never call add to 'look at' "
+        "the list, and never invent a note out of the user's request wording. "
         "Only delete when the user explicitly asks to delete.\n"
-        "Response: 'ok id=N' for add, otherwise 'ok' or 'error: ...'.",
-        prv_mcp_note_ops, NULL, MCP_PROP_STR("action", "add / update / delete."),
+        "Response: 'ok id=N' for add, the full list for list, otherwise 'ok' or "
+        "'error: ...'.",
+        prv_mcp_note_ops, NULL, MCP_PROP_STR("action", "list / add / update / delete."),
         APP_MCP_PROP_INT_DEF("id", "Note id from device_note_state. Required for update/delete; ignored for add.", 0),
         MCP_PROP_STR_DEF("title",
                          "Note title. Required for add; for delete, the note's current title as a safety "
