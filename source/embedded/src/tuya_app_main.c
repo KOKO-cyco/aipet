@@ -245,7 +245,9 @@ static void user_main(void)
         .malloc_fn = tal_psram_malloc,
         .free_fn   = tal_psram_free,
     });
-    tal_log_init(TAL_LOG_LEVEL_DEBUG, 1024, (TAL_LOG_OUTPUT_CB)tkl_log_output);
+    /* INFO：把 SDK 里高频的 DEBUG 刷屏（AI 上行分片、事件分发、每 2s 的性能
+     * 统计等）全部关掉，只留 NOTICE/WARN/ERR。要查底层问题时改回 DEBUG。 */
+    tal_log_init(TAL_LOG_LEVEL_INFO, 1024, (TAL_LOG_OUTPUT_CB)tkl_log_output);
     tal_kv_init(&(tal_kv_cfg_t){
         .seed = "vmlkasdh93dlvlcy",
         .key  = "dflfuap134ddlduq",
