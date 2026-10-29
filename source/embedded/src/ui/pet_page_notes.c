@@ -1,27 +1,24 @@
 /**
  * @file pet_page_notes.c
- * @brief The notes list: every note the app holds, newest first, each with its time.
+ * @brief 全部笔记：带彩色图标分类的只读列表，可删除。
  *
  *     +---------------------------------+
- *     | <  全部笔记                      |  header
+ *     | <  全部笔记                     |  header
  *     +---------------------------------+
  *     | +-----------------------------+ |
- *     | | (check) 购物清单      10:20 | |
- *     | | (chat) 会议记录       昨天  | |
- *     | | (pen)  灵感记录       昨天  | |  white card
- *     | | (check) 待办事项      周一  | |
- *     | | (pin)  旅行计划       上周  | |
- *     | +-----------------------------+ |
+ *     | | (check) 购物清单  10:20 [x] | |
+ *     | | (chat)  会议记录  昨天  [x] | |
+ *     | | (pen)   灵感记录  昨天  [x] | |
+ *     | | (pin)   旅行计划  上周  [x] | |
  *     +---------------------------------+
  *
- * The home page's 最近笔记 card previews the first two of these; this page is where
- * 全部笔记 leads, and it exists because "all" is a promise the card's two rows cannot
- * keep. A row opens the editor, which is the same editor the to-do card leads to — there
- * is one note in the model, so there is one thing to edit.
+ * The leading square is the old 全部笔记 page's categorisation: a tone and a glyph
+ * per note, so the list reads as different kinds of note at a glance rather than as
+ * four identical rows. The note model has no category field, so the mark is chosen
+ * from the note's own sense — a list to tick, a meeting, a thought, a trip.
  *
- * This is the one list whose rows carry a time. A note is a thing that happened, and when
- * it happened is half of what tells a note from its neighbours; a setting has no such
- * second fact, which is why the same row component leaves its trailing slot empty there.
+ * There is no editor and no add button: notes are seeded demo data, and the only
+ * action here is the trash at the end of the row.
  *
  * @copyright Copyright (c) 2021-2026 Tuya Inc. All Rights Reserved.
  *
@@ -29,59 +26,131 @@
 
 #include "pet_pages.h"
 
+#include <string.h>
+
 #include "pet_demo.h"
 #include "pet_pet.h"
 #include "pui.h"
 
 /***********************************************************
+************************macro define************************
+***********************************************************/
+
+#define NOTE_CONFIRM_MAX 128
+
+/***********************************************************
 ***********************variable define**********************
 ***********************************************************/
 
-/* The mark at the head of each row, cycled by index. The model carries no category, so
-   the glyph and the tone are read from the name's own sense — a list to tick, a meeting
-   written down, a thought to catch, a place to go — and the two that share a sense share
-   a mark. */
-static const PUI_TONE_E sg_tones[] = {PUI_TONE_AMBER, PUI_TONE_INDIGO, PUI_TONE_GREEN, PUI_TONE_ACCENT, PUI_TONE_AMBER};
-static const char *const sg_glyphs[] = {FONT_AWESOME_CHECK, FONT_AWESOME_COMMENT, FONT_AWESOME_EDIT, FONT_AWESOME_CHECK,
+/* The category marks, cycled by index. They are the old 全部笔记 page's order:
+   a checklist, a conversation, a written thought, a place. */
+static const PUI_TONE_E  sg_tones[]  = {PUI_TONE_AMBER, PUI_TONE_INDIGO, PUI_TONE_GREEN, PUI_TONE_ACCENT};
+static const char *const sg_glyphs[] = {FONT_AWESOME_CHECK, FONT_AWESOME_COMMENT, FONT_AWESOME_EDIT,
                                         FONT_AWESOME_LOCATION};
+
+/* The title of the note waiting for delete confirmation. Matched at confirm time:
+   a model change can land while the sheet is up and shift the list. */
+static char sg_pending_title[PET_TEXT_MAX];
 
 /***********************************************************
 ********************function define**************************
 ***********************************************************/
 
-static void __open_cb(lv_event_t *e)
+static void __delete_do_cb(void *user)
 {
-    (void)e;
+    (void)user;
 
-    pet_ui_go(PET_PAGE_NOTE);
+    for (uint32_t i = 0; i < pet_demo_note_count(); i++) {
+        const PET_NOTE_T *note = pet_demo_note_at(i);
+
+        if (note != NULL && strcmp(note->title, sg_pending_title) == 0) {
+            pet_demo_note_delete(i);
+            break;
+        }
+    }
+
+    pet_say("笔记删掉了");
+    pet_ui_refresh();
+}
+
+static void __delete_cb(lv_event_t *e)
+{
+    const PET_NOTE_T *note = pet_demo_note_at((uint32_t)(uintptr_t)lv_event_get_user_data(e));
+    char              body[NOTE_CONFIRM_MAX];
+
+    lv_event_stop_bubbling(e);
+
+    if (note == NULL) {
+        return;
+    }
+
+    lv_snprintf(sg_pending_title, sizeof(sg_pending_title), "%s", note->title);
+    lv_snprintf(body, sizeof(body), "确定删除「%s」？\n删除后无法恢复。", sg_pending_title);
+    pet_page_confirm("删除笔记", body, "删除", __delete_do_cb, NULL);
+}
+
+static void __build_empty(lv_obj_t *body)
+{
+    lv_obj_t *card = pui_card_create(body, NULL, PUI_TONE_NEUTRAL);
+    lv_obj_t *box  = pui_card_body(card);
+    lv_obj_t *icon;
+    lv_obj_t *title;
+    lv_obj_t *hint;
+
+    lv_obj_set_height(card, 0);
+    lv_obj_set_flex_grow(card, 1);
+    lv_obj_set_height(box, 0);
+    lv_obj_set_flex_grow(box, 1);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    icon = pui_label_create(box, FONT_AWESOME_EDIT, PET_FONT_ICON_LG, PET_COLOR_TEXT_HINT);
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+
+    title = pui_text_create(box, "还没有笔记", PUI_TEXT_CARD);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+
+    hint = pui_text_create(box, "笔记会出现在这里", PUI_TEXT_SUB);
+    lv_obj_set_width(hint, LV_PCT(100));
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
 }
 
 /* ---- Page ------------------------------------------------------------------ */
 
 void pet_page_notes_build(lv_obj_t *panel)
 {
-    lv_obj_t *body = pet_page_content(panel);
-    lv_obj_t *card = pui_card_create(body, NULL, PUI_TONE_NEUTRAL);
-    lv_obj_t *rows = pui_card_body(card);
-    uint32_t  n    = sizeof(sg_tones) / sizeof(sg_tones[0]);
+    lv_obj_t *header = pet_page_header(panel, "全部笔记", TRUE);
+    lv_obj_t *body;
+    lv_obj_t *card;
+    lv_obj_t *rows;
+    uint32_t  marks = sizeof(sg_tones) / sizeof(sg_tones[0]);
 
-    /* Scrollable so a longer list slides rather than clips. Five rows fit the panel, but
-       the count is the model's and the card should not be the thing that decides it. */
+    pet_page_header_push(header);
+
+    body = pet_page_content(panel);
     pui_screen_scrollable(body);
 
-    for (uint32_t i = 0; pet_demo_nav_name(i) != NULL; i++) {
-        lv_obj_t *row = pui_list_row_create(rows, sg_glyphs[i % n], sg_tones[i % n], pet_demo_nav_name(i));
-
-        pui_list_row_set_trailing(row, pet_demo_nav_time(i));
-
-        /* A row is a container, and a container here takes no input — it would shield
-           whatever it sits over. This one is the page's whole point, so it is made a
-           target again, with the flat press the library gives a surface that holds
-           children. See pui_pressable_flat(). */
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-        pui_pressable_flat(row);
-        lv_obj_add_event_cb(row, __open_cb, LV_EVENT_CLICKED, NULL);
+    if (pet_demo_note_count() == 0) {
+        __build_empty(body);
+        return;
     }
 
-    pet_say("这些都帮你收好了");
+    card = pui_card_create(body, NULL, PUI_TONE_NEUTRAL);
+    rows = pui_card_body(card);
+
+    for (uint32_t i = 0; i < pet_demo_note_count(); i++) {
+        const PET_NOTE_T *note = pet_demo_note_at(i);
+        lv_obj_t         *row;
+        lv_obj_t         *trash;
+
+        if (note == NULL) {
+            continue;
+        }
+
+        row = pui_list_row_create(rows, sg_glyphs[i % marks], sg_tones[i % marks], note->title);
+        pui_list_row_set_trailing(row, note->time);
+
+        trash = pui_icon_button_create(row, FONT_AWESOME_TRASH, PUI_TONE_RED, PUI_FILL_GHOST);
+        lv_obj_add_event_cb(trash, __delete_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
+    }
 }

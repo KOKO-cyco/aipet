@@ -94,6 +94,32 @@ static void prv_ai_evt_cb(AI_NOTIFY_EVENT_T *event)
         PR_INFO("[ai] asr ok");
         break;
 
+    /* ---- NLG 文本流 -> 气泡 ------------------------------------------------
+     * 原样转给页面，不在这里缓存：字符串只在本次同步分发期间有效，谁要谁拷。
+     * 显示节奏由页面交给 SDK 的 ai_ui_stream_text 处理（同 your_chat_bot）。 */
+    case AI_USER_EVT_TEXT_STREAM_START:
+    case AI_USER_EVT_TEXT_STREAM_DATA:
+    case AI_USER_EVT_TEXT_STREAM_STOP: {
+        AI_NOTIFY_TEXT_T *txt = (AI_NOTIFY_TEXT_T *)event->data;
+        APP_AI_TEXT_T     out;
+
+        out.kind = (AI_USER_EVT_TEXT_STREAM_START == event->type)  ? APP_AI_TEXT_START
+                   : (AI_USER_EVT_TEXT_STREAM_STOP == event->type) ? APP_AI_TEXT_STOP
+                                                                  : APP_AI_TEXT_DATA;
+        out.data = (NULL != txt) ? txt->data : NULL;
+        out.len  = (NULL != txt) ? txt->datalen : 0;
+
+        PR_DEBUG("[ai] text %d len %u", (int)out.kind, (unsigned)out.len);
+        app_event_publish(APP_EVT_AI_TEXT, &out);
+    } break;
+
+    case AI_USER_EVT_TEXT_STREAM_ABORT:
+    case AI_USER_EVT_CHAT_BREAK: {
+        APP_AI_TEXT_T out = {.data = NULL, .len = 0, .kind = APP_AI_TEXT_ABORT};
+
+        app_event_publish(APP_EVT_AI_TEXT, &out);
+    } break;
+
     default:
         break;
     }

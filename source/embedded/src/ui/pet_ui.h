@@ -46,11 +46,11 @@ extern "C" {
  * something the user can navigate to.
  */
 typedef enum {
-    PET_PAGE_HOME = 0, /* 主页 — three entry tiles, the weather and two summary cards */
+    PET_PAGE_HOME = 0, /* 主页 — three entry tiles and two summary cards */
     PET_PAGE_CAMERA,   /* 拍照 */
     PET_PAGE_GALLERY,  /* 相册 — reached from the camera page */
-    PET_PAGE_NOTES,    /* 全部笔记 — the list of notes, reached from the home card */
-    PET_PAGE_NOTE,     /* 备忘录 — the editor for one note */
+    PET_PAGE_MEMOS,    /* 备忘录 — time-bound items, checkable and deletable */
+    PET_PAGE_NOTES,    /* 笔记 — free-form notes, read-only list */
     PET_PAGE_SETTINGS, /* 设置 */
     PET_PAGE_MAX,
 } PET_PAGE_E;
@@ -108,6 +108,17 @@ void pet_ui_refresh(void);
  * @return NULL before pet_ui_init() has run.
  */
 lv_obj_t *pet_ui_panel(void);
+
+/**
+ * @brief Which page is on top of the stack.
+ *
+ * Used by out-of-band writers (the MCP tools) to decide whether a model change
+ * needs the current page rebuilt: while the camera or settings page is up, a memo
+ * added by voice should not tear that page down.
+ *
+ * @return PET_PAGE_HOME before pet_ui_init() has run.
+ */
+PET_PAGE_E pet_ui_current(void);
 
 /**
  * @brief Re-read the to-do count into the status strip's badge.

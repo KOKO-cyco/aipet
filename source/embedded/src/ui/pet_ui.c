@@ -58,8 +58,8 @@
    means navigation never allocates. */
 /* 页面栈深度上限。
  *
- * 主页 -> 拍照 -> 相册 -> 添加笔记 正好四层，长按 P12 进设置是第五层 —— 上限
- * 卡在 4 的时候那一下会被静默丢掉（只打一条 WARN），屏幕上什么都不发生。 */
+ * 主页 -> 拍照 -> 相册 是三层；主页 -> 备忘录 / 笔记 是两层。五层留了余量，
+ * 长按 P12 弹的设置是状态栏 sheet，不占页面栈。 */
 #define PET_PAGE_STACK_MAX 5
 
 /* 切页动画开关。
@@ -264,6 +264,15 @@ lv_obj_t *pet_ui_panel(void)
     return sg_page;
 }
 
+PET_PAGE_E pet_ui_current(void)
+{
+    if (sg_depth <= 0) {
+        return PET_PAGE_HOME;
+    }
+
+    return __top();
+}
+
 /* ---- Page lifecycle ------------------------------------------------------- */
 
 /**
@@ -324,11 +333,11 @@ static void __rebuild(void)
     case PET_PAGE_GALLERY:
         pet_page_gallery_build(sg_page);
         break;
+    case PET_PAGE_MEMOS:
+        pet_page_memos_build(sg_page);
+        break;
     case PET_PAGE_NOTES:
         pet_page_notes_build(sg_page);
-        break;
-    case PET_PAGE_NOTE:
-        pet_page_note_build(sg_page);
         break;
     case PET_PAGE_SETTINGS:
         pet_page_settings_build(sg_page);

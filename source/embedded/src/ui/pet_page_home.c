@@ -31,7 +31,8 @@
  * says nothing the entries do not.
  *
  * 相册 is not here. Photos come from the camera, so the gallery hangs off the camera page
- * instead of taking one of the three entries.
+ * instead of taking one of the three entries. 笔记 is not an entry either: the 最近笔记
+ * card below is its way in, and the notes themselves are not typed on this screen.
  *
  * There is no arithmetic in this file. Every size on the page is a component's own: the
  * tiles report their height, the grid divides the width, the cards own their padding. The
@@ -94,8 +95,8 @@ static void __goto_cb(lv_event_t *e)
  * so its square is left empty by the constructor and filled here, in the same white the
  * font glyphs beside it are set in.
  *
- * The three colours are the page's whole colour story: the camera's blue, the note's amber,
- * the settings' indigo. Nothing else on the page is filled at strength.
+ * The three colours are the page's whole colour story: the camera's blue, the memo's
+ * amber, the settings' blue. Nothing else on the page is filled at strength.
  */
 static void __build_entry(lv_obj_t *row, const char *glyph, PUI_TONE_E tone, const char *label, PET_PAGE_E page)
 {
@@ -103,10 +104,12 @@ static void __build_entry(lv_obj_t *row, const char *glyph, PUI_TONE_E tone, con
 
     if (glyph == NULL) {
         pui_camera_glyph(pui_tile_box(tile), 36, PET_COLOR_ON_ACCENT);
-    } else if (page == PET_PAGE_NOTE) {
-        pui_note_glyph(pui_tile_box(tile), 36, pui_tone_deep(tone));
-    } else {
+    } else if (page == PET_PAGE_SETTINGS) {
         pui_gear_glyph(pui_tile_box(tile), 36, pui_tone_deep(tone));
+    } else {
+        lv_obj_t *icon = pui_label_create(pui_tile_box(tile), glyph, PET_FONT_ICON_LG, pui_tone_deep(tone));
+
+        lv_obj_center(icon);
     }
 
     lv_obj_add_event_cb(tile, __goto_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)page);
@@ -122,7 +125,7 @@ static lv_obj_t *__build_entries(lv_obj_t *parent)
     lv_obj_set_flex_grow(pui_card_body(card), 1);
 
     __build_entry(row, NULL, PUI_TONE_ACCENT, "拍照", PET_PAGE_CAMERA);
-    __build_entry(row, FONT_AWESOME_EDIT, PUI_TONE_AMBER, "备忘录", PET_PAGE_NOTE);
+    __build_entry(row, FONT_AWESOME_BELL, PUI_TONE_AMBER, "备忘录", PET_PAGE_MEMOS);
     __build_entry(row, FONT_AWESOME_GEAR, PUI_TONE_ACCENT, "设置", PET_PAGE_SETTINGS);
 
     return card;
@@ -178,7 +181,7 @@ static lv_obj_t *__build_todo_card(lv_obj_t *parent)
        take: the 16 px card face sets it in about 64 px of the 98 the heading row gives it,
        and the chevron that used to share the row is gone — the card's footer capsule
        already says the card is a target, and the heading had more right to the space. */
-    lv_obj_t *card = pui_card_create(parent, "今日待办", PUI_TONE_AMBER);
+    lv_obj_t *card = pui_card_create(parent, "今日备忘录", PUI_TONE_AMBER);
     lv_obj_t *body = pui_card_body(card);
     char      text[HOME_SAY_MAX];
 
@@ -193,9 +196,9 @@ static lv_obj_t *__build_todo_card(lv_obj_t *parent)
     pui_stat_row_create(body, text, "已完成", PUI_TONE_GREEN);
 
     pui_spacer(body);
-    __build_foot(body, "查看全部", PUI_TONE_AMBER, PET_PAGE_NOTE);
+    __build_foot(body, "查看全部", PUI_TONE_AMBER, PET_PAGE_MEMOS);
 
-    pui_card_set_action(card, __goto_cb, (void *)(uintptr_t)PET_PAGE_NOTE);
+    pui_card_set_action(card, __goto_cb, (void *)(uintptr_t)PET_PAGE_MEMOS);
 
     return card;
 }
@@ -223,13 +226,13 @@ static lv_obj_t *__build_note_card(lv_obj_t *parent)
        room for both. Here the time would take a third of the width and force the name to
        wrap, which is worse than not showing it. */
     for (uint32_t i = 0; i < HOME_NOTE_ROWS; i++) {
-        const char *name = pet_demo_nav_name(i);
+        const PET_NOTE_T *note = pet_demo_note_at(i);
 
-        if (name == NULL) {
+        if (note == NULL) {
             break;
         }
 
-        pui_list_row_create(body, sg_note_glyphs[i], sg_note_tones[i], name);
+        pui_list_row_create(body, sg_note_glyphs[i], sg_note_tones[i], note->title);
     }
 
     pui_spacer(body);

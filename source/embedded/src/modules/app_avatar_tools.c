@@ -29,8 +29,9 @@
 
 #include "app_ai_chat.h"
 #include "app_event.h"
-#include "app_pages.h"          /* PAGE_PET */
-#include "app_router.h"         /* app_router_on_top() */
+#include "app_memo_tools.h"
+#include "app_pages.h"  /* PAGE_PET */
+#include "app_router.h" /* app_router_on_top() */
 #include "app_avatar_tools.h"
 
 /***********************************************************
@@ -46,25 +47,22 @@
  *
  * **只列当前动作集真实存在的组**（fish_elf.spf 的 15 组 + idle）。旧套的
  * click_wave / rnd_photo 之类已经随素材没了，列了只会让大模型点名演不存在的动作。 */
-#define AVATAR_ANIM_NAMES                                                      \
-    "idle, tap_proud, tap_shy, tap_happy, tap_tickle, "                        \
-    "fn_photo, fn_note, emo_sad, emo_happy, emo_think, "                       \
+#define AVATAR_ANIM_NAMES                                                                                              \
+    "idle, tap_proud, tap_shy, tap_happy, tap_tickle, "                                                                \
+    "fn_photo, fn_note, emo_sad, emo_happy, emo_think, "                                                               \
     "rnd_gomoku, rnd_pigeon, rnd_yawn, rnd_cat, rnd_lion, rnd_scare"
 
 /* 情绪名 = skill_emotion.h 里的 EMOJI_*（page_pet.c 的情绪表按这些键映射动作）。
  * 大模型给大小写都认（页面里用 strcasecmp 比对），这里列全便于它挑。 */
-#define AVATAR_EMOTION_NAMES                                                   \
-    "NEUTRAL, HAPPY, LAUGHING, FUNNY, DELICIOUS, SAD, DISAPPOINTED, ANGRY, "   \
-    "ANNOYED, FEARFUL, LOVING, KISSY, WAKEUP, EMBARRASSED, CONFUSED, TOUCH, "  \
-    "LEFT, RIGHT, SURPRISE, SHOCKED, THINKING, WINK, SILLY, COOL, CONFIDENT, " \
+#define AVATAR_EMOTION_NAMES                                                                                           \
+    "NEUTRAL, HAPPY, LAUGHING, FUNNY, DELICIOUS, SAD, DISAPPOINTED, ANGRY, "                                           \
+    "ANNOYED, FEARFUL, LOVING, KISSY, WAKEUP, EMBARRASSED, CONFUSED, TOUCH, "                                          \
+    "LEFT, RIGHT, SURPRISE, SHOCKED, THINKING, WINK, SILLY, COOL, CONFIDENT, "                                         \
     "RELAXED, SLEEP"
 
 static const char *const sg_anim_whitelist[] = {
-    "idle",
-    "tap_proud", "tap_shy", "tap_happy", "tap_tickle",
-    "fn_photo", "fn_note",
-    "emo_sad", "emo_happy", "emo_think",
-    "rnd_gomoku", "rnd_pigeon", "rnd_yawn", "rnd_cat", "rnd_lion", "rnd_scare",
+    "idle",      "tap_proud", "tap_shy",    "tap_happy",  "tap_tickle", "fn_photo", "fn_note",  "emo_sad",
+    "emo_happy", "emo_think", "rnd_gomoku", "rnd_pigeon", "rnd_yawn",   "rnd_cat",  "rnd_lion", "rnd_scare",
 };
 
 /* MCP 服务器是否已经建好（= 工具已登记）。MQTT 没连上时是 false。 */
@@ -133,8 +131,8 @@ static void prv_request_action(const char *name)
     app_event_publish(APP_EVT_PET_ACTION, (void *)name);
 }
 
-static OPERATE_RET prv_mcp_play_animation(const MCP_PROPERTY_LIST_T *properties,
-                                          MCP_RETURN_VALUE_T *ret_val, void *user_data)
+static OPERATE_RET prv_mcp_play_animation(const MCP_PROPERTY_LIST_T *properties, MCP_RETURN_VALUE_T *ret_val,
+                                          void *user_data)
 {
     const char *name = prv_prop_str(properties, "name");
 
@@ -150,8 +148,8 @@ static OPERATE_RET prv_mcp_play_animation(const MCP_PROPERTY_LIST_T *properties,
     return OPRT_OK;
 }
 
-static OPERATE_RET prv_mcp_set_emotion(const MCP_PROPERTY_LIST_T *properties,
-                                       MCP_RETURN_VALUE_T *ret_val, void *user_data)
+static OPERATE_RET prv_mcp_set_emotion(const MCP_PROPERTY_LIST_T *properties, MCP_RETURN_VALUE_T *ret_val,
+                                       void *user_data)
 {
     const char *emotion = prv_prop_str(properties, "emotion");
 
@@ -170,8 +168,8 @@ static OPERATE_RET prv_mcp_set_emotion(const MCP_PROPERTY_LIST_T *properties,
     return OPRT_OK;
 }
 
-static OPERATE_RET prv_mcp_composite_action(const MCP_PROPERTY_LIST_T *properties,
-                                            MCP_RETURN_VALUE_T *ret_val, void *user_data)
+static OPERATE_RET prv_mcp_composite_action(const MCP_PROPERTY_LIST_T *properties, MCP_RETURN_VALUE_T *ret_val,
+                                            void *user_data)
 {
     const char *animation = prv_prop_str(properties, "animation");
     const char *emotion   = prv_prop_str(properties, "emotion");
@@ -186,8 +184,7 @@ static OPERATE_RET prv_mcp_composite_action(const MCP_PROPERTY_LIST_T *propertie
     /* 画面只有一只宠物：点名了具体动作就用它，没点名（或名字不认识）才退回
      * 情绪表 —— 两条都放会互相抢，先演完情绪映射的动作再被动作覆盖，白闪一下。 */
     if (true == prv_anim_known(animation)) {
-        PR_NOTICE("[avatar] 组合动作 -> %s（情绪 %s 忽略）",
-                  animation, (NULL != emotion) ? emotion : "-");
+        PR_NOTICE("[avatar] 组合动作 -> %s（情绪 %s 忽略）", animation, (NULL != emotion) ? emotion : "-");
         prv_request_action(animation);
     } else if (NULL != emotion && '\0' != emotion[0]) {
         PR_NOTICE("[avatar] 组合动作 -> 情绪 %s（无有效动作名）", emotion);
@@ -207,46 +204,46 @@ static OPERATE_RET prv_register_tools(void)
 {
     OPERATE_RET rt = OPRT_OK;
 
-    TUYA_CALL_ERR_RETURN(AI_MCP_TOOL_ADD(
-        "avatar_play_animation",
-        "Play a body animation on the pet. It plays exactly once (a few seconds) "
-        "and then returns to the idle loop by itself, so prefer calling this once "
-        "near the START of your reply.\n"
-        "Use it to match the emotion or intent of what you are saying "
-        "(e.g. tap_happy for good news, emo_sad for sad news, emo_think while "
-        "pondering, tap_proud for a boast). Do NOT call it for every sentence.\n"
-        "Animations: " AVATAR_ANIM_NAMES ".\n"
-        "Response: true if the animation started.",
-        prv_mcp_play_animation,
-        NULL,
-        MCP_PROP_STR("name", "Animation name (exact match, from the list above).")
-    ));
+    TUYA_CALL_ERR_RETURN(AI_MCP_TOOL_ADD("avatar_play_animation",
+                                         "Play a body animation on the pet. It plays exactly once (a few seconds) "
+                                         "and then returns to the idle loop by itself, so prefer calling this once "
+                                         "near the START of your reply.\n"
+                                         "Use it to match the emotion or intent of what you are saying "
+                                         "(e.g. tap_happy for good news, emo_sad for sad news, emo_think while "
+                                         "pondering, tap_proud for a boast). Do NOT call it for every sentence.\n"
+                                         "Animations: " AVATAR_ANIM_NAMES ".\n"
+                                         "Response: true if the animation started.",
+                                         prv_mcp_play_animation, NULL,
+                                         MCP_PROP_STR("name", "Animation name (exact match, from the list above).")));
 
-    TUYA_CALL_ERR_RETURN(AI_MCP_TOOL_ADD(
-        "avatar_set_emotion",
-        "Set the pet's mood by name; it plays the action mapped to that emotion. "
-        "Use when a mood fits better than a specific animation.\n"
-        "Emotions: " AVATAR_EMOTION_NAMES ".\n"
-        "Response: true if the mood was applied.",
-        prv_mcp_set_emotion,
-        NULL,
-        MCP_PROP_STR("emotion", "Emotion name (exact match, from the list above).")
-    ));
+    TUYA_CALL_ERR_RETURN(AI_MCP_TOOL_ADD("avatar_set_emotion",
+                                         "Set the pet's mood by name; it plays the action mapped to that emotion. "
+                                         "Use when a mood fits better than a specific animation.\n"
+                                         "Emotions: " AVATAR_EMOTION_NAMES ".\n"
+                                         "Response: true if the mood was applied.",
+                                         prv_mcp_set_emotion, NULL,
+                                         MCP_PROP_STR("emotion", "Emotion name (exact match, from the list above).")));
 
-    TUYA_CALL_ERR_RETURN(AI_MCP_TOOL_ADD(
-        "avatar_composite_action",
-        "Set the pet's body animation and mood in one call. Prefer this over "
-        "separate avatar_play_animation + avatar_set_emotion calls when you want the "
-        "pet to react at the beginning of your reply.\n"
-        "Animations: " AVATAR_ANIM_NAMES ".\n"
-        "Response: true if the action was applied.",
-        prv_mcp_composite_action,
-        NULL,
-        MCP_PROP_STR("animation", "Body animation name (exact match, from the list above)."),
-        MCP_PROP_STR("emotion", "Emotion name (used only when animation is empty/unknown).")
-    ));
+    TUYA_CALL_ERR_RETURN(
+        AI_MCP_TOOL_ADD("avatar_composite_action",
+                        "Set the pet's body animation and mood in one call. Prefer this over "
+                        "separate avatar_play_animation + avatar_set_emotion calls when you want the "
+                        "pet to react at the beginning of your reply.\n"
+                        "Animations: " AVATAR_ANIM_NAMES ".\n"
+                        "Response: true if the action was applied.",
+                        prv_mcp_composite_action, NULL,
+                        MCP_PROP_STR("animation", "Body animation name (exact match, from the list above)."),
+                        MCP_PROP_STR("emotion", "Emotion name (used only when animation is empty/unknown).")));
 
     PR_NOTICE("[avatar] 3 个动作工具已登记：play_animation / set_emotion / composite_action");
+
+    /* 备忘录/笔记工具挂在同一个 MCP 服务器上：本工程没有键盘，AI 是唯一的写
+     * 路径。失败只记日志，不影响动作工具。 */
+    rt = app_memo_tools_register();
+    if (OPRT_OK != rt) {
+        PR_ERR("[avatar] 备忘录/笔记工具登记失败: %d", rt);
+    }
+
     sg_server_up = true;
     return OPRT_OK;
 }
@@ -303,8 +300,7 @@ OPERATE_RET app_avatar_tools_init(void)
     /* 再挂自己的工具注册：同一个事件，订阅顺序 = 回调顺序，所以这一句必须在
      * ai_mcp_init() 之后。ONETIME 意味着只此一次 —— 所以整个 init 要在 MQTT
      * 首次连上之前调用（tuya_iot_start 之前）。 */
-    rt = tal_event_subscribe(EVENT_MQTT_CONNECTED, "app_avatar_tools",
-                             prv_on_mqtt_connected, SUBSCRIBE_TYPE_ONETIME);
+    rt = tal_event_subscribe(EVENT_MQTT_CONNECTED, "app_avatar_tools", prv_on_mqtt_connected, SUBSCRIBE_TYPE_ONETIME);
     if (OPRT_OK != rt) {
         PR_ERR("[avatar] 订阅 MQTT 事件失败: %d", rt);
         return rt;

@@ -72,6 +72,17 @@ else()
     message(WARNING "Armino config 目录不存在（首次构建前正常）: ${ARMINO_CFG_DIR}")
 endif()
 
+########################################
+# SDK 的流式文本组件
+#
+# 气泡的显示节奏直接复用 src/ai_components/ai_ui/src/ai_ui_stream_text.c ——
+# apps/tuya.ai/your_chat_bot 用的同一套（环形缓冲 + 1s 定时器，每拍 10 个字）。
+# aipet 没开 ENABLE_COMP_AI_DISPLAY，整个 ai_ui 组件不会编，所以只把这一个
+# 文件链进来。它只依赖 tal 和 tuya_ringbuf，不碰 LVGL。
+########################################
+list(APPEND APP_SRC ${SDK_ROOT_DIR}/src/ai_components/ai_ui/src/ai_ui_stream_text.c)
+list(APPEND APP_INC ${SDK_ROOT_DIR}/src/ai_components/ai_ui/include)
+
 # APP_OPTIONS
 set(APP_OPTIONS "")  # -W
 

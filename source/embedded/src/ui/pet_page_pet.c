@@ -19,8 +19,8 @@
  * The status strip is not here. It belongs to the screen rather than to this card, and
  * lives in pet_ui.c with the rest of the shell.
  *
- * The bubble fades in and out rather than appearing and disappearing, and tapping the
- * character is what drives it: see sg_pokes and pet_say().
+ * The bubble fades in and out rather than appearing and disappearing, and pet_say() is
+ * what drives it.
  *
  * It also comes in one shape per tone: a plain bubble, a rounder one for a pleased line,
  * one trailing bubbles for a thinking line, and one sharpened to a barb for a refusal.
@@ -173,6 +173,11 @@ static lv_obj_t *sg_stage;
 static lv_obj_t *sg_bubble_holder;
 static lv_obj_t *sg_bubble;
 static lv_obj_t *sg_say_label;
+
+/* The bubble is on screen (shown, or on its way in). pet_say_stream() uses this to
+   replace the line in place instead of replaying the fade-and-rise for every page of
+   one AI reply, which would read as a blink between pages. */
+static BOOL_T sg_bubble_on;
 
 /* The shape the current line is being said in. Read by the tail's draw callback, which
    has no other way to know which silhouette to paint. Static rather than per-record: the
@@ -873,6 +878,7 @@ static void __bubble_show(PET_SAY_MOOD_E mood)
 
     __bubble_anim_stop();
     __bubble_children_hide(FALSE);
+    sg_bubble_on = TRUE;
 
     /* The silhouette is the mood's as well, and it is set before the fade starts so the
        line arrives already the right shape rather than morphing into it mid-arrival. */
@@ -935,6 +941,7 @@ static void __bubble_hide(void)
         return;
     }
 
+    sg_bubble_on = FALSE;
     __bubble_anim_stop();
 
     lv_anim_init(&a);
@@ -1002,6 +1009,7 @@ void pet_page_pet_build(lv_obj_t *column)
     sg_bubble_holder = NULL;
     sg_bubble        = NULL;
     sg_say_label     = NULL;
+    sg_bubble_on     = FALSE;
 
     /* The holder is a fixed-height box so the character below it never moves when the
        bubble's line changes. It starts at zero opacity with its contents hidden, so the
@@ -1068,6 +1076,7 @@ void pet_page_pet_reset(void)
     sg_bubble_holder = NULL;
     sg_bubble        = NULL;
     sg_say_label     = NULL;
+    sg_bubble_on     = FALSE;
 }
 
 void pet_say_mood(const char *text, PET_SAY_MOOD_E mood)
@@ -1110,6 +1119,42 @@ void pet_say_mood(const char *text, PET_SAY_MOOD_E mood)
 void pet_say(const char *text)
 {
     pet_say_mood(text, PET_SAY_CALM);
+}
+
+void pet_say_stream(const char *text)
+{
+    if (text == NULL) {
+        text = "";
+    }
+
+    if (text != sg_say) {
+        strncpy(sg_say, text, sizeof(sg_say) - 1);
+        sg_say[sizeof(sg_say) - 1] = '\0';
+    }
+    sg_mood = PET_SAY_CALM;
+
+    if (sg_say_label == NULL || sg_bubble_holder == NULL) {
+        return;
+    }
+
+    if (sg_say[0] == '\0') {
+        __type_stop();
+        __dots_stop();
+        __bubble_hide();
+        return;
+    }
+
+    __bubble_fit(sg_say);
+
+    /* 已经是 AI 回复的下一页：只换字，不重播淡入/上浮。整段回复每页都闪一下
+       会让气泡看起来在眨眼；第一页（气泡还没出现）才走完整动画。 */
+    if (!sg_bubble_on) {
+        __bubble_show(PET_SAY_CALM);
+    } else {
+        __bubble_apply_shape(__mood_shape(PET_SAY_CALM));
+    }
+
+    __type_start();
 }
 
 void pet_pet_reflow(void)

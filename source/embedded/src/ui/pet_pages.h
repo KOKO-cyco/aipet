@@ -37,8 +37,8 @@ void pet_page_pet_build(lv_obj_t *panel);
 void pet_page_home_build(lv_obj_t *panel);
 void pet_page_camera_build(lv_obj_t *panel);
 void pet_page_gallery_build(lv_obj_t *panel);
+void pet_page_memos_build(lv_obj_t *panel);
 void pet_page_notes_build(lv_obj_t *panel);
-void pet_page_note_build(lv_obj_t *panel);
 void pet_page_settings_build(lv_obj_t *panel);
 
 /**
@@ -102,6 +102,22 @@ lv_obj_t *pet_page_sheet(void);
  * Safe to call from inside the sheet's own handlers, and safe to call twice.
  */
 void pet_page_sheet_close(void);
+
+/**
+ * @brief A destructive-action confirmation, raised over the current page.
+ *
+ * The sheet is the one shared delete pattern for the memo and note lists: a title,
+ * a line of body copy, and 取消 / <action>. There is no text input and no keyboard;
+ * the action is the only thing that can be confirmed.
+ *
+ * @param[in] title       Sheet heading, e.g. 删除备忘录.
+ * @param[in] body        Body copy, may contain newlines.
+ * @param[in] action      Label of the destructive button, e.g. 删除 / 清空.
+ * @param[in] on_confirm  Called after the sheet closes. May rebuild the page.
+ * @param[in] user        Passed through to @p on_confirm.
+ */
+typedef void (*PET_CONFIRM_CB)(void *user);
+void pet_page_confirm(const char *title, const char *body, const char *action, PET_CONFIRM_CB on_confirm, void *user);
 
 /**
  * @brief Whether a sheet is currently up.

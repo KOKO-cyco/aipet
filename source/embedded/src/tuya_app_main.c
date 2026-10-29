@@ -182,6 +182,9 @@ static void prv_ai_boot_start(void)
     }
 }
 
+/* 被云端解绑后停住云状态机（见 TUYA_EVENT_RESET 的处理）。 */
+static volatile BOOL_T s_cloud_held = FALSE;
+
 /* 网络 / 云事件，跑在 yield 线程 */
 static void user_event_handler_on(tuya_iot_client_t *client, tuya_event_msg_t *event)
 {
@@ -209,9 +212,25 @@ static void user_event_handler_on(tuya_iot_client_t *client, tuya_event_msg_t *e
         prv_handle_dp_obj(event->value.dpobj);
         break;
 
-    case TUYA_EVENT_RESET:
-        tal_system_reset();
-        break;
+    /* 云端把设备判成"未激活/被解绑"时，SDK 会发 TUYA_EVENT_RESET。
+     * **只有真正的恢复出厂才重启**：以前无脑 tal_system_reset()，MQTT 认证被拒
+     * 一次就重启一次（真机 2026-10-28：无限重启，且热复位把 SD 卡留在半初始化
+     * 状态，卡也跟着起不来）。普通解绑只停掉云状态机，界面继续可用。 */
+    case TUYA_EVENT_RESET: {
+        int32_t why = event->value.asInteger;
+
+        if (TUYA_RESET_TYPE_REMOTE_FACTORY == why) {
+            /* **不复位。** 发这个事件的地方已经置了 nextstate=STATE_RESET，
+             * 状态机会自己跑到 run_state_reset() 清掉本地激活数据再重新开始。
+             * 这里直接 tal_system_reset() 反而把它截断了：激活数据没清，重启后
+             * 用同样的凭据再连一次，云端再判一次 reset_factory —— 无限重启。 */
+            PR_WARN("[main] 云端恢复出厂（%d），不复位：交给 SDK 清激活数据", (int)why);
+        } else {
+            PR_WARN("[main] 云端解绑（%d），保持运行：界面可用，云功能停用", (int)why);
+            app_net_set_cloud_up(FALSE);
+            s_cloud_held = TRUE;
+        }
+    } break;
 
     default:
         break;
@@ -229,6 +248,12 @@ static void tuya_yield_thread(void *arg)
     (void)arg;
 
     for (;;) {
+        if (s_cloud_held) {
+            /* 被云端解绑：不再驱动云状态机，否则会"认证失败 -> 重置 -> 重试"
+             * 无限刷屏。界面和本地功能照常。 */
+            tal_system_sleep(1000);
+            continue;
+        }
         tuya_iot_yield(&ai_client);
     }
 }
@@ -245,7 +270,9 @@ static void user_main(void)
         .malloc_fn = tal_psram_malloc,
         .free_fn   = tal_psram_free,
     });
-    tal_log_init(TAL_LOG_LEVEL_DEBUG, 1024, (TAL_LOG_OUTPUT_CB)tkl_log_output);
+    /* INFO：把 SDK 里高频的 DEBUG 刷屏（AI 上行分片、事件分发、每 2s 的性能
+     * 统计等）全部关掉，只留 NOTICE/WARN/ERR。要查底层问题时改回 DEBUG。 */
+    tal_log_init(TAL_LOG_LEVEL_INFO, 1024, (TAL_LOG_OUTPUT_CB)tkl_log_output);
     tal_kv_init(&(tal_kv_cfg_t){
         .seed = "vmlkasdh93dlvlcy",
         .key  = "dflfuap134ddlduq",

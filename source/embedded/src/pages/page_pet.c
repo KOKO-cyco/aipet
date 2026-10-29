@@ -5,7 +5,7 @@
  * 这一页现在只做三件事，界面本身全在 src/ui/ 里：
  *
  *   1) **建壳**：`pet_ui_init(sg_scr)` 建出顶栏 + 左宠物卡 + 右功能面板
- *      （主页 / 拍照 / 相册 / 备忘录 / 全部笔记 / 设置，七页的页面栈）。
+ *      （主页 / 拍照 / 相册 / 备忘录 / 笔记 / 设置，六页的页面栈）。
  *   2) **把精灵画进左卡**：`pet_pet_stage()` 给出卡里那块舞台，这里在上面建一个
  *      lv_canvas，按 app_sprite2d 的脏矩形方式每 42ms 画一帧。
  *   3) **动作状态机**：AI 思考/说话、大模型点名、情绪、点击、待机随机插播 ——
@@ -20,7 +20,7 @@
  * 和旧版的差别
  * ------------
  * 旧版是深色主题、宠物在左半 240、右半是写死的备忘录原型视图；新版整套界面来自
- * 宽屏 demo（米白卡片风），右半是真正的页面栈，备忘录/笔记/设置都是独立页面。
+ * 宽屏 demo（暗色卡片风），右半是真正的页面栈，备忘录/笔记/设置都是独立页面。
  * **宠物仍然是实时精灵**，不是 demo 里那张 932KB 的静态图。
  *
  * 动作状态机（**不是**循环轮播）
@@ -33,9 +33,14 @@
  *   APP_EVT_PET_ACTION   大模型点名动作（MCP 工具）      —— 一次性
  *   APP_EVT_AI_EMOTION   AI 情绪（云端 NLG / MCP）      —— 一次性
  *   APP_EVT_AI_STATE     AI 状态（THINK / SPEAK）       —— **持续**
+ *   APP_EVT_AI_TEXT      AI 回复文本流（气泡分页）       —— 一次性
  *   点宠物                                               —— 一次性
  *
  * "持续"优先于"一次性"：AI 一开始说话就立刻切过去，正在演的随机动作让位。
+ *
+ * 气泡的显示节奏复用 SDK 的 ai_ui_stream_text（与 apps/tuya.ai/your_chat_bot
+ * 同一套）：它每 1s 吐 10 个字，这里只把吐出来的字攒成 14 字一页（气泡两行
+ * 的上限）交给 pet_say_stream()。
  */
 
 #include <stdio.h>
@@ -46,6 +51,7 @@
 #include "lvgl.h"
 
 #include "ai_manage_mode.h"     /* AI_MODE_STATE_* —— AI 状态驱动动作 */
+#include "ai_ui_stream_text.h"  /* 流式文本节奏（同 your_chat_bot） */
 
 #include "app_ai_chat.h"
 #include "app_camera.h"
@@ -101,6 +107,14 @@
 
 /** 待机组的组号。素材约定第 0 组必须是 idle（见 third_party/sprite/build_fish.sh 的 --order）。 */
 #define PET_CLIP_IDLE         0
+
+/* ---- AI 文本流 -> 气泡 ------------------------------------------------------
+ * 显示节奏用 SDK 的 ai_ui_stream_text（apps/tuya.ai/your_chat_bot 的同一套）：
+ * 分片进它的环形缓冲，它每 1s 吐 10 个字，UTF-8 切分和缓冲都在组件里。
+ * 气泡两行 18px 汉字的上限是 14 个字（见 pet_pet.h），这里只把吐出来的字
+ * 攒成 14 字一页、优先在标点处断页，再交给 pet_say_stream()。 */
+#define PET_AI_PAGE_CHARS   14
+#define PET_AI_PAGE_BYTES   (PET_AI_PAGE_CHARS * 4 + 1)   /* UTF-8 一个字符最多 4 字节 */
 
 /***********************************************************
 ************************ 动作巡检 *****************************
@@ -202,21 +216,6 @@ static const PET_LOOP_T sg_loop[] = {
 };
 
 /***********************************************************
-********************** 点击时说的话 **************************
-***********************************************************/
-/* 点宠物（AI 没在说话时）插播一句短话。**不超过气泡的两行上限（14 个字）**，
- * 见 pet_pet.h。空串是"让它安静下来"，留一条方便演示气泡的消失。 */
-#if !PET_ACT_AUDIT
-static const char *const sg_pokes[] = {
-    "怎么啦？我一直在这儿呢",
-    "今天的待办别忘了哦",
-    "要拍张照片吗？我可以帮你看看",
-    "想记点什么的话，说给我听",
-    "",
-};
-#endif
-
-/***********************************************************
 ************************* 状态 *****************************
 ***********************************************************/
 static lv_obj_t   *sg_scr;
@@ -273,6 +272,15 @@ static volatile BOOL_T sg_req_font;
 
 /** AI 当前状态（AI_MODE_STATE_E），点击宠物时用来判断"这一下是不是打断"。 */
 static volatile int sg_ai_state = AI_MODE_STATE_IDLE;
+
+/* ---- AI 气泡：文本流状态 ----------------------------------------------------
+ * sg_ai_page 只由 ai_ui_stream_text 的定时器线程读写；AI 事件线程只置标志，
+ * 这样不用锁，也不会在 AI 线程里碰 LVGL。 */
+static char     sg_ai_page[PET_AI_PAGE_BYTES];  /* 还没攒够一页的尾巴 */
+static uint16_t sg_ai_page_len;
+static volatile BOOL_T sg_ai_reset_req;         /* 新一轮/被打断：定时器线程清页 */
+static volatile BOOL_T sg_ai_streaming;         /* 本轮有文本（状态切换别抢气泡） */
+static volatile BOOL_T sg_ai_abort;             /* 被打断：tick 里把气泡收掉 */
 
 /***********************************************************
 ********************** 前向声明 ******************************
@@ -452,6 +460,194 @@ static const char *prv_emotion_clip_name(const char *emo)
 }
 
 /* 事件回调：**跑在发布者线程**，只写请求位（见上面的状态机说明）。 */
+/* ---- AI 气泡：文本流 -> 分页 ---------------------------------------------- */
+
+/** UTF-8 序列长度（只看首字节；坏字节按 1 处理，至少不会卡死）。 */
+static int prv_ai_utf8_len(uint8_t c)
+{
+    if (c < 0x80) {
+        return 1;
+    }
+    if ((c & 0xE0) == 0xC0) {
+        return 2;
+    }
+    if ((c & 0xF0) == 0xE0) {
+        return 3;
+    }
+    if ((c & 0xF8) == 0xF0) {
+        return 4;
+    }
+    return 1;
+}
+
+/** 断页点：中文/英文里常见的停顿符。 */
+static BOOL_T prv_ai_is_punct(const char *s, int len)
+{
+    static const char *const tab[] = {
+        "，", "。", "！", "？", "；", "：", "、",
+        ",", ".", "!", "?", ";", ":",
+    };
+
+    for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++) {
+        if ((int)strlen(tab[i]) == len && 0 == memcmp(s, tab[i], (size_t)len)) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/** 一页攒够 14 字就切，优先断在最后一个标点；不够一页返回 0。 */
+static int prv_ai_page_cut(const char *s, int len)
+{
+    int i = 0;
+    int chars = 0;
+    int cut = 0;
+    int punct = 0;
+
+    while (i < len) {
+        int cl = prv_ai_utf8_len((uint8_t)s[i]);
+
+        if (i + cl > len) {
+            break;
+        }
+        chars++;
+        i += cl;
+        cut = i;
+        if (prv_ai_is_punct(s + i - cl, cl)) {
+            punct = i;
+        }
+        if (chars >= PET_AI_PAGE_CHARS) {
+            break;
+        }
+    }
+
+    if (chars < PET_AI_PAGE_CHARS) {
+        return 0;
+    }
+    return (punct > 0) ? punct : cut;
+}
+
+/** 把攒够的一页交给气泡（已在定时器线程，LVGL 要拿显示锁）。 */
+static void prv_ai_show_page(const char *page)
+{
+    app_disp_lock();
+    pet_say_stream(page);
+    app_disp_unlock();
+}
+
+/** ai_ui_stream_text 的显示回调：跑在它的软件定时器线程。
+ *  string == NULL 表示流已经吐空 —— 把不足一页的尾巴也显示出去。 */
+static void prv_ai_disp_cb(char *string)
+{
+    char page[PET_AI_PAGE_BYTES];
+
+    if (sg_ai_reset_req) {
+        sg_ai_reset_req = FALSE;
+        sg_ai_page_len  = 0;
+    }
+
+    if (NULL == string) {
+        sg_ai_streaming = FALSE;
+        if (sg_ai_page_len > 0) {
+            memcpy(page, sg_ai_page, sg_ai_page_len);
+            page[sg_ai_page_len] = '\0';
+            sg_ai_page_len = 0;
+            prv_ai_show_page(page);
+        }
+        return;
+    }
+
+    for (int i = 0; '\0' != string[i];) {
+        int cl  = prv_ai_utf8_len((uint8_t)string[i]);
+        int cut;
+
+        if ((int)sg_ai_page_len + cl >= (int)sizeof(sg_ai_page)) {
+            sg_ai_page_len = 0;     /* 正常到不了：一拍最多 10 字，页只有 14 字 */
+        }
+        memcpy(sg_ai_page + sg_ai_page_len, string + i, (size_t)cl);
+        sg_ai_page_len = (uint16_t)(sg_ai_page_len + cl);
+        i += cl;
+
+        cut = prv_ai_page_cut(sg_ai_page, sg_ai_page_len);
+        if (0 == cut) {
+            continue;
+        }
+
+        memcpy(page, sg_ai_page, (size_t)cut);
+        page[cut] = '\0';
+        memmove(sg_ai_page, sg_ai_page + cut, (size_t)(sg_ai_page_len - cut));
+        sg_ai_page_len = (uint16_t)(sg_ai_page_len - cut);
+
+        prv_ai_show_page(page);
+    }
+}
+
+/** 事件线程：只把分片交给 ai_ui_stream_text，节奏和 UTF-8 都在组件里。 */
+static void prv_ai_text_cb(const APP_AI_TEXT_T *t)
+{
+    if (NULL == t) {
+        return;
+    }
+
+    switch (t->kind) {
+    case APP_AI_TEXT_START:
+        sg_ai_reset_req = TRUE;
+        sg_ai_streaming = TRUE;
+        ai_ui_stream_text_reset();
+        ai_ui_stream_text_start();
+        if (NULL != t->data && t->len > 0) {
+            ai_ui_stream_text_write(t->data);
+        }
+        break;
+
+    case APP_AI_TEXT_DATA:
+    case APP_AI_TEXT_STOP:
+        if (NULL != t->data && t->len > 0) {
+            ai_ui_stream_text_write(t->data);
+        }
+        if (APP_AI_TEXT_STOP == t->kind) {
+            ai_ui_stream_text_end();
+        }
+        break;
+
+    case APP_AI_TEXT_ABORT:
+        sg_ai_reset_req = TRUE;
+        sg_ai_streaming = FALSE;
+        sg_ai_abort     = TRUE;
+        ai_ui_stream_text_reset();
+        break;
+
+    default:
+        break;
+    }
+}
+
+/** 本轮是否有 AI 文本（有的话气泡归文本流，状态切换不要抢）。 */
+static BOOL_T prv_ai_has_text(void)
+{
+    return sg_ai_streaming;
+}
+
+static void prv_ai_turn_reset(void)
+{
+    sg_ai_reset_req  = TRUE;
+    sg_ai_streaming  = FALSE;
+    ai_ui_stream_text_reset();      /* 丢掉还没吐出来的尾巴，别在收气泡后又冒出来 */
+}
+
+/** tick：被打断时把气泡收掉。文本显示本身由 ai_ui_stream_text 的定时器驱动。 */
+static BOOL_T prv_ai_bubble_tick(uint32_t now)
+{
+    (void)now;
+
+    if (!sg_ai_abort) {
+        return FALSE;
+    }
+    sg_ai_abort = FALSE;
+    pet_say("");
+    return FALSE;
+}
+
 static void prv_pet_evt_cb(APP_EVT_E evt, void *data, void *user)
 {
     int clip = -1;
@@ -498,17 +694,24 @@ static void prv_pet_evt_cb(APP_EVT_E evt, void *data, void *user)
             break;
         case AI_MODE_STATE_SPEAK:
             clip = -1;      /* 新动作集没有 talk（碎碎念）组：说话期间回待机 */
-            sg_req_say = 2;
+            /* 有 AI 文本时气泡归文本流，这里不要收掉；只有音频、没有文字的
+             * 回复才把"让我想想…"收走。 */
+            sg_req_say = prv_ai_has_text() ? 0 : 2;
             break;
         default:
             clip = -1;      /* IDLE / LISTEN / UPLOAD / INIT -> 回待机（恢复表情） */
             sg_req_say = 2;
+            prv_ai_turn_reset();    /* 一轮结束/新的一轮开始：丢掉没显示完的分页 */
             break;
         }
 
         sg_req_hold = clip;
         break;
     }
+
+    case APP_EVT_AI_TEXT:
+        prv_ai_text_cb((const APP_AI_TEXT_T *)data);
+        break;
 
     case APP_EVT_FONT_READY:
         /* 字库换进代理了：页面是按内置字体量过尺寸的，交给 tick 重建。 */
@@ -523,7 +726,7 @@ static void prv_pet_evt_cb(APP_EVT_E evt, void *data, void *user)
 /** 点宠物。
  *
  * **AI 在思考 / 说话时，这一下是"打断"**（不换动作）—— 用户要的"点击可打断"。
- * 其余时候随机演一个"点击回应"并说一句短话。
+ * 其余时候随机演一个"点击回应"。
  *
  * 跑在 LVGL 线程；`app_ai_chat_interrupt()` 内部不取本模块的锁（只判状态 + 发
  * 播放器停止和 CHAT_BREAK），所以这里调它是安全的。 */
@@ -535,8 +738,7 @@ static void prv_stage_click(lv_event_t *e)
     PR_NOTICE("[AUDIT] 巡检中（第 %d/%d 步），点击不切动作",
               sg_audit_pos + 1, PET_AUDIT_STEPS);
 #else
-    static uint32_t s_poke;
-    int             state = sg_ai_state;
+    int state = sg_ai_state;
 
     (void)e;
 
@@ -548,9 +750,6 @@ static void prv_stage_click(lv_event_t *e)
 
     /* 和 MCP / 情绪走同一条路：只写请求位，tick 的帧边界上才切动作。 */
     sg_req_clip = prv_pick_tap_act();
-
-    pet_say(sg_pokes[s_poke]);
-    s_poke = (s_poke + 1) % (sizeof(sg_pokes) / sizeof(sg_pokes[0]));
 #endif
 }
 
@@ -810,7 +1009,7 @@ static void prv_adapt_ticks(uint32_t now, lv_timer_t *tick)
         sg_ad_bad   = 0;
         sg_ad_good  = 0;
         lv_timer_set_period(tick, PET_TICK_SLOW_MS);
-        PR_NOTICE("[pet] 预取缺帧 %u/%u -> 拍子 %u -> %u ms（供给不足，降帧保流畅）",
+        PR_DEBUG("[pet] 预取缺帧 %u/%u -> 拍子 %u -> %u ms（供给不足，降帧保流畅）",
                   (unsigned)dm, (unsigned)tol,
                   (unsigned)PET_TICK_MS, (unsigned)PET_TICK_SLOW_MS);
     } else if (sg_ad_slow && sg_ad_good >= 4u) {
@@ -819,7 +1018,7 @@ static void prv_adapt_ticks(uint32_t now, lv_timer_t *tick)
         sg_ad_bad   = 0;
         sg_ad_good  = 0;
         lv_timer_set_period(tick, PET_TICK_MS);
-        PR_NOTICE("[pet] 预取缺帧 %u/%u -> 拍子 %u -> %u ms（供给恢复，升回）",
+        PR_DEBUG("[pet] 预取缺帧 %u/%u -> 拍子 %u -> %u ms（供给恢复，升回）",
                   (unsigned)dm, (unsigned)tol,
                   (unsigned)PET_TICK_SLOW_MS, (unsigned)PET_TICK_MS);
     }
@@ -863,6 +1062,9 @@ static void prv_tick_cb(lv_timer_t *t)
         }
     }
 
+    /* ---- AI 文本流：到点换下一页（分页时间戳相对 TTS 起点，和语音对齐） ---- */
+    (void)prv_ai_bubble_tick(now);
+
     /* ---- SD 字库换进来了：当前页要按新字体重新量一遍 ---- */
     if (sg_req_font) {
         sg_req_font = FALSE;
@@ -901,7 +1103,7 @@ static void prv_tick_cb(lv_timer_t *t)
             if (sg_hold_clip < 0) {
                 sg_idle_at = now;       /* 回待机：重新开始"多久之后随机插播" */
             }
-            PR_NOTICE("[pet] AI 状态 -> %s", app_sprite2d_clip_name(sg_clip));
+            PR_DEBUG("[pet] AI 状态 -> %s", app_sprite2d_clip_name(sg_clip));
         }
 
         /* ① 一次性插播：优先级最高，会盖掉上面刚切的持续动作，演完再回去 */
@@ -914,7 +1116,7 @@ static void prv_tick_cb(lv_timer_t *t)
              * 上一遍的姿势 —— 不清掉的话重播的前几拍会在"组首帧 ↔ 上次播到的
              * 位置"之间来回跳。跨组请求也走这里（顺带清掉新组的旧槽）。 */
             app_sprite2d_rewind(req);
-            PR_NOTICE("[pet] 插播 %s（第 %d/%d 组）",
+            PR_DEBUG("[pet] 插播 %s（第 %d/%d 组）",
                       app_sprite2d_clip_name(sg_clip), sg_clip + 1, n);
         }
 
@@ -950,7 +1152,7 @@ static void prv_tick_cb(lv_timer_t *t)
                     sg_clip      = act;
                     sg_clip_at   = now;
                     sg_clip_once = TRUE;
-                    PR_NOTICE("[pet] 待机插播 %s", app_sprite2d_clip_name(act));
+                    PR_DEBUG("[pet] 待机插播 %s", app_sprite2d_clip_name(act));
                 }
             }
         }
@@ -1065,7 +1267,7 @@ static void prv_page_hook(PET_PAGE_E page)
     case PET_PAGE_CAMERA:
         name = "fn_photo";
         break;
-    case PET_PAGE_NOTE:
+    case PET_PAGE_MEMOS:
     case PET_PAGE_NOTES:
         name = "fn_note";
         break;
@@ -1201,9 +1403,15 @@ static OPERATE_RET prv_pet_enter(void *arg)
 
     /* 动作由这三条事件驱动（大模型点名 / AI 情绪 / AI 状态），见上面的状态机说明。
      * 订阅是幂等的，页面重进不会叠加。 */
+    prv_ai_turn_reset();
+
+    /* 文本显示的节奏交给 SDK 的流式组件（同 apps/tuya.ai/your_chat_bot）。 */
+    (void)ai_ui_stream_text_init(prv_ai_disp_cb);
+
     app_event_subscribe(APP_EVT_PET_ACTION, prv_pet_evt_cb, NULL);
     app_event_subscribe(APP_EVT_AI_EMOTION, prv_pet_evt_cb, NULL);
     app_event_subscribe(APP_EVT_AI_STATE,   prv_pet_evt_cb, NULL);
+    app_event_subscribe(APP_EVT_AI_TEXT,    prv_pet_evt_cb, NULL);
     app_event_subscribe(APP_EVT_FONT_READY, prv_pet_evt_cb, NULL);
 
     lv_screen_load(sg_scr);
@@ -1251,6 +1459,7 @@ static void prv_pet_exit(void)
     app_event_unsubscribe(APP_EVT_PET_ACTION, prv_pet_evt_cb);
     app_event_unsubscribe(APP_EVT_AI_EMOTION, prv_pet_evt_cb);
     app_event_unsubscribe(APP_EVT_AI_STATE,   prv_pet_evt_cb);
+    app_event_unsubscribe(APP_EVT_AI_TEXT,    prv_pet_evt_cb);
     app_event_unsubscribe(APP_EVT_FONT_READY, prv_pet_evt_cb);
 
     if (NULL != sg_tick) {
