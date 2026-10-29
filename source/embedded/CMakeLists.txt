@@ -60,7 +60,12 @@ set(APP_INC
 # 覆盖 —— 早先这里写的是别人机器上的绝对路径，换机器就炸。
 ########################################
 if(NOT DEFINED SDK_ROOT_DIR OR SDK_ROOT_DIR STREQUAL "")
-    get_filename_component(SDK_ROOT_DIR "${APP_PATH}/../../../../TuyaOpenSDK" ABSOLUTE)
+    if(DEFINED ENV{OPEN_SDK_ROOT} AND NOT "$ENV{OPEN_SDK_ROOT}" STREQUAL "")
+        # 正在被 export.sh 激活的 SDK 就是构建用的 SDK，优先信它
+        get_filename_component(SDK_ROOT_DIR "$ENV{OPEN_SDK_ROOT}" ABSOLUTE)
+    else()
+        get_filename_component(SDK_ROOT_DIR "${APP_PATH}/../../../../TuyaOpenSDK" ABSOLUTE)
+    endif()
 endif()
 
 set(ARMINO_CFG_DIR
